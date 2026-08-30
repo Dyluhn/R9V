@@ -5,6 +5,12 @@ AMD RDNA4. It is not one universal engine: every profile freezes a model and
 quant package, runtime, kernel set, hardware contract, placement policy, and
 qualification record.
 
+The project was originally inspired by [antirez's DS4](https://github.com/antirez/ds4)
+and [Neroued's ninfer](https://github.com/Neroued/ninfer): narrow inference
+engines built around exact model and hardware targets instead of treating every
+checkpoint as a generic workload. R9V is an independent implementation; this
+acknowledges the design inspiration, not shared code provenance.
+
 The catalog currently has two runtime families:
 
 - **Single GPU:** fully custom native R9V engines specialized for an exact
@@ -102,12 +108,14 @@ AI PRO R9700. Values are arithmetic means of three samples after one warmup.
 Both llama.cpp baselines use revision
 `dd1ea524333b1e697489067d7a4c39c60d32beee` and the same model bytes.
 
-| Cell | R9V custom HIP | llama.cpp ROCm | llama.cpp Vulkan |
-|---|---:|---:|---:|
-| PP512 | 1,500.68 | 1,477.87 | 1,204.85 |
-| PP2048 | 2,175.17 | 1,477.57 | 1,182.54 |
-| PP8192 | 2,078.20 | 1,419.88 | 1,126.46 |
-| TG256 | 26.84 | 24.30 | 24.92 |
+| Runtime | PP512 (tok/s) | PP2048 (tok/s) | PP8192 (tok/s) | TG256 (tok/s) | Notes |
+|---|---:|---:|---:|---:|---|
+| R9V custom HIP | **1,500.68** (+1.54%) | **2,175.17** (+47.21%) | **2,078.20** (+46.36%) | **26.84** (+7.70%) | Exact V1/V12 engine |
+| llama.cpp ROCm | 1,477.87 | 1,477.57 | 1,419.88 | 24.30 | Same model bytes |
+| llama.cpp Vulkan | 1,204.85 | 1,182.54 | 1,126.46 | 24.92 | Same model bytes |
+
+Each percentage is the winning result's advantage over the fastest alternative
+backend in that benchmark category.
 
 This is a speed result from a frozen raw-token proof engine, not a quality or
 product-readiness endorsement. R9V V1/V12 records mean KLD `0.006121`, versus
@@ -124,10 +132,13 @@ from public Radiance, public vLLM PR #53899, and the public GGUF plugin. Its
 compatibility overlay only made Qwen4Exp GGUF, MTP, PLE, and UVA loading work;
 it contained no R9V performance kernels or placement code.
 
-| Runtime | PP8192 (tok/s) | TG256 (tok/s) | Status |
+| Runtime | PP8192 (tok/s) | TG256 (tok/s) | Notes |
 |---|---:|---:|---|
-| R9V Qwen V1 | 1,512.01 | 78.11 | Qualified R9V reference |
+| R9V Qwen V1 | **1,512.01** (+3,239.98%) | **78.11** (+197.90%) | Qualified R9V reference |
 | Stock/public Radiance | 45.27 | 26.22 | Public stack, MTP2, CPU-RAM PLE, exact TP2 R4D all-reduce |
+
+Each percentage is the winning result's advantage over the other runtime in
+that benchmark category.
 
 Both PP cells are means of ten forced prefix-cache-miss requests over the same
 Aider corpus slices; both TG cells are means of three 278+256 OpenAI requests

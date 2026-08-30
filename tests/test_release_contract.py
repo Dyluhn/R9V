@@ -173,6 +173,24 @@ def test_completed_radiance_comparison_matches_result_record() -> None:
     assert "**Pending clean benchmark**" not in readme
     assert f'{result["pp8192"]["mean_tok_s"]:.2f}' in readme
     assert f'{result["tg256"]["mean_tok_s"]:.2f}' in readme
+    assert "**1,512.01** (+3,239.98%)" in readme
+    assert "**78.11** (+197.90%)" in readme
+
+
+def test_readme_benchmark_tables_and_inspiration_are_consistent() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "[antirez's DS4](https://github.com/antirez/ds4)" in readme
+    assert "[Neroued's ninfer](https://github.com/Neroued/ninfer)" in readme
+    assert "not shared code provenance" in readme
+    for value in (
+        "**1,500.68** (+1.54%)",
+        "**2,175.17** (+47.21%)",
+        "**2,078.20** (+46.36%)",
+        "**26.84** (+7.70%)",
+    ):
+        assert value in readme
+    assert readme.count("| Runtime | PP") == 2
 
 
 def test_public_radiance_result_record_is_reproducible() -> None:
