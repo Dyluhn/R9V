@@ -10,7 +10,7 @@ source checks repeated against the final submodule revisions.
 
 | Component | Compared range | Intended license boundary |
 |---|---|---|
-| vLLM fork | `d8d2b86cb88c91bbfad7fde09271d20147b8d50c..0c4efde1635edd52624bc60e52655a471b1bdc8a` | Apache-2.0 vLLM work plus R9V-authored changes |
+| vLLM fork | `d8d2b86cb88c91bbfad7fde09271d20147b8d50c..4b20917386dcdfb619ee62ff24c45efeae176fdf` | Apache-2.0 vLLM work plus R9V-authored changes |
 | GGUF plugin fork | `fb973ad784f38b98b054e136bec3414b7cd8494d..566bbc0cd0fc873c425e9a2c4112cb21b30354b1` | Apache-2.0 plugin work; identified ggml portions remain MIT |
 | R9V gfx1201 kernels | `4b825dc642cb6eb9a060e54bf8d69288fbee4904..0a466fb35bf29323f29f55c3800c405141299865` (empty tree to pin) | R9V Apache-2.0 code with identified ggml MIT inputs |
 | Radiance comparison tree | `620a59d9e00df26571f60618291bf2dc6a9174fe` | Comparison only; not redistributed |
@@ -37,9 +37,17 @@ four-line window.
 
 | Frozen source range | Non-comment added runs | Qualifying runs | Windows checked | Exact matches |
 |---|---:|---:|---:|---:|
-| vLLM `d8d2b86cb88c..0c4efde1635e` | 357 | 105 | 1,206 | 0 |
+| vLLM `d8d2b86cb88c..4b20917386dc` | 357 | 105 | 1,206 | 0 |
 | GGUF plugin `fb973ad784f3..566bbc0cd0fc` | 102 | 51 | 5,231 | 0 |
 | gfx1201 kernels, empty tree to `0a466fb35bf2` | 21 | 21 | 4,279 | 0 |
+
+The post-scan vLLM range
+`0c4efde1635edd52624bc60e52655a471b1bdc8a..4b20917386dcdfb619ee62ff24c45efeae176fdf`
+modifies only `docker/Dockerfile.r9v_rocm714` to reorganize build cache keys.
+Its ROCm image digest and framework/runtime version pins are unchanged, and
+the Dockerfile retains its Apache-2.0 SPDX identifier. Dockerfiles are outside
+the source-extension set declared above, so this delta adds no comparison
+window and the vLLM counts remain unchanged.
 
 A full-file scan initially found four matches in the autoregressive
 speculator. `git blame` traced every matching line to pre-existing upstream
@@ -52,8 +60,8 @@ not proof that two implementations share no general ideas or interfaces.
 
 ## Frozen license and identifier checks
 
-Case-insensitive `git grep` checks found no `SELECT24` reference in the root
-tree or any of the three pinned submodule trees.
+Case-insensitive `git grep` checks found no withdrawn Muse quantization recipe
+reference in the root tree or any of the three pinned submodule trees.
 
 The SPDX pass covered added or modified Python, shell, C/C++, CUDA, and HIP
 files in the two fork ranges, plus every tracked source file in the kernel

@@ -15,7 +15,7 @@
     "context_tokens": 131072
   },
   "source": {
-    "vllm_revision": "0c4efde1635edd52624bc60e52655a471b1bdc8a",
+    "vllm_revision": "4b20917386dcdfb619ee62ff24c45efeae176fdf",
     "gguf_plugin_revision": "566bbc0cd0fc873c425e9a2c4112cb21b30354b1",
     "kernel_revision": "0a466fb35bf29323f29f55c3800c405141299865"
   },

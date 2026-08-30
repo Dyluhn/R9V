@@ -12,7 +12,7 @@
       "repository": "https://github.com/Dyluhn/vllm",
       "development_base": "ae0a0511f9c6457f3beb4db0a1eeb11f4c28be75",
       "release_branch": "r9v/qwen38-flash-next",
-      "release_revision": "0c4efde1635edd52624bc60e52655a471b1bdc8a",
+      "release_revision": "4b20917386dcdfb619ee62ff24c45efeae176fdf",
       "license": "Apache-2.0"
     },
     "vllm_gguf_plugin": {
