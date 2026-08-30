@@ -1,0 +1,11 @@
+R9V
+Copyright 2026 Dylan (Dyluhn)
+
+This product includes software developed by contributors to the vLLM project
+and the vLLM GGUF plugin, licensed under the Apache License, Version 2.0.
+
+This product contains source copied or adapted from llama.cpp/ggml. See
+THIRD_PARTY_NOTICES.md for the applicable MIT notice and complete provenance.
+
+Model weights are distributed separately under Qwen Community License 1.0 and
+are not covered by the R9V Apache-2.0 code license.

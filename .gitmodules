@@ -1,0 +1,11 @@
+[submodule "vendor/vllm"]
+	path = vendor/vllm
+	url = https://github.com/Dyluhn/vllm.git
+	branch = r9v/qwen38-flash-next
+[submodule "vendor/vllm-gguf-plugin"]
+	path = vendor/vllm-gguf-plugin
+	url = https://github.com/Dyluhn/vllm-gguf-plugin.git
+	branch = r9v/qwen38-flash-next
+[submodule "kernels/r9v-gfx1201"]
+	path = kernels/r9v-gfx1201
+	url = https://github.com/Dyluhn/r9v-gfx1201-kernels.git
