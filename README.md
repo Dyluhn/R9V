@@ -68,7 +68,8 @@ R9V_MAX_JOBS=8 ./r9v build qwen38
   --model-dir "$MODEL_DIR" \
   --accept-model-license
 
-docker run --rm --entrypoint python3 \
+docker run --rm --network none --entrypoint python3 \
+  --user "$(id -u):$(id -g)" \
   --security-opt label=disable \
   --volume "$PWD:/r9v:ro" \
   --volume "$MODEL_DIR:/models:ro" \

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 from tools.upload_model import build_uploads
@@ -138,3 +139,38 @@ def test_image_build_requires_buildx_and_loads_local_images() -> None:
     assert "TORCH_VERSION=2.11.0" in dockerfile
     assert "TRITON_VERSION=3.6.0" in dockerfile
     assert "FLYDSL_VERSION=0.2.4" in dockerfile
+
+
+def test_vllm_wheel_retains_r9v_provenance_notice() -> None:
+    pyproject = (ROOT / "vendor/vllm/pyproject.toml").read_text(encoding="utf-8")
+    manifest = (ROOT / "vendor/vllm/MANIFEST.in").read_text(encoding="utf-8")
+
+    assert 'license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]' in pyproject
+    assert "include THIRD_PARTY_NOTICES.md" in manifest
+
+
+def test_runtime_source_pins_match_checked_out_submodules() -> None:
+    runtime = json.loads(
+        (ROOT / "runtimes/qwen38-flash-next-gfx1201-v1/runtime.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    lock = json.loads(
+        (ROOT / "release/sources.lock.json").read_text(encoding="utf-8")
+    )
+    expected = {
+        "vllm_revision": ("vendor/vllm", "vllm"),
+        "gguf_plugin_revision": (
+            "vendor/vllm-gguf-plugin",
+            "vllm_gguf_plugin",
+        ),
+        "kernel_revision": ("kernels/r9v-gfx1201", "r9v_gfx1201_kernels"),
+    }
+
+    for runtime_key, (relative_path, lock_key) in expected.items():
+        revision = subprocess.check_output(
+            ["git", "-C", str(ROOT / relative_path), "rev-parse", "HEAD"],
+            text=True,
+        ).strip()
+        assert runtime["source"][runtime_key] == revision
+        assert lock["code"][lock_key]["release_revision"] == revision

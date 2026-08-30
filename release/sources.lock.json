@@ -12,19 +12,19 @@
       "repository": "https://github.com/Dyluhn/vllm",
       "development_base": "ae0a0511f9c6457f3beb4db0a1eeb11f4c28be75",
       "release_branch": "r9v/qwen38-flash-next",
-      "release_revision": "dee01d0dea37b3ccca019ca65112ff0594846aa6",
+      "release_revision": "0c4efde1635edd52624bc60e52655a471b1bdc8a",
       "license": "Apache-2.0"
     },
     "vllm_gguf_plugin": {
       "repository": "https://github.com/Dyluhn/vllm-gguf-plugin",
       "development_base": "fd0f0e8195c813a185a41a6866512ba56a5b84c9",
       "release_branch": "r9v/qwen38-flash-next",
-      "release_revision": "cd301d332c33befce8eb53359a94e8710c745140",
+      "release_revision": "566bbc0cd0fc873c425e9a2c4112cb21b30354b1",
       "license": "Apache-2.0"
     },
     "r9v_gfx1201_kernels": {
       "repository": "https://github.com/Dyluhn/r9v-gfx1201-kernels",
-      "release_revision": "28f40ebb813d5b228fb6bf59672ca23bd8ffb063",
+      "release_revision": "0a466fb35bf29323f29f55c3800c405141299865",
       "license": "Apache-2.0"
     },
     "llama_cpp": {

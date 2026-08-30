@@ -86,11 +86,27 @@ Model artifacts are licensed separately under Qwen Community License 1.0,
 which must remain in the bundle as `LICENSE`. The exact source revisions and
 hashes are in the package descriptor and `release/sources.lock.json`.
 
-Derive the redundant 26.82 GiB PLE payload onto the fast SSD:
+Derive the redundant 26.82 GiB PLE payload onto the fast SSD. Run the
+extractor inside the built image so the host does not need a separate GGUF
+Python environment:
 
 ```bash
-python tools/prepare_ple.py "$MODEL_DIR"/target/*.gguf \
-  --output /fast-ssd/r9v/per_layer_token_embd.iq4_nl.bin
+export MODEL_DIR=/path/to/MODEL_DIR
+export R9V_DATA_DIR=/fast-ssd/r9v
+mkdir -p "$R9V_DATA_DIR"
+
+docker run --rm --network none --entrypoint python3 \
+  --user "$(id -u):$(id -g)" \
+  --security-opt label=disable \
+  --volume "$PWD:/r9v:ro" \
+  --volume "$MODEL_DIR:/models:ro" \
+  --volume "$R9V_DATA_DIR:/r9v-data" \
+  r9v-qwen38-flash-next:latest \
+  /r9v/tools/prepare_ple.py \
+  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
+  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf \
+  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf \
+  --output /r9v-data/per_layer_token_embd.iq4_nl.bin
 ```
 
 ## 4. Launch
@@ -99,9 +115,9 @@ Confirm that ROCm device indices `0,1` map to the intended display/headless
 cards. The reference manifest puts the larger dynamic cache on TP rank 1.
 
 ```bash
-export R9V_PLE_PATH=/fast-ssd/r9v/per_layer_token_embd.iq4_nl.bin
-export R9V_CACHE_DIR=/fast-ssd/r9v/cache
-./r9v run qwen38 --model-dir /path/to/MODEL_DIR
+export R9V_PLE_PATH="$R9V_DATA_DIR/per_layer_token_embd.iq4_nl.bin"
+export R9V_CACHE_DIR="$R9V_DATA_DIR/cache"
+./r9v run qwen38 --model-dir "$MODEL_DIR"
 ```
 
 `./scripts/launch.sh` remains the compatibility entry point. Environment
