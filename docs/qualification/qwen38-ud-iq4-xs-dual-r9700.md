@@ -51,6 +51,41 @@ The verified image ID is
 The prompt-free raw trial data and pinned corpus provenance are published in
 [qwen38-group16-pp-v1.json](results/qwen38-group16-pp-v1.json).
 
+## llama.cpp ROCm target-only comparison
+
+The same IQ4_XS target was also measured with the Qwen4Exp llama.cpp reference
+branch at commit `6c5afc86a`. This comparison intentionally disabled MTP and
+vision. The 28,800,138,240-byte `per_layer_token_embd.weight` PLE table was
+overridden to the CPU with `--load-mode none`, which populated an anonymous
+RAM allocation instead of leaving the table mmap-backed on SSD. The process
+held about 29 GiB of anonymous resident memory during load.
+
+llama.cpp used ROCm 7.14, F16 KV, flash attention, a 2,048-token logical batch,
+a 256-token physical batch, and `layer` splitting over the same two R9700s.
+Three native `llama-bench` repetitions produced:
+
+| Runtime cell | PLE residency | MTP | Mean tok/s | Samples |
+|---|---|---:|---:|---|
+| llama.cpp PP8192 | RAM | 0 | 534.33 | 535.45, 536.26, 531.28 |
+| llama.cpp TG256 | RAM | 0 | 28.44 | 28.40, 28.47, 28.45 |
+| R9V V1 PP8192 | SSD | 2 | 1,512.01 | ten cache-miss requests |
+| R9V V1 TG256 | SSD | 2 | 78.11 | qualified OpenAI reference |
+
+The qualified R9V cells are 2.83x faster for PP8192 and 2.75x faster for
+TG256. This is a requested backend comparison rather than a feature-matched
+ablation: MTP accounts for part of the generation advantage, while giving
+llama.cpp the full PLE table in RAM favors its prefill result. A separate
+three-request OpenAI cache-miss check measured llama.cpp at 489.53 PP and
+28.32 TG with 271 input and 256 output tokens.
+
+The only working llama.cpp dual-ROCm placement was `layer` split. Experimental
+`tensor` split asserted while creating Qwen hybrid memory, `row` split is not
+supported by the ROCm backend, and large server KV reservations exhausted the
+remaining VRAM. The native 8K benchmark succeeded by allocating only the
+context and compute buffers needed for that cell. Raw samples, the complete
+command shape, residency evidence, and failed-mode diagnostics are recorded in
+[qwen38-llamacpp-rocm-no-mtp-ram-ple.json](results/qwen38-llamacpp-rocm-no-mtp-ram-ple.json).
+
 These measurements qualify the public source/runtime on the exact local model
 bundle and reference topology. Public package upload followed by a clean-host
 `fetch → verify → build → run` check is still required before the profile can

@@ -1,0 +1,114 @@
+{
+  "schema": "r9v.qwen38.llamacpp-comparison.v1",
+  "created_at_utc": "2026-08-30T13:31:12Z",
+  "purpose": "Target-only llama.cpp ROCm comparison with the Qwen PLE table resident in system RAM",
+  "source": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "branch": "pr-27742",
+    "commit": "6c5afc86a",
+    "build_number": 10669,
+    "rocm": "7.14",
+    "amdgpu_target": "gfx1201"
+  },
+  "hardware": {
+    "cpu": "AMD Ryzen 5 9600X 6-Core Processor",
+    "gpus": [
+      "AMD Radeon AI PRO R9700 32 GiB",
+      "AMD Radeon AI PRO R9700 32 GiB"
+    ],
+    "system_memory_gib": 128
+  },
+  "model": {
+    "package": "qwen38-flash-next-ud-iq4-xs-mtp-blockfp8-mmproj-q8",
+    "target_only": true,
+    "model_type": "qwen4exp A3B IQ4_XS - 4.25 bpw",
+    "model_bytes": 93671559680,
+    "parameters": 176943899520,
+    "mtp_enabled": false,
+    "vision_enabled": false
+  },
+  "configuration": {
+    "backend": "ROCm",
+    "devices": "ROCm0/ROCm1",
+    "split_mode": "layer",
+    "tensor_split": "1.00/1.00",
+    "main_gpu": 1,
+    "gpu_layers": 99,
+    "flash_attention": true,
+    "kv_type_k": "f16",
+    "kv_type_v": "f16",
+    "batch_size": 2048,
+    "ubatch_size": 256,
+    "load_mode": "none",
+    "tensor_override": "per_layer_token_embd\\.weight=CPU",
+    "ple_bytes": 28800138240,
+    "ple_residency": "anonymous CPU allocation populated at model load; not mmap-backed",
+    "observed_process_rss_kib_during_load": 30296104,
+    "observed_process_rss_anon_kib_during_load": 29322916
+  },
+  "native_benchmark": {
+    "command_shape": "llama-bench -p 8192 -n 256 -r 3 -b 2048 -ub 256 -ngl 99 -sm layer -mg 1 -dev ROCm0/ROCm1 -ts 1/1 -fa on -lm none -ot per_layer_token_embd\\.weight=CPU",
+    "results": [
+      {
+        "cell": "PP8192",
+        "samples_tokens_per_second": [535.445, 536.256, 531.283],
+        "mean_tokens_per_second": 534.327922,
+        "standard_deviation_tokens_per_second": 2.667845,
+        "mean_nanoseconds": 15331664636
+      },
+      {
+        "cell": "TG256",
+        "samples_tokens_per_second": [28.3978, 28.4694, 28.4457],
+        "mean_tokens_per_second": 28.437627,
+        "standard_deviation_tokens_per_second": 0.036469,
+        "mean_nanoseconds": 9002167483
+      }
+    ]
+  },
+  "openai_cache_miss_check": {
+    "prompt_tokens_per_run": 271,
+    "completion_tokens_per_run": 256,
+    "unique_leading_nonce_per_run": true,
+    "pp_samples_tokens_per_second": [
+      461.48943466715986,
+      504.68615998991845,
+      502.42822261865774
+    ],
+    "pp_mean_tokens_per_second": 489.53460575857866,
+    "tg_samples_tokens_per_second": [
+      28.311235944994472,
+      28.325459488205723,
+      28.33744107843193
+    ],
+    "tg_mean_tokens_per_second": 28.324712170544043
+  },
+  "r9v_qualified_reference": {
+    "pp8192_mean_tokens_per_second": 1512.01,
+    "tg256_reference_tokens_per_second": 78.11,
+    "pp_speedup_over_llamacpp": 2.8297412825081225,
+    "tg_speedup_over_llamacpp": 2.746712396366786,
+    "important_difference": "R9V uses MTP2 and SSD-resident PLE; this llama.cpp comparison intentionally disables MTP and keeps PLE in RAM."
+  },
+  "unsupported_or_failed_modes": [
+    {
+      "mode": "tensor split",
+      "result": "failed during hybrid recurrent/QSA memory construction",
+      "error": "GGML_ASSERT(ne_sum == tensor->ne[ret.axis])"
+    },
+    {
+      "mode": "row split",
+      "result": "unsupported by the ROCm backend",
+      "error": "device ROCm0 does not support split buffers"
+    },
+    {
+      "mode": "layer split server with 65536 context",
+      "result": "failed during F16 KV allocation",
+      "error": "allocating 288.00 MiB on device 0: out of memory"
+    },
+    {
+      "mode": "layer split server with 36864 context and an 8K request",
+      "result": "model initialized, then failed to reserve the large-prompt compute buffer",
+      "error": "allocating 183.86 MiB on device 0: out of memory"
+    }
+  ]
+}

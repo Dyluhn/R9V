@@ -171,6 +171,13 @@ is now the local `latest` tag.
 The [raw PP trials](docs/qualification/results/qwen38-group16-pp-v1.json) are
 included without prompt contents and pin the benchmark corpus revision/hash.
 
+A target-only llama.cpp ROCm comparison at commit `6c5afc86a`, with MTP
+disabled and the full 28.8 GB PLE table resident in RAM, measured 534.33 PP
+tok/s at 8K and 28.44 TG tok/s over 256 generated tokens. The corresponding
+qualified R9V cells are 2.83x and 2.75x faster. See the
+[Qwen qualification](docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md) and
+[raw llama.cpp samples](docs/qualification/results/qwen38-llamacpp-rocm-no-mtp-ram-ple.json).
+
 ## Repository layout
 
 Human navigation is topology-first:
