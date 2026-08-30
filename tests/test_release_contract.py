@@ -128,3 +128,4 @@ def test_image_build_requires_buildx_and_loads_local_images() -> None:
 
     assert "docker buildx version" in script
     assert script.count("docker buildx build --load") == 2
+    assert 'R9V_VLLM_VERSION="$vllm_version"' in script

@@ -6,6 +6,9 @@ repo_root=$(cd -- "$script_dir/.." && pwd)
 base_image=${R9V_BASE_IMAGE:-r9v-vllm-qwen38-base:latest}
 runtime_image=${R9V_IMAGE:-r9v-qwen38-flash-next:latest}
 max_jobs=${R9V_MAX_JOBS:-8}
+vllm_tag=$(git -C "$repo_root/vendor/vllm" describe --tags --abbrev=0)
+vllm_revision=$(git -C "$repo_root/vendor/vllm" rev-parse --short=12 HEAD)
+vllm_version=${R9V_VLLM_VERSION:-"${vllm_tag#v}+r9v.g${vllm_revision}"}
 
 if ! docker buildx version >/dev/null 2>&1; then
     printf '%s\n' \
@@ -29,6 +32,7 @@ docker buildx build --load \
     --file "$repo_root/vendor/vllm/docker/Dockerfile.rocm" \
     --target vllm-openai \
     --build-arg REMOTE_VLLM=0 \
+    --build-arg R9V_VLLM_VERSION="$vllm_version" \
     --build-arg ARG_PYTORCH_ROCM_ARCH=gfx1201 \
     --build-arg max_jobs="$max_jobs" \
     --tag "$base_image" \

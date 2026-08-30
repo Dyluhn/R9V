@@ -10,7 +10,7 @@ that must be repeated against the final committed revisions.
 
 | Component | Compared range | Intended license boundary |
 |---|---|---|
-| vLLM fork | `d8d2b86cb8..138c7e3c6951e0fe3bca4678dfba11d07895ca86` | Apache-2.0 vLLM work plus R9V-authored changes |
+| vLLM fork | `d8d2b86cb8..dee01d0dea37b3ccca019ca65112ff0594846aa6` | Apache-2.0 vLLM work plus R9V-authored changes |
 | GGUF plugin fork | `fb973ad..cd301d332c33befce8eb53359a94e8710c745140` | Apache-2.0 plugin work; identified ggml portions remain MIT |
 | R9V gfx1201 kernels | `28f40ebb813d5b228fb6bf59672ca23bd8ffb063` | R9V Apache-2.0 code with identified ggml MIT inputs |
 | Radiance comparison tree | `620a59d` | Comparison only; not redistributed |
