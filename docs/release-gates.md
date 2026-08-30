@@ -12,11 +12,12 @@ The following items block the next public tag:
   the final committed revisions and retain the result with the release.
 - Preserve the exact llama.cpp `b2899` MIT notice in the wrapper, plugin fork,
   kernel source package, and binaries that inline those primitives. The
-  working tree now does this; the submodule changes still need commits.
+  pinned submodule revisions now do this and must remain part of the resolved
+  source lock.
 - Add SPDX/change provenance to remaining R9V-generated or modified source
   files, including generated HIP code where the generator allows it.
-- Create resolved, immutable release locks and test a recursive clone before
-  tagging.
+- Retain the resolved immutable source locks and repeat the recursive-clone
+  build check before tagging.
 
 ## Qwen profile
 

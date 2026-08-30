@@ -18,28 +18,69 @@ def _parse_args() -> argparse.Namespace:
     prompt = parser.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
     prompt.add_argument("--prompt-file", type=Path)
+    prompt.add_argument(
+        "--repeat-count",
+        type=int,
+        help="Build a deterministic long-context corpus in memory.",
+    )
+    parser.add_argument(
+        "--repeat-prefix",
+        default="R9V long-context qualification corpus: ",
+    )
+    parser.add_argument(
+        "--repeat-text",
+        default=(
+            "Photosynthesis converts light into chemical energy while plants "
+            "exchange carbon with the atmosphere. "
+        ),
+    )
+    parser.add_argument(
+        "--repeat-suffix",
+        default="Continue with a technical numbered analysis.",
+    )
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--timeout", type=float, default=1800.0)
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Pass enable_thinking=false through the model chat template.",
+    )
     return parser.parse_args()
 
 
 def _read_prompt(args: argparse.Namespace) -> str:
     if args.prompt is not None:
         return args.prompt
+    if getattr(args, "repeat_count", None) is not None:
+        if args.repeat_count < 1:
+            raise ValueError("--repeat-count must be positive")
+        return (
+            args.repeat_prefix
+            + args.repeat_text * args.repeat_count
+            + args.repeat_suffix
+        )
     return args.prompt_file.read_text(encoding="utf-8")
 
 
 def _payload(args: argparse.Namespace, prompt: str) -> bytes:
-    return json.dumps(
-        {
-            "model": args.model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
-            "max_tokens": args.max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-    ).encode("utf-8")
+    payload = {
+        "model": args.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": args.max_tokens,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    if getattr(args, "disable_thinking", False):
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+    return json.dumps(payload).encode("utf-8")
+
+
+def _delta_text(delta: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return visible and reasoning text across OpenAI-compatible variants."""
+    return delta.get("content"), (
+        delta.get("reasoning") or delta.get("reasoning_content")
+    )
 
 
 def _stream(args: argparse.Namespace, prompt: str) -> dict[str, Any]:
@@ -72,8 +113,7 @@ def _stream(args: argparse.Namespace, prompt: str) -> dict[str, Any]:
                 if choice.get("finish_reason") is not None:
                     finish_reason = choice["finish_reason"]
                 delta = choice.get("delta", {})
-                content = delta.get("content")
-                reasoning = delta.get("reasoning_content")
+                content, reasoning = _delta_text(delta)
                 if content or reasoning:
                     now = time.perf_counter()
                     first_content = first_content or now

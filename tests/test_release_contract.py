@@ -110,7 +110,7 @@ def test_root_readme_does_not_overstate_release_readiness() -> None:
     assert "fully custom native R9V engines" in readme
     assert "adapted vLLM deployment architecture informed by" in readme
     assert "package upload is not public yet" in readme
-    assert "clean-checkout release benchmark" in readme
+    assert "clean-host package installation test" in readme
     assert "./r9v list --by-topology" in readme
 
 
@@ -139,6 +139,25 @@ def test_image_build_requires_buildx_and_loads_local_images() -> None:
     assert "TORCH_VERSION=2.11.0" in dockerfile
     assert "TRITON_VERSION=3.6.0" in dockerfile
     assert "FLYDSL_VERSION=0.2.4" in dockerfile
+
+
+def test_qwen_launch_pins_measured_rocm_dispatch_policy() -> None:
+    launcher = (ROOT / "scripts/launch.sh").read_text(encoding="utf-8")
+
+    assert "--env NCCL_ALGO=Ring" in launcher
+    assert "--env NCCL_PROTO=Simple" in launcher
+    assert "--env VLLM_ROCM_USE_AITER=1" in launcher
+    assert "--env VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1" in launcher
+    for subsystem in (
+        "LINEAR",
+        "MHA",
+        "MLA",
+        "MOE",
+        "RMSNORM",
+        "FP8BMM",
+        "FP4BMM",
+    ):
+        assert f"--env VLLM_ROCM_USE_AITER_{subsystem}=0" in launcher
 
 
 def test_vllm_wheel_retains_r9v_provenance_notice() -> None:

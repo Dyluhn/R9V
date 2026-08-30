@@ -149,6 +149,8 @@ curl -fsS http://127.0.0.1:8004/v1/models
 Before this page becomes a claim of one-command public installation, R9V must:
 
 1. publish the package at the immutable descriptor revision;
-2. commit and pin the licensing/provenance changes in every submodule;
-3. perform a recursive-clone build on a clean host; and
-4. run the final Qwen correctness, vision, context, PP, and TG benchmark last.
+2. perform `fetch → verify → build → run` from a recursive clone on a clean
+   host after that package is public.
+
+The pinned source graph, local source image build, OpenAI text/vision smoke,
+and public-runtime PP/TG benchmark have passed on the reference machine.

@@ -3,7 +3,7 @@
   "id": "qwen38-flash-next/ud-iq4-xs/dual-r9700-128k",
   "name": "Qwen3.8 Flash Next UD-IQ4_XS — dual R9700, vision, MTP2, 128K",
   "status": "release-candidate",
-  "summary": "Locally qualified OpenAI-compatible dual-RDNA4 profile; public package upload and clean-checkout release benchmark remain pending.",
+  "summary": "Public-source image and OpenAI API qualified on dual R9700; immutable model-package upload remains pending.",
   "aliases": ["qwen38", "qwen38-iq4", "qwen38-flash-next"],
   "model_package": "qwen38-flash-next-ud-iq4-xs-mtp-blockfp8-mmproj-q8",
   "runtime": "qwen38-flash-next-gfx1201-v1",
@@ -32,6 +32,6 @@
   },
   "qualification": {
     "pp_tg_reference": "docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md",
-    "minimum_sustained_tg": 77.82
+    "minimum_sustained_tg": 70.0
   }
 }

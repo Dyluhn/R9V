@@ -22,9 +22,11 @@ The project currently has two distinct runtime families:
 | Single R9700 | `muse-glimmer-30b/v1/single-r9700` | Custom native HIP engine | Experimental canonical V1 | Frozen raw-token proof; curated user runtime pending |
 | Dual R9700 | `qwen38-flash-next/ud-iq4-xs/dual-r9700-128k` | Adapted vLLM stack; Radiance-informed workflow | Release candidate | OpenAI-compatible text, tools, and vision |
 
-The Qwen runtime works end-to-end on the reference machine, but its public
-model revision and clean-checkout release benchmark are still pending. The
-Muse has frozen model and benchmark identities, but the curated
+The Qwen runtime now builds from the public source graph and works end-to-end
+on the reference machine, including the OpenAI text/vision API and sustained
+70+ TG through the measured 32K context point. Its public model revision and
+clean-host package installation test are still pending. The Muse has frozen
+model and benchmark identities, but the curated
 source-complete user runtime has not yet been published. Those distinctions
 are deliberate: R9V does not label a local proof as a downloadable release.
 
@@ -131,12 +133,20 @@ and [model card](packages/models/muse-glimmer-30b/v1-v12/README.md).
 
 ### Qwen3.8 Flash Next
 
-The final release benchmark will be run last, after the model revision,
-submodule commits, and launch contract are frozen. Development qualification
-on the reference dual-R9700 machine measured 77.82–79.27 TG from 8K through
-120K context, but those numbers are not being presented as the public release
-result. The provisional record is retained in
-[the development qualification](docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md).
+The public-source ROCm 7.14 image was measured through its streaming OpenAI
+chat endpoint with MTP2, vision support, SSD PLE, 128K cache allocation, rank-1
+LRU16 expert caching, and every R4D path disabled.
+
+| Prompt + completion | PP | TG |
+|---:|---:|---:|
+| 278 + 256, three runs | 61.41 mean | 78.11 mean |
+| 8,206 + 256 | 55.75 | 76.47 |
+| 32,779 + 256 | 57.01 | 72.85 |
+
+These are the public runtime result on the reference dual-R9700 machine, not
+the older development-image figures. See the exact methodology, dispatch
+policy, and remaining package gate in
+[the Qwen qualification](docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md).
 
 ## Repository layout
 
