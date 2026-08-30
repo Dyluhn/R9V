@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # R9V modification: runtime overlay for the licensed vLLM and GGUF-plugin forks.
 ARG BASE_IMAGE=r9v-vllm-qwen38-base:latest
 FROM ${BASE_IMAGE}
