@@ -1,0 +1,13 @@
+.git
+**/.git
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/build
+**/build-*
+.build
+.cache
+vendor/vllm
+*.gguf
+*.safetensors
+*.bin
