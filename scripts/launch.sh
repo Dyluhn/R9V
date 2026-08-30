@@ -16,10 +16,53 @@ model_dir=${R9V_MODEL_DIR:?Set R9V_MODEL_DIR to the packaged model directory}
 ple_path=${R9V_PLE_PATH:?Set R9V_PLE_PATH to the extracted PLE payload}
 cache_dir=${R9V_CACHE_DIR:-$repo_root/.cache}
 visible_devices=${R9V_VISIBLE_DEVICES:-0,1}
+: "${R9V_TIERED_PREFILL_GROUP_SIZE:=0}"
+: "${R9V_DEV_FUSED_MOE_PY:=}"
+: "${R9V_DEV_LINEAR_PY:=}"
+: "${R9V_DEV_TIERED_IQ_MOE_SO:=}"
+
+[[ $R9V_TIERED_PREFILL_GROUP_SIZE == 0 ||
+   $R9V_TIERED_PREFILL_GROUP_SIZE == 4 ||
+   $R9V_TIERED_PREFILL_GROUP_SIZE == 8 ||
+   $R9V_TIERED_PREFILL_GROUP_SIZE == 16 ]] || {
+    printf 'R9V_TIERED_PREFILL_GROUP_SIZE must be 0, 4, 8, or 16\n' >&2
+    exit 2
+}
+
+dev_overlay_args=()
+if [[ -n $R9V_DEV_FUSED_MOE_PY ]]; then
+    [[ -f $R9V_DEV_FUSED_MOE_PY ]] || {
+        printf 'Development fused_moe.py missing: %s\n' "$R9V_DEV_FUSED_MOE_PY" >&2
+        exit 1
+    }
+    dev_overlay_args+=(
+        --volume "$R9V_DEV_FUSED_MOE_PY:/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/fused_moe.py:ro"
+    )
+fi
+if [[ -n $R9V_DEV_LINEAR_PY ]]; then
+    [[ -f $R9V_DEV_LINEAR_PY ]] || {
+        printf 'Development linear.py missing: %s\n' "$R9V_DEV_LINEAR_PY" >&2
+        exit 1
+    }
+    dev_overlay_args+=(
+        --volume "$R9V_DEV_LINEAR_PY:/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/linear.py:ro"
+    )
+fi
+if [[ -n $R9V_DEV_TIERED_IQ_MOE_SO ]]; then
+    [[ -f $R9V_DEV_TIERED_IQ_MOE_SO ]] || {
+        printf 'Development tiered MoE SO missing: %s\n' "$R9V_DEV_TIERED_IQ_MOE_SO" >&2
+        exit 1
+    }
+    dev_overlay_args+=(
+        --volume "$R9V_DEV_TIERED_IQ_MOE_SO:/opt/r9v/kernels/qwen38_tiered_iq_moe_hip.so:ro"
+    )
+fi
 
 for value in \
     R9V_MTP_LOCAL_ARGMAX \
     R9V_ENABLE_AUTO_TOOL_CHOICE \
+    R9V_PLE_MMAP_READAHEAD \
+    R9V_PLE_WORKER_TIMING \
     R9V_R4D \
     R9V_R4D_AR \
     R9V_R4D_GDN \
@@ -29,6 +72,33 @@ for value in \
         exit 2
     }
 done
+
+profiler_mount_args=()
+profiler_args=()
+profiler_scopes=0
+if [[ -n $R9V_PROFILER_DIR ]]; then
+    for value in \
+        R9V_PROFILER_WAIT_ITERATIONS \
+        R9V_PROFILER_WARMUP_ITERATIONS \
+        R9V_PROFILER_ACTIVE_ITERATIONS \
+        R9V_PROFILER_MAX_ITERATIONS; do
+        [[ ${!value} =~ ^[0-9]+$ ]] || {
+            printf '%s must be a non-negative integer\n' "$value" >&2
+            exit 2
+        }
+    done
+    ((R9V_PROFILER_ACTIVE_ITERATIONS > 0)) || {
+        printf 'R9V_PROFILER_ACTIVE_ITERATIONS must be positive\n' >&2
+        exit 2
+    }
+    mkdir -p -- "$R9V_PROFILER_DIR"
+    profiler_mount_args=(--volume "$R9V_PROFILER_DIR:/profiles")
+    profiler_args=(
+        --profiler-config
+        "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"/profiles\",\"torch_profiler_with_stack\":false,\"torch_profiler_record_shapes\":false,\"torch_profiler_with_memory\":false,\"ignore_frontend\":true,\"wait_iterations\":$R9V_PROFILER_WAIT_ITERATIONS,\"warmup_iterations\":$R9V_PROFILER_WARMUP_ITERATIONS,\"active_iterations\":$R9V_PROFILER_ACTIVE_ITERATIONS,\"max_iterations\":$R9V_PROFILER_MAX_ITERATIONS}"
+    )
+    profiler_scopes=1
+fi
 for value in R9V_R4D R9V_R4D_AR R9V_R4D_GDN R9V_R4D_AR_QUANT; do
     [[ ${!value} == 0 ]] || {
         printf '%s is unsupported: every R4D path is hard-disabled\n' "$value" >&2
@@ -84,6 +154,8 @@ docker run --detach \
     --volume "$model_dir:/models:ro" \
     --volume "$ple_path:/ple/per_layer_token_embd.iq4_nl.bin:ro" \
     --volume "$cache_dir:/cache" \
+    "${dev_overlay_args[@]}" \
+    "${profiler_mount_args[@]}" \
     --env HIP_VISIBLE_DEVICES="$visible_devices" \
     --env ROCR_VISIBLE_DEVICES="$visible_devices" \
     --env VLLM_CACHE_ROOT=/cache/vllm \
@@ -98,6 +170,7 @@ docker run --detach \
     --env RADIANCE_USE_R4D_AR_QUANT=0 \
     --env QWEN38_USE_TIERED_IQ_MOE_HIP=1 \
     --env QWEN38_TIERED_IQ_MOE_VARIANT="$R9V_TIERED_IQ_MOE_VARIANT" \
+    --env QWEN38_TIERED_PREFILL_GROUP_SIZE="$R9V_TIERED_PREFILL_GROUP_SIZE" \
     --env QWEN38_TIERED_EXPERT_CACHE_SLOTS="$R9V_TIERED_EXPERT_CACHE_SLOTS" \
     --env QWEN38_TIERED_EXPERT_CACHE_RANKS="$R9V_TIERED_EXPERT_CACHE_RANKS" \
     --env QWEN38_TIERED_EXPERT_CACHE_POLICY="$R9V_TIERED_EXPERT_CACHE_POLICY" \
@@ -137,7 +210,11 @@ docker run --detach \
     --env VLLM_PLE_MMAP_HOST_REGISTER_EXPECTED_BYTES=28800138240 \
     --env VLLM_PLE_BOUNDED_BYTES=4294967296 \
     --env VLLM_PLE_BOUNDED_CHUNK_BYTES=4096 \
+    --env VLLM_PLE_MMAP_READAHEAD="$R9V_PLE_MMAP_READAHEAD" \
     --env VLLM_PLE_RSS_LOG_ROWS="$R9V_PLE_RSS_LOG_ROWS" \
+    --env VLLM_PLE_WORKER_TIMING="$R9V_PLE_WORKER_TIMING" \
+    --env VLLM_CUSTOM_SCOPES_FOR_PROFILING="$profiler_scopes" \
+    --env QWEN38_PROFILE_DENSE_SHAPES="$profiler_scopes" \
     --env GGUF_PLE_MMAP_PATH=/ple/per_layer_token_embd.iq4_nl.bin \
     --env GGUF_PLE_MMAP_TRIM_ROWS="$R9V_PLE_MMAP_TRIM_ROWS" \
     "$image" \
@@ -165,6 +242,7 @@ docker run --detach \
     "${auto_tool_args[@]}" \
     --tool-call-parser "$R9V_TOOL_CALL_PARSER" \
     --reasoning-parser "$R9V_REASONING_PARSER" \
+    "${profiler_args[@]}" \
     --trust-remote-code \
     --host 0.0.0.0 \
     --port 8000

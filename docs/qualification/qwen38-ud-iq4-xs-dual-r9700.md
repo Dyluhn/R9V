@@ -27,6 +27,28 @@ The same server passed text generation and a one-image OpenAI request; the
 image response identified the fixture as a water lily. `/v1/models` reported
 `max_model_len=131072`.
 
+## Grouped-prefill V1 qualification
+
+The V1 profile now selects the bit-exact group-16 GGUF MoE prefill kernel.
+Distinct prompt slices included a unique nonce, forcing zero prefix-cache
+hits. The unprofiled OpenAI completions endpoint measured:
+
+| Target prompt | Runs | Mean PP | Median PP | Range |
+|---:|---:|---:|---:|---:|
+| 8K | 10 | 1,512.01 | 1,510.20 | 1,286.32–1,688.07 |
+| 32K | 3 | 1,401.83 | 1,365.25 | 1,358.90–1,481.34 |
+| 64K | 2 | 1,357.02 | 1,357.02 | 1,351.96–1,362.07 |
+
+Nine 8K requests contained exactly 8,192 tokens and the final corpus slice
+contained 8,136. All 32K and 64K requests matched their target exactly. The
+server remained healthy throughout and was stopped cleanly. A clean image was
+then rebuilt from the same source tree and launched without Python or kernel
+development overlays. Three additional 8K cache-miss requests measured
+1,277.22, 1,484.00, and 1,566.80 PP tok/s (1,442.67 mean; 1,484.00 median).
+The server reported a 0.0% prefix-cache hit rate and was again stopped cleanly.
+The verified image ID is
+`sha256:09411bb3e4782eff8c45fd90be620a8d4f808bfb55b8210045c106eef8b3e23a`.
+
 These measurements qualify the public source/runtime on the exact local model
 bundle and reference topology. Public package upload followed by a clean-host
 `fetch → verify → build → run` check is still required before the profile can

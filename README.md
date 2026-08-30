@@ -88,6 +88,11 @@ export R9V_CACHE_DIR="$R9V_DATA_DIR/cache"
 ./r9v run qwen38 --model-dir "$MODEL_DIR"
 ```
 
+After the full base image has been built once, kernel/plugin development can
+skip the PyTorch/vLLM base rebuild with
+`R9V_RUNTIME_ONLY=1 ./scripts/build-image.sh`. Full release builds keep the
+default (`R9V_RUNTIME_ONLY=0`) so the pinned source graph is rebuilt.
+
 The server listens at `http://127.0.0.1:8004/v1`. See
 [installation.md](docs/installation.md) for package layout, device ordering,
 and health checks, and [pi.md](docs/pi.md) for Pi coding-agent and per-call
@@ -147,6 +152,22 @@ These are the public runtime result on the reference dual-R9700 machine, not
 the older development-image figures. See the exact methodology, dispatch
 policy, and remaining package gate in
 [the Qwen qualification](docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md).
+
+The bit-exact group-16 MoE prefill path selected for V1 was also subjected to
+a repeated prefix-cache-miss soak through the OpenAI completions endpoint:
+
+| Target prompt | Runs | Mean PP | Median PP | Range |
+|---:|---:|---:|---:|---:|
+| 8K | 10 | 1,512.01 | 1,510.20 | 1,286.32–1,688.07 |
+| 32K | 3 | 1,401.83 | 1,365.25 | 1,358.90–1,481.34 |
+| 64K | 2 | 1,357.02 | 1,357.02 | 1,351.96–1,362.07 |
+
+This is the current V1 PP result. The grouped kernel passed real GGUF parity,
+full model startup, graph warmup, and sustained serving. Dense-prefill tuning
+remains experimental and is not required for V1. A subsequent clean image
+rebuild with no development overlays reproduced an 8K median of 1,484.00 PP
+tok/s across three cache-miss prompts (1,442.67 mean), and that verified image
+is now the local `latest` tag.
 
 ## Repository layout
 

@@ -11,8 +11,8 @@ source checks repeated against the final submodule revisions.
 | Component | Compared range | Intended license boundary |
 |---|---|---|
 | vLLM fork | `d8d2b86cb88c91bbfad7fde09271d20147b8d50c..4b20917386dcdfb619ee62ff24c45efeae176fdf` | Apache-2.0 vLLM work plus R9V-authored changes |
-| GGUF plugin fork | `fb973ad784f38b98b054e136bec3414b7cd8494d..566bbc0cd0fc873c425e9a2c4112cb21b30354b1` | Apache-2.0 plugin work; identified ggml portions remain MIT |
-| R9V gfx1201 kernels | `4b825dc642cb6eb9a060e54bf8d69288fbee4904..0a466fb35bf29323f29f55c3800c405141299865` (empty tree to pin) | R9V Apache-2.0 code with identified ggml MIT inputs |
+| GGUF plugin fork | `fb973ad784f38b98b054e136bec3414b7cd8494d..7d270e2a8460acf2939eacebadf7402b957ee5ec` | Apache-2.0 plugin work; identified ggml portions remain MIT |
+| R9V gfx1201 kernels | `4b825dc642cb6eb9a060e54bf8d69288fbee4904..7905d9e0a3323411ef5d6dfb2f356061a9a491e3` (empty tree to pin) | R9V Apache-2.0 code with identified ggml MIT inputs |
 | Radiance comparison tree | `620a59d9e00df26571f60618291bf2dc6a9174fe` | Comparison only; not redistributed |
 
 The vLLM ancestry includes the official Qwen model and PLE commits before the

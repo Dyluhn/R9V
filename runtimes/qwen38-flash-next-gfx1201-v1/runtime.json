@@ -16,8 +16,8 @@
   },
   "source": {
     "vllm_revision": "4b20917386dcdfb619ee62ff24c45efeae176fdf",
-    "gguf_plugin_revision": "566bbc0cd0fc873c425e9a2c4112cb21b30354b1",
-    "kernel_revision": "0a466fb35bf29323f29f55c3800c405141299865"
+    "gguf_plugin_revision": "7d270e2a8460acf2939eacebadf7402b957ee5ec",
+    "kernel_revision": "7905d9e0a3323411ef5d6dfb2f356061a9a491e3"
   },
   "safety": {
     "r4d": "hard-disabled",
