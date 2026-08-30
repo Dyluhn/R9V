@@ -48,6 +48,8 @@ development overlays. Three additional 8K cache-miss requests measured
 The server reported a 0.0% prefix-cache hit rate and was again stopped cleanly.
 The verified image ID is
 `sha256:09411bb3e4782eff8c45fd90be620a8d4f808bfb55b8210045c106eef8b3e23a`.
+The prompt-free raw trial data and pinned corpus provenance are published in
+[qwen38-group16-pp-v1.json](results/qwen38-group16-pp-v1.json).
 
 These measurements qualify the public source/runtime on the exact local model
 bundle and reference topology. Public package upload followed by a clean-host

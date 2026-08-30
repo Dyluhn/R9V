@@ -168,6 +168,8 @@ remains experimental and is not required for V1. A subsequent clean image
 rebuild with no development overlays reproduced an 8K median of 1,484.00 PP
 tok/s across three cache-miss prompts (1,442.67 mean), and that verified image
 is now the local `latest` tag.
+The [raw PP trials](docs/qualification/results/qwen38-group16-pp-v1.json) are
+included without prompt contents and pin the benchmark corpus revision/hash.
 
 ## Repository layout
 
