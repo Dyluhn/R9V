@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dyluhn/R9V/schemas/runtime-v1.schema.json",
+  "title": "R9V runtime capability descriptor",
+  "type": "object",
+  "required": ["schema", "id", "engine", "targets", "capabilities"],
+  "properties": {
+    "schema": {"const": "r9v.runtime.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "engine": {"type": "string", "minLength": 1},
+    "targets": {"type": "array", "items": {"type": "string"}},
+    "capabilities": {"type": "object"},
+    "source": {"type": "object"},
+    "safety": {"type": "object"}
+  }
+}

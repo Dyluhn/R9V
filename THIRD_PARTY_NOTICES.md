@@ -27,7 +27,7 @@ Project: https://github.com/ggml-org/llama.cpp
 
 MIT License
 
-Copyright (c) 2023-2026 The ggml authors
+Copyright (c) 2023-2024 The ggml authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -71,6 +71,23 @@ Project: https://huggingface.co/ggml-org/Qwen3.8-Flash-Next-GGUF
 
 The exact source revision and projector hash are pinned in `release/sources.lock.json`.
 
-## Radiance exclusion
+## Radiance development lineage
 
-The inspected `StillDeadcode/vllm-radiance` upstream tree does not contain an explicit license. Radiance source is not included in this repository. R9V release tooling is independently implemented against the licensed vLLM and vLLM GGUF-plugin bases.
+The inspected `StillDeadcode/vllm-radiance` upstream tree does not contain an
+explicit license. The dual-card profile evolved from that deployment and
+profiling workflow, but the legacy launcher and R4D kernels are not
+distributed. A previously copied multimodal speculative-layout snippet has
+been replaced by an R9V implementation specified and tested from the runtime
+invariant: the multimodal marker mask must select the same compacted rows as
+the draft-token buffer. Compatibility environment-variable names do not
+import or relicense Radiance source.
+
+The public tag remains gated on committing that replacement and completing a
+file-level provenance review of the fork deltas.
+
+## Muse Glimmer / R9V V1
+
+Muse Glimmer model artifacts are published by Meta under Apache-2.0. R9V V1
+(internal V12 lineage) is a modified quantization derived immediately from
+Unsloth's pinned Q8_0 GGUF. Meta, Unsloth, and llama.cpp/ggml are attributed
+in `MODEL_LICENSES/Muse-Glimmer-30B.md` and the package source lock.

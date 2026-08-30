@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dyluhn/R9V/schemas/model-package-v1.schema.json",
+  "title": "R9V immutable model package",
+  "type": "object",
+  "required": ["schema", "id", "model", "quant", "license", "artifacts"],
+  "properties": {
+    "schema": {"const": "r9v.model-package.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "quant": {"type": "string", "minLength": 1},
+    "license": {"type": "string", "minLength": 1},
+    "distribution": {"type": "object"},
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["role", "path", "bytes", "sha256"],
+        "properties": {
+          "role": {"type": "string"},
+          "path": {"type": "string"},
+          "bytes": {"type": "integer", "minimum": 0},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "source": {"type": "object"},
+          "required": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

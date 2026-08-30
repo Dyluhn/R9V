@@ -1,0 +1,23 @@
+{
+  "schema": "r9v.hardware.v1",
+  "id": "single-r9700-32gb",
+  "name": "Single Radeon AI PRO R9700 32 GiB",
+  "architecture": "gfx1201",
+  "gpu_count": 1,
+  "vram_bytes_per_gpu": 34384920576,
+  "host_ram_min_bytes": 68719476736,
+  "reference_topology": [
+    {"rank": 0, "role": "headless preferred", "pcie": "Gen4 x4 or faster"}
+  ],
+  "constraints": {
+    "exact_gpu_architecture_required": true,
+    "preferred_free_headroom_bytes": 3221225472,
+    "pcie_link_is_not_decode_critical_when_weights_are_resident": true
+  },
+  "portable_knobs": [
+    "GPU BDF or UUID",
+    "context capacity",
+    "KV cache format",
+    "vision and DFlash residency"
+  ]
+}

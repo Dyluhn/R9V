@@ -1,0 +1,37 @@
+{
+  "schema": "r9v.model-sources.v1",
+  "package": "muse-glimmer-30b-r9v-v1-v12",
+  "base_model": {
+    "repository": "meta-models/Muse-Glimmer-30B",
+    "revision_prefix": "a4e59da",
+    "license": "Apache-2.0",
+    "note": "Resolve and record the full base-model commit before publication."
+  },
+  "immediate_quant_source": {
+    "repository": "unsloth/Muse-Glimmer-30B-GGUF",
+    "revision": "faa5b025c584459c13febfa5c59883516710ae39",
+    "path": "Muse-Glimmer-30B-Q8_0.gguf",
+    "bytes": 29612957984,
+    "sha256": "f2c087d694ca8242a4a436076df7c041703ab051ac4b72bb1bfe2698299b0e86"
+  },
+  "imatrix": {
+    "sha256": "c85cbe92941ed716926de617227e76e96f085abbe33cfd886d3449205a95587d"
+  },
+  "quantizer": {
+    "project": "ggml-org/llama.cpp",
+    "revision": "dd1ea524333b1e697489067d7a4c39c60d32beee",
+    "license": "MIT"
+  },
+  "recipe": {
+    "id": "muse-v12-q8only-promote-7pairs-v1",
+    "recipe_json_sha256": "ba4731623a46b35d7c129efceb19650c882b016fdd6d7a6ccd70e0d80d3600b8",
+    "tensor_types_sha256": "42496cbbd0da31bdcab6de5763b3581d9a216f00f5da10213bc199ff5eea34d9",
+    "canonical_recipe_sha256": "d854721831f9b05184c47b01663edc21929da5262d3954208df1e98dc8f3f801",
+    "promoted_gate_up_layers": [11, 15, 19, 23, 27, 31, 35]
+  },
+  "output": {
+    "path": "target/Muse-Glimmer-30B-R9V-V1.gguf",
+    "bytes": 24554611392,
+    "sha256": "f4870ff4ac316c1dbf50a55501f4c00e16070336fc40e119ff1167e43382856a"
+  }
+}

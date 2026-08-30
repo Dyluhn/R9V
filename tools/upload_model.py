@@ -31,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-root", type=Path, required=True)
     parser.add_argument("--expert-manifest", type=Path, required=True)
     parser.add_argument(
+        "--package",
+        type=Path,
+        help="model-package descriptor; defaults to the Qwen release package",
+    )
+    parser.add_argument(
         "--repo-id", default="Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS"
     )
     parser.add_argument("--private", action="store_true")
@@ -47,88 +52,75 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def build_uploads(root: Path, manifest: Path, release_root: Path) -> list[Upload]:
+def _load_package(path: Path) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema") != "r9v.model-package.v1":
+        raise ValueError(f"{path}: expected r9v.model-package.v1")
+    return payload
+
+
+def _artifact_source(
+    root: Path, release_root: Path, manifest: Path, destination: str
+) -> Path:
     target = root / "unsloth-iq4-xs-gguf" / "UD-IQ4_XS"
     metadata = root / "official-metadata"
     mtp = root / "mtp-fp8-block-minimal"
-    vision = root / "vision-q8" / "mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
-    target_specs = [
-        (
-            "Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf",
-            10_946_624,
-            "5ce89370720f8bf90890f439361282104c1aa1482d4013bb9a50923e758e71a4",
-        ),
-        (
-            "Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf",
-            49_835_229_856,
-            "577a38a2392b40ca2193cea502e1d92f60b8cd370675d308e0ec21885d9daaa7",
-        ),
-        (
-            "Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf",
-            43_836_407_744,
-            "d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833",
-        ),
-    ]
+    if destination == "LICENSE":
+        return release_root / "model" / "QWEN_LICENSE.txt"
+    if destination.startswith("target/"):
+        return target / Path(destination).name
+    if destination.startswith("metadata/"):
+        return metadata / Path(destination).name
+    if destination.startswith("mtp/"):
+        return mtp / Path(destination).name
+    if destination.startswith("vision/"):
+        return root / "vision-q8" / Path(destination).name
+    if destination.startswith("manifests/"):
+        return manifest
+    raise ValueError(f"no local source mapping for package artifact {destination}")
+
+
+def build_uploads(
+    root: Path,
+    manifest: Path,
+    release_root: Path,
+    package_path: Path | None = None,
+) -> list[Upload]:
+    if package_path is None:
+        package_path = (
+            release_root
+            / "packages/models/qwen38-flash-next/"
+            "ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json"
+        )
+    package = _load_package(package_path)
     uploads = [
         Upload(release_root / "model" / "README.md", "README.md"),
-        Upload(release_root / "model" / "QWEN_LICENSE.txt", "LICENSE"),
         Upload(release_root / "release" / "sources.lock.json", "sources.lock.json"),
     ]
-    uploads.extend(
-        Upload(target / name, f"target/{name}", size, digest)
-        for name, size, digest in target_specs
-    )
-    for name in (
-        "chat_template.jinja",
-        "config.json",
-        "generation_config.json",
-        "merges.txt",
-        "preprocessor_config.json",
-        "tokenizer.json",
-        "tokenizer_config.json",
-        "video_preprocessor_config.json",
-        "vocab.json",
-    ):
-        uploads.append(Upload(metadata / name, f"metadata/{name}"))
-    uploads.extend(
-        [
-            Upload(mtp / "config.json", "mtp/config.json"),
+    for artifact in package["artifacts"]:
+        destination = artifact["path"]
+        uploads.append(
             Upload(
-                mtp / "model.safetensors",
-                "mtp/model.safetensors",
-                2_698_415_880,
-                "33c1160579174630f4222882da479b67f1554d84963a991b4f4f0b69237110c1",
-            ),
-            Upload(
-                mtp / "mtp-fp8-block-manifest.json",
-                "mtp/mtp-fp8-block-manifest.json",
-                expected_sha256=(
-                    "5a9405a8054262803b50ef78b97ebac14e548a003ab2196762c0d710b0090865"
-                ),
-            ),
-            Upload(
-                vision,
-                "vision/mmproj-Qwen3.8-Flash-Next-Q8_0.gguf",
-                616_703_104,
-                "b2e9b5e4a44c107f8867e67dbf09b607fd99ae33c1a97a60a6720aeb252a9dad",
-            ),
-            Upload(
-                manifest,
-                "manifests/hot-manifest-q4-vision-128k-multiprompt-r1-lru16-neutral.json",
-                expected_sha256=(
-                    "2f6f0e59f2555673430857d764b461d271941810a7e1a1d07090b599caf81c88"
-                ),
-            ),
-        ]
-    )
+                _artifact_source(root, release_root, manifest, destination),
+                destination,
+                int(artifact["bytes"]),
+                artifact["sha256"],
+            )
+        )
     return uploads
 
 
 def main() -> int:
     args = parse_args()
     release_root = Path(__file__).resolve().parents[1]
+    package_path = args.package
+    if package_path is not None:
+        package_path = package_path.resolve()
     uploads = build_uploads(
-        args.model_root.resolve(), args.expert_manifest.resolve(), release_root
+        args.model_root.resolve(),
+        args.expert_manifest.resolve(),
+        release_root,
+        package_path,
     )
     for item in uploads:
         if not item.source.is_file():

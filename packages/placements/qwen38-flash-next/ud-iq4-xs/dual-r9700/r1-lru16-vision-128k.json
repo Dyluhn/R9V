@@ -1,0 +1,16 @@
+{
+  "schema": "r9v.placement.v1",
+  "id": "qwen38-iq4-xs-dual-r9700-r1-lru16-vision-128k",
+  "model_package": "qwen38-flash-next-ud-iq4-xs-mtp-blockfp8-mmproj-q8",
+  "hardware": "dual-r9700-32gb-asymmetric",
+  "artifact_path": "manifests/hot-manifest-q4-vision-128k-multiprompt-r1-lru16-neutral.json",
+  "artifact_sha256": "2f6f0e59f2555673430857d764b461d271941810a7e1a1d07090b599caf81c88",
+  "policy": {
+    "rank0_static_experts_per_layer": 329,
+    "rank1_static_experts_per_layer": 369,
+    "rank1_dynamic_cache_slots": 16,
+    "rank1_dynamic_cache_policy": "lru",
+    "cache_async": false
+  },
+  "scope": "Reference placement generated from a multiprompt route corpus; workloads with materially different routing should regenerate it."
+}

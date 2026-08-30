@@ -1,0 +1,32 @@
+{
+  "schema": "r9v.runtime.v1",
+  "id": "muse-glimmer-gfx1201-v12-v1",
+  "engine": "r9v-native-hip-proof",
+  "targets": ["gfx1201"],
+  "capabilities": {
+    "model_architectures": ["muse-glimmer"],
+    "api": "raw-token benchmark only; user-facing CLI/API pending",
+    "tensor_parallel": [1],
+    "vision": false,
+    "dflash2": false,
+    "prepared_r9vpack": false,
+    "canonical_gguf": true,
+    "user_runtime_qualified": false
+  },
+  "accepted_binary": {
+    "name": "muse_full_decode-v12-final-scratchshare",
+    "bytes": 2061048,
+    "sha256": "6d04e63d33e97469d6737f045f8a50f051c2eb3a58f5a9702a14df311b39b429"
+  },
+  "accepted_code_object": {
+    "name": "a6-dflash2-mrows.hsaco",
+    "bytes": 2095040,
+    "sha256": "46273cac83ac41f5e26cd06f29286eb47ad761b3d7d283c6757daa4c58b87974"
+  },
+  "safety": {
+    "exact_gpu_architecture_required": true,
+    "exact_model_hash_required": true,
+    "prebuilt_artifacts_must_match_hashes": true,
+    "strict_stage1_verdict": "experimental rough draft; not a qualified user runtime"
+  }
+}

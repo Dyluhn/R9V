@@ -1,0 +1,44 @@
+{
+  "schema": "r9v.muse-v1-quality-comparison.v1",
+  "protocol": {
+    "teacher": "native BF16 GGUF from pinned model weights",
+    "backend": "HIP",
+    "gpu": "AMD Radeon AI PRO R9700",
+    "gpu_bdf": "0000:13:00.0",
+    "llama_cpp_revision": "dd1ea524333b1e697489067d7a4c39c60d32beee",
+    "chunks": 480,
+    "context_per_chunk": 512,
+    "scored_positions": 122400
+  },
+  "results": [
+    {
+      "label": "R9V V1 / internal V12",
+      "bytes": 24554611392,
+      "mean_kld": 0.006121,
+      "same_top_p_percent": 96.879,
+      "source_result_sha256": "059e66900a61f5f438ae8feb7778eceaa78eba34f213be5fc74db670425d1c1e"
+    },
+    {
+      "label": "Unsloth Q4 comparison",
+      "bytes": 15878222368,
+      "mean_kld": 0.016883,
+      "same_top_p_percent": 94.806,
+      "source_result_sha256": "3ce96e4a727cfa58fe74ea57dc342841b88a855953ead5f0c7970a564c830f87"
+    },
+    {
+      "label": "Unsloth UD-Q5_K_XL",
+      "bytes": 21789618976,
+      "mean_kld": 0.003071,
+      "same_top_p_percent": 97.724,
+      "source_result_sha256": "af146007eda97c63a84a465488b76f954d6468569ab9fb04ce91bad870ba0df8"
+    },
+    {
+      "label": "Unsloth UD-Q6_K_XL",
+      "bytes": 26265362976,
+      "mean_kld": 0.001034,
+      "same_top_p_percent": 98.752,
+      "source_result_sha256": "326fae03de99d74170f84fef37c177037ec4e4992f3da9a4ebb4ee3820450cf1"
+    }
+  ],
+  "disclosure": "V1 is a rough speed-oriented draft. It is not quality-competitive with Unsloth Q5/Q6."
+}

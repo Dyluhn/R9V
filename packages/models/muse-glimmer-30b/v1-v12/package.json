@@ -1,0 +1,63 @@
+{
+  "schema": "r9v.model-package.v1",
+  "id": "muse-glimmer-30b-r9v-v1-v12",
+  "model": "Muse-Glimmer-30B",
+  "quant": "R9V V1 (internal lineage V12): mostly Q8_0 with 67 Q4_K tensors and seven promoted gate/up pairs",
+  "license": "Apache-2.0",
+  "license_notice": "Meta model; Unsloth immediate Q8 source; R9V modified experimental quantization",
+  "release_name": "Muse-Glimmer-30B-R9V-V1",
+  "internal_lineage": "muse-r9v-quant-q8i4-v12",
+  "distribution": {
+    "status": "publication-pending",
+    "repository": "Dyluhn/Muse-Glimmer-30B-R9V-V1",
+    "revision": null,
+    "note": "V1 is the public release name. V12 is the internal research lineage retained for reproducibility."
+  },
+  "artifacts": [
+    {
+      "role": "target",
+      "path": "target/Muse-Glimmer-30B-R9V-V1.gguf",
+      "bytes": 24554611392,
+      "sha256": "f4870ff4ac316c1dbf50a55501f4c00e16070336fc40e119ff1167e43382856a",
+      "required": true
+    },
+    {
+      "role": "vision-projector",
+      "path": "vision/mmproj-kquant.gguf",
+      "bytes": 1400328928,
+      "sha256": "f48b452316f9b213758e8659444029b961a24a07f99a1abb2a9f88b06f7c00c6",
+      "required": false,
+      "source": {
+        "type": "huggingface",
+        "repository": "unsloth/Muse-Glimmer-30B-GGUF",
+        "revision": "faa5b025c584459c13febfa5c59883516710ae39",
+        "path": "mmproj-kquant.gguf"
+      }
+    },
+    {
+      "role": "dflash2",
+      "path": "draft/dflash-kquant.gguf",
+      "bytes": 1631205312,
+      "sha256": "27d9a805fa29b943cfb6ad4843367cd4eaaaf06bd452d8cc3e00a2cd18a677bc",
+      "required": false,
+      "source": {
+        "type": "huggingface",
+        "repository": "unsloth/Muse-Glimmer-30B-GGUF",
+        "revision": "faa5b025c584459c13febfa5c59883516710ae39",
+        "path": "dflash-kquant.gguf"
+      }
+    }
+  ],
+  "tensor_census": {
+    "total": 731,
+    "F32": 313,
+    "Q4_K": 67,
+    "Q8_0": 351
+  },
+  "quality": {
+    "warning": "Rough-draft quant. It is not quality-competitive with Unsloth's higher-fidelity Q5/Q6 quants.",
+    "evaluation_positions": 122400,
+    "mean_kld": 0.006121,
+    "same_top_p_percent": 96.879
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dyluhn/R9V/schemas/hardware-v1.schema.json",
+  "title": "R9V hardware contract",
+  "type": "object",
+  "required": ["schema", "id", "name", "architecture", "gpu_count"],
+  "properties": {
+    "schema": {"const": "r9v.hardware.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1},
+    "architecture": {"type": "string", "minLength": 1},
+    "gpu_count": {"type": "integer", "minimum": 1},
+    "vram_bytes_per_gpu": {"type": "integer", "minimum": 1},
+    "reference_topology": {"type": "array"},
+    "constraints": {"type": "object"},
+    "portable_knobs": {"type": "array", "items": {"type": "string"}}
+  }
+}

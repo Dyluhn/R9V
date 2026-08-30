@@ -1,0 +1,40 @@
+{
+  "schema": "r9v.profile.v1",
+  "id": "muse-glimmer-30b/v1/single-r9700",
+  "name": "Muse Glimmer 30B R9V V1 — single R9700",
+  "status": "experimental",
+  "summary": "Canonical first R9V release: the internal V12 GGUF and exact gfx1201 proof engine, with prominent rough-draft quality caveats.",
+  "aliases": ["muse", "muse-v1", "muse-v12"],
+  "model_package": "muse-glimmer-30b-r9v-v1-v12",
+  "runtime": "muse-glimmer-gfx1201-v12-v1",
+  "hardware": "single-r9700-32gb",
+  "legacy_env": "profiles/muse-glimmer-30b/v1-r9700/profile.env",
+  "descriptors": {
+    "model_package": "packages/models/muse-glimmer-30b/v1-v12/package.json",
+    "runtime": "runtimes/muse-glimmer-gfx1201-v12-v1/runtime.json",
+    "hardware": "hardware/single-r9700/hardware.json"
+  },
+  "commands": {
+    "doctor": ["profiles/muse-glimmer-30b/v1-r9700/scripts/doctor.sh"],
+    "fetch": ["tools/fetch_package.py", "packages/models/muse-glimmer-30b/v1-v12/package.json"],
+    "build": ["profiles/muse-glimmer-30b/v1-r9700/scripts/build.sh"],
+    "run": ["profiles/muse-glimmer-30b/v1-r9700/scripts/run.sh"],
+    "verify": ["tools/verify_package.py", "packages/models/muse-glimmer-30b/v1-v12/package.json"]
+  },
+  "features": {
+    "openai_api": false,
+    "native_cli": false,
+    "vision": false,
+    "dflash2": false,
+    "max_context_target": null,
+    "max_context_qualified": null
+  },
+  "qualification": {
+    "status": "canonical V1 artifact and speed comparison frozen; user runtime and quality remain experimental",
+    "rough_draft": true,
+    "quality_competitive_with_unsloth_q5_q6": false,
+    "reference_pp8192_tok_s": 2078.2,
+    "reference_tg256_tok_s": 26.84,
+    "disclosure": "profiles/muse-glimmer-30b/v1-r9700/QUALIFICATION.md"
+  }
+}

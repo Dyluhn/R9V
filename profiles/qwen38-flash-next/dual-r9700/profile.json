@@ -1,0 +1,37 @@
+{
+  "schema": "r9v.profile.v1",
+  "id": "qwen38-flash-next/ud-iq4-xs/dual-r9700-128k",
+  "name": "Qwen3.8 Flash Next UD-IQ4_XS — dual R9700, vision, MTP2, 128K",
+  "status": "release-candidate",
+  "summary": "Locally qualified OpenAI-compatible dual-RDNA4 profile; public package upload and clean-checkout release benchmark remain pending.",
+  "aliases": ["qwen38", "qwen38-iq4", "qwen38-flash-next"],
+  "model_package": "qwen38-flash-next-ud-iq4-xs-mtp-blockfp8-mmproj-q8",
+  "runtime": "qwen38-flash-next-gfx1201-v1",
+  "hardware": "dual-r9700-32gb-asymmetric",
+  "placement": "qwen38-iq4-xs-dual-r9700-r1-lru16-vision-128k",
+  "legacy_env": "profiles/qwen38-flash-next/dual-r9700/profile.env",
+  "descriptors": {
+    "model_package": "packages/models/qwen38-flash-next/ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json",
+    "runtime": "runtimes/qwen38-flash-next-gfx1201-v1/runtime.json",
+    "hardware": "hardware/dual-r9700/hardware.json",
+    "placement": "packages/placements/qwen38-flash-next/ud-iq4-xs/dual-r9700/r1-lru16-vision-128k.json"
+  },
+  "commands": {
+    "doctor": ["scripts/profile-doctor.sh"],
+    "fetch": ["tools/fetch_package.py", "packages/models/qwen38-flash-next/ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json"],
+    "build": ["scripts/build-image.sh"],
+    "run": ["scripts/launch.sh"],
+    "verify": ["tools/verify_package.py", "packages/models/qwen38-flash-next/ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json"]
+  },
+  "features": {
+    "openai_api": true,
+    "vision": true,
+    "tools": true,
+    "mtp_depth": 2,
+    "max_context": 131072
+  },
+  "qualification": {
+    "pp_tg_reference": "docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md",
+    "minimum_sustained_tg": 77.82
+  }
+}

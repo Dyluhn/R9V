@@ -7,5 +7,7 @@ and the vLLM GGUF plugin, licensed under the Apache License, Version 2.0.
 This product contains source copied or adapted from llama.cpp/ggml. See
 THIRD_PARTY_NOTICES.md for the applicable MIT notice and complete provenance.
 
-Model weights are distributed separately under Qwen Community License 1.0 and
-are not covered by the R9V Apache-2.0 code license.
+Model weights are distributed separately and are not automatically covered by
+the R9V source repository's Apache-2.0 license. Qwen uses Qwen Community
+License 1.0; Muse Glimmer R9V V1 uses Apache-2.0 with Meta,
+Unsloth, and llama.cpp attribution. See MODEL_LICENSES and package descriptors.

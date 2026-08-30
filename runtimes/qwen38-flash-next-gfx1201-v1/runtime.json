@@ -1,0 +1,27 @@
+{
+  "schema": "r9v.runtime.v1",
+  "id": "qwen38-flash-next-gfx1201-v1",
+  "engine": "vllm-rocm",
+  "targets": ["gfx1201"],
+  "capabilities": {
+    "model_architectures": ["qwen4_exp"],
+    "api": "OpenAI-compatible",
+    "tensor_parallel": [2],
+    "vision": true,
+    "mtp": true,
+    "ssd_ple": true,
+    "tiered_experts": true,
+    "target_qtypes": ["IQ3_S", "IQ4_XS", "IQ4_NL", "Q8_0"],
+    "context_tokens": 131072
+  },
+  "source": {
+    "vllm_revision": "0512ae60d9456d09c92f38c723e5a9546afeb289",
+    "gguf_plugin_revision": "67b31b95be8b73b688fc8581fc3a2a712fe0c1d0",
+    "kernel_revision": "c5636c890b3591f13edfd973e010ff100940006b"
+  },
+  "safety": {
+    "r4d": "hard-disabled",
+    "display_gpu_headroom_required": true,
+    "profile_compatibility_is_fail_closed": true
+  }
+}

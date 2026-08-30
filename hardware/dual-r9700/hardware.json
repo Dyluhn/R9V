@@ -1,0 +1,25 @@
+{
+  "schema": "r9v.hardware.v1",
+  "id": "dual-r9700-32gb-asymmetric",
+  "name": "Dual Radeon AI PRO R9700 32 GiB",
+  "architecture": "gfx1201",
+  "gpu_count": 2,
+  "vram_bytes_per_gpu": 34384920576,
+  "host_ram_min_bytes": 128000000000,
+  "reference_topology": [
+    {"rank": 0, "role": "display", "pcie": "Gen5 x16"},
+    {"rank": 1, "role": "headless", "pcie": "Gen4 x4"}
+  ],
+  "constraints": {
+    "device_order_is_semantic": true,
+    "rank0_min_free_bytes": 3221225472,
+    "rank1_may_pack_tighter": true
+  },
+  "portable_knobs": [
+    "visible device order",
+    "per-rank hot expert counts",
+    "dynamic cache rank and slots",
+    "KV cache bytes",
+    "PLE residency policy"
+  ]
+}

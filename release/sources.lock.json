@@ -1,24 +1,30 @@
 {
   "format": "r9v-qwen38-flash-next-sources-v1",
   "generated": "2026-08-29",
+  "catalog_migration": {
+    "status": "compatibility aggregate",
+    "authoritative_qwen_package": "packages/models/qwen38-flash-next/ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json",
+    "authoritative_muse_sources": "packages/models/muse-glimmer-30b/v1-v12/sources.lock.json",
+    "note": "Code/runtime locks and model-package locks are split for new profiles; this file remains for v0.1 Qwen consumers."
+  },
   "code": {
     "vllm": {
       "repository": "https://github.com/Dyluhn/vllm",
       "development_base": "ae0a0511f9c6457f3beb4db0a1eeb11f4c28be75",
       "release_branch": "r9v/qwen38-flash-next",
-      "release_revision": "0512ae60d9456d09c92f38c723e5a9546afeb289",
+      "release_revision": "138c7e3c6951e0fe3bca4678dfba11d07895ca86",
       "license": "Apache-2.0"
     },
     "vllm_gguf_plugin": {
       "repository": "https://github.com/Dyluhn/vllm-gguf-plugin",
       "development_base": "fd0f0e8195c813a185a41a6866512ba56a5b84c9",
       "release_branch": "r9v/qwen38-flash-next",
-      "release_revision": "67b31b95be8b73b688fc8581fc3a2a712fe0c1d0",
+      "release_revision": "cd301d332c33befce8eb53359a94e8710c745140",
       "license": "Apache-2.0"
     },
     "r9v_gfx1201_kernels": {
       "repository": "https://github.com/Dyluhn/r9v-gfx1201-kernels",
-      "release_revision": "c5636c890b3591f13edfd973e010ff100940006b",
+      "release_revision": "28f40ebb813d5b228fb6bf59672ca23bd8ffb063",
       "license": "Apache-2.0"
     },
     "llama_cpp": {

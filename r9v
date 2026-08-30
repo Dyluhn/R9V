@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""R9V profile catalog command."""
+
+from tools.r9v import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

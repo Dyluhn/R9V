@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Dyluhn/R9V/schemas/profile-v1.schema.json",
+  "title": "R9V exact model profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "name",
+    "status",
+    "model_package",
+    "runtime",
+    "hardware",
+    "descriptors",
+    "commands"
+  ],
+  "properties": {
+    "schema": {"const": "r9v.profile.v1"},
+    "id": {"type": "string", "minLength": 1},
+    "name": {"type": "string", "minLength": 1},
+    "status": {
+      "enum": ["qualified", "release-candidate", "experimental", "retired"]
+    },
+    "summary": {"type": "string"},
+    "aliases": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "model_package": {"type": "string", "minLength": 1},
+    "runtime": {"type": "string", "minLength": 1},
+    "hardware": {"type": "string", "minLength": 1},
+    "placement": {"type": "string", "minLength": 1},
+    "legacy_env": {"type": "string", "minLength": 1},
+    "descriptors": {
+      "type": "object",
+      "required": ["model_package", "runtime", "hardware"],
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "commands": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": {"type": "string", "minLength": 1}
+      }
+    },
+    "features": {"type": "object"},
+    "qualification": {"type": "object"}
+  }
+}

@@ -51,9 +51,11 @@ python tools/prepare_ple.py target/*.gguf \
 - Q8 vision input, one image/request.
 - SSD PLE and tiered expert placement.
 
-Measured single-request TG was 78.38 tok/s at 8K context, 79.27 at 32K,
+Development qualification measured 78.38 tok/s at 8K context, 79.27 at 32K,
 78.57 at 64K, and 77.82 at a 120,010-token prompt on the reference machine.
-See the R9V repository for the exact code revisions and qualification notes.
+These are not yet the public release benchmark. R9V will rerun the frozen
+package from a clean checkout before promoting this profile from release
+candidate to qualified.
 
 ## License
 
