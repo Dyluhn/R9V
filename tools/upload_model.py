@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+SMALL_HASH_LIMIT = 16 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class Upload:
     source: Path
@@ -67,6 +70,8 @@ def _artifact_source(
     mtp = root / "mtp-fp8-block-minimal"
     if destination == "LICENSE":
         return release_root / "model" / "QWEN_LICENSE.txt"
+    if destination == "THIRD_PARTY_NOTICES.md":
+        return release_root / "model" / "THIRD_PARTY_NOTICES.md"
     if destination.startswith("target/"):
         return target / Path(destination).name
     if destination.startswith("metadata/"):
@@ -95,6 +100,7 @@ def build_uploads(
     package = _load_package(package_path)
     uploads = [
         Upload(release_root / "model" / "README.md", "README.md"),
+        Upload(package_path, "package.json"),
         Upload(release_root / "release" / "sources.lock.json", "sources.lock.json"),
     ]
     for artifact in package["artifacts"]:
@@ -112,6 +118,8 @@ def build_uploads(
 
 def main() -> int:
     args = parse_args()
+    if args.execute and not args.hash_large:
+        raise SystemExit("refusing --execute without --hash-large")
     release_root = Path(__file__).resolve().parents[1]
     package_path = args.package
     if package_path is not None:
@@ -132,7 +140,7 @@ def main() -> int:
                 f"{item.expected_bytes}"
             )
         should_hash = item.expected_sha256 is not None and (
-            args.hash_large or actual_bytes < 1_000_000_000
+            args.hash_large or actual_bytes <= SMALL_HASH_LIMIT
         )
         if should_hash:
             actual_hash = sha256(item.source)
@@ -154,7 +162,10 @@ def main() -> int:
         )
 
     if not args.execute:
-        print("Validation complete; pass --execute after `hf auth login` to upload.")
+        print(
+            "Validation complete; pass --hash-large --execute only after "
+            "review and authentication."
+        )
         return 0
 
     try:

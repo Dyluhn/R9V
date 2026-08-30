@@ -40,12 +40,15 @@ R9V PP runs a single output token after timing the prompt; llama.cpp PP uses
 pure `-p 0 -n 256`. This is the closest supported same-work comparison, but it
 is not instruction-for-instruction identical.
 
-## Reproduction commands
+## Preserved reproduction commands
 
-R9V's checked-in harness records hashes and compact raw reports:
+R9V's checked-in harness records hashes and compact raw reports. The accepted
+proof executable and code object are not public user-runtime artifacts, so this
+command documents the frozen research protocol rather than a clean-clone user
+workflow:
 
 ```bash
-python tools/benchmark_muse_v1_r9v.py \
+python3 tools/benchmark_muse_v1_r9v.py \
   --binary /path/to/muse_full_decode-v12-final-scratchshare \
   --hsaco /path/to/a6-dflash2-mrows.hsaco \
   --model /path/to/Muse-Glimmer-30B-R9V-V1.gguf \

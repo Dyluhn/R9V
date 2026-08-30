@@ -8,12 +8,26 @@
   "release_name": "Muse-Glimmer-30B-R9V-V1",
   "internal_lineage": "muse-r9v-quant-q8i4-v12",
   "distribution": {
-    "status": "publication-pending",
+    "status": "published",
     "repository": "Dyluhn/Muse-Glimmer-30B-R9V-V1",
-    "revision": null,
-    "note": "V1 is the public release name. V12 is the internal research lineage retained for reproducibility."
+    "revision": "093f8ced7a8e2308b0f597084ebdbfa5f6614f75",
+    "note": "All 10 files, including the optional projector and DFlash sidecar, were remotely size- and SHA256-verified at this immutable revision. V1 is the public release name; V12 is the internal research lineage."
   },
   "artifacts": [
+    {
+      "role": "license",
+      "path": "LICENSE",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "required": true
+    },
+    {
+      "role": "third-party-notices",
+      "path": "THIRD_PARTY_NOTICES.md",
+      "bytes": 2068,
+      "sha256": "eb1d19cc7ce1b5ab4e22c90638f8122fd76a4754470c329679c0e168dbec7009",
+      "required": true
+    },
     {
       "role": "target",
       "path": "target/Muse-Glimmer-30B-R9V-V1.gguf",

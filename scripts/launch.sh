@@ -17,6 +17,7 @@ ple_path=${R9V_PLE_PATH:?Set R9V_PLE_PATH to the extracted PLE payload}
 cache_dir=${R9V_CACHE_DIR:-$repo_root/.cache}
 visible_devices=${R9V_VISIBLE_DEVICES:-0,1}
 : "${R9V_TIERED_PREFILL_GROUP_SIZE:=0}"
+: "${R9V_PLE_PINNED_RESERVE_BYTES:=17179869184}"
 : "${R9V_DEV_FUSED_MOE_PY:=}"
 : "${R9V_DEV_LINEAR_PY:=}"
 : "${R9V_DEV_TIERED_IQ_MOE_SO:=}"
@@ -26,6 +27,23 @@ visible_devices=${R9V_VISIBLE_DEVICES:-0,1}
    $R9V_TIERED_PREFILL_GROUP_SIZE == 8 ||
    $R9V_TIERED_PREFILL_GROUP_SIZE == 16 ]] || {
     printf 'R9V_TIERED_PREFILL_GROUP_SIZE must be 0, 4, 8, or 16\n' >&2
+    exit 2
+}
+
+case $R9V_PLE_RESIDENCY_MODE in
+    ssd|bounded)
+        ple_mmap_host_register=0
+        ;;
+    pinned)
+        ple_mmap_host_register=1
+        ;;
+    *)
+        printf 'R9V_PLE_RESIDENCY_MODE must be ssd, pinned, or bounded\n' >&2
+        exit 2
+        ;;
+esac
+[[ $R9V_PLE_PINNED_RESERVE_BYTES =~ ^[0-9]+$ ]] || {
+    printf 'R9V_PLE_PINNED_RESERVE_BYTES must be a non-negative integer\n' >&2
     exit 2
 }
 
@@ -206,8 +224,9 @@ docker run --detach \
     --env VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 \
     --env VLLM_PLE_CPU_OFFLOAD=1 \
     --env VLLM_PLE_RESIDENCY_MODE="$R9V_PLE_RESIDENCY_MODE" \
-    --env VLLM_PLE_MMAP_HOST_REGISTER=0 \
+    --env VLLM_PLE_MMAP_HOST_REGISTER="$ple_mmap_host_register" \
     --env VLLM_PLE_MMAP_HOST_REGISTER_EXPECTED_BYTES=28800138240 \
+    --env VLLM_PLE_PINNED_RESERVE_BYTES="$R9V_PLE_PINNED_RESERVE_BYTES" \
     --env VLLM_PLE_BOUNDED_BYTES=4294967296 \
     --env VLLM_PLE_BOUNDED_CHUNK_BYTES=4096 \
     --env VLLM_PLE_MMAP_READAHEAD="$R9V_PLE_MMAP_READAHEAD" \

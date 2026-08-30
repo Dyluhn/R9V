@@ -36,13 +36,16 @@ works end-to-end. Kernel microbenchmarks alone are not sufficient.
 - CLI/host environment overrides profile defaults; descriptors themselves are
   declarative JSON and are never sourced as shell.
 
-Validate the catalog without touching a GPU:
+Validate and inspect the catalog without touching a GPU:
 
 ```bash
 ./r9v validate
 ./r9v show <profile>
-./r9v doctor <profile>
 ```
+
+`doctor` is read-only but hardware-dependent: `./r9v doctor <profile>` checks
+the selected machine, devices, runtime prerequisites, and optionally a model
+bundle.
 
 ## Catalog layouts
 

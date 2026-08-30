@@ -21,17 +21,16 @@ The following items block the next public tag:
 
 ## Qwen profile
 
-- Publish the release-candidate package to an immutable model revision and replace the
-  descriptor's `revision: null`.
+- Keep the remotely verified 22-file package and immutable artifact revision
+  pinned in the descriptor.
 - Test `r9v fetch → verify → build → run` from a clean machine.
 - Keep the Qwen Community License separate from root Apache-2.0.
 
 ## Muse R9V V1 profile
 
-- Publish the exact 24,554,611,392-byte V1/V12 GGUF to an immutable model
-  revision with the rough-draft quality warning intact.
-- Include Apache License 2.0 and the Meta/Unsloth/llama.cpp attribution notice
-  in that model package, and pin both files in its package descriptor.
+- Keep the remotely verified 10-file V1/V12 package, rough-draft quality
+  warning, Apache License 2.0, and Meta/Unsloth/llama.cpp attribution pinned at
+  the descriptor's immutable artifact revision.
 - Curate and license-audit the minimal proof-engine source; do not import the
   legacy research workspace wholesale.
 - Rebuild and hash-match the accepted executable and gfx1201 code object.

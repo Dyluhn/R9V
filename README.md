@@ -1,36 +1,36 @@
 # R9V
 
-R9V is a collection of exact, model-specific inference systems for AMD RDNA4.
-It is not one universal engine. Each profile freezes a model/quant package,
-runtime, kernel set, hardware contract, placement policy, and qualification
-record so the complete setup can be reproduced instead of reconstructed from
-benchmark fragments.
+R9V is a topology-first catalog of exact, model-specific inference systems for
+AMD RDNA4. It is not one universal engine: every profile freezes a model and
+quant package, runtime, kernel set, hardware contract, placement policy, and
+qualification record.
 
-The project currently has two distinct runtime families:
+The catalog currently has two runtime families:
 
-- **Single GPU:** fully custom native R9V engines. The current profile targets
-  the exact Muse Glimmer V1 quant and `gfx1201` kernel set.
+- **Single GPU:** fully custom native R9V engines specialized for an exact
+  model, quant, and `gfx1201` kernel set.
 - **Dual GPU:** an adapted vLLM deployment architecture informed by the
-  Radiance profiling workflow, using an Apache-2.0 vLLM fork, the GGUF plugin,
-  and R9V kernels. The release tree does not redistribute the unlicensed
-  Radiance launcher or R4D source.
+  Radiance profiling workflow, with a pinned Apache-2.0 vLLM fork, GGUF plugin,
+  and R9V kernels.
 
-## Current status
+Radiance was a development and profiling reference. This repository does not
+redistribute its unlicensed launcher or R4D source. Every R4D path is
+hard-disabled in the R9V profile; the separately built public Radiance
+comparator used only its exact TP2 BF16 all-reduce.
 
-| Topology | Supported model/profile | Engine | Public status | User surface |
+## Supported profiles
+
+| Topology | Profile | Runtime | Status | User surface |
 |---|---|---|---|---|
-| Single R9700 | `muse-glimmer-30b/v1/single-r9700` | Custom native HIP engine | Experimental canonical V1 | Frozen raw-token proof; curated user runtime pending |
-| Dual R9700 | `qwen38-flash-next/ud-iq4-xs/dual-r9700-128k` | Adapted vLLM stack; Radiance-informed workflow | Release candidate | OpenAI-compatible text, tools, and vision |
+| Single R9700 | `muse-glimmer-30b/v1/single-r9700` | Custom native HIP proof engine | Experimental | Frozen raw-token Muse V12/V1 proof; curated user runtime pending |
+| Dual R9700 | `qwen38-flash-next/ud-iq4-xs/dual-r9700-128k` | Adapted vLLM stack | Release candidate | OpenAI-compatible text, tools, and one-image inputs |
 
-The Qwen runtime now builds from the public source graph and works end-to-end
-on the reference machine, including the OpenAI text/vision API and sustained
-70+ TG through the measured 32K context point. Its public model revision and
-clean-host package installation test are still pending. The Muse has frozen
-model and benchmark identities, but the curated
-source-complete user runtime has not yet been published. Those distinctions
-are deliberate: R9V does not label a local proof as a downloadable release.
+`experimental` means the exact artifact or proof is preserved but the public
+user path is incomplete. `release-candidate` means the runtime is qualified on
+the reference topology but a release gate remains. A profile becomes
+`qualified` only after its advertised download-to-user path passes end to end.
 
-## Browse the catalog
+Browse the catalog from a recursive clone:
 
 ```bash
 git clone --recursive https://github.com/Dyluhn/R9V.git
@@ -40,89 +40,67 @@ cd R9V
 ./r9v validate
 ./r9v show qwen38
 ./r9v show muse
-./r9v doctor qwen38
 ```
 
-Aliases such as `qwen38` and `muse` work with every command. `muse` resolves
-to the canonical V1/V12 profile.
+Topology indexes are under [`profiles/topology/`](profiles/topology/README.md).
+Aliases such as `qwen38` and `muse` resolve to exact profile IDs; they do not
+bypass a profile's fail-closed status or hardware checks.
 
-## Running a profile
+## Profile lifecycle
 
-### Dual R9700: Qwen3.8 Flash Next
+The common lifecycle is:
 
-This is the only current profile with a complete serving path. It requires two
-32 GiB R9700 cards, 128 GiB host RAM, a fast SSD for the PLE table, and the
-exact packaged target/MTP/projector/placement files.
+`list → show → doctor → fetch → verify → build → run`
 
-The package upload is not public yet, so a fresh user cannot complete the
-download step today. `./r9v fetch qwen38` intentionally fails closed until the
-descriptor contains an immutable revision. Once that revision is published,
-the supported path is:
+`show` and `validate` inspect the catalog without using a GPU. `doctor` checks
+the selected machine and model bundle. The remaining actions execute only when
+the profile exposes that stage and its release inputs are available.
 
-```bash
-export MODEL_DIR=/path/to/qwen38-r9v
-export R9V_DATA_DIR=/fast-ssd/r9v
-mkdir -p "$R9V_DATA_DIR"
+- **Dual R9700 / Qwen:** the immutable 90.36 GiB model package is public and
+  remotely hash-verified. The source image and local OpenAI serving path are
+  qualified; the clean-host package installation test remains open. Follow
+  [installation and launch](docs/installation.md) and the
+  [qualification report](docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md).
+- **Single R9700 / Muse:** the complete V12 research artifact is published as
+  R9V V1, including the optional projector and DFlash sidecar. The curated
+  native runtime is still pending: `fetch` is available, while `build` and
+  `run` intentionally fail closed. See the
+  [clean-clone status and artifact requirements](docs/muse-v1.md),
+  [benchmark report](profiles/muse-glimmer-30b/v1-r9700/BENCHMARKS.md),
+  [qualification](profiles/muse-glimmer-30b/v1-r9700/QUALIFICATION.md), and
+  [model card](packages/models/muse-glimmer-30b/v1-v12/README.md).
 
-R9V_MAX_JOBS=8 ./r9v build qwen38
+## Kernel scope
 
-./r9v fetch qwen38 \
-  --model-dir "$MODEL_DIR" \
-  --accept-model-license
+R9V kernels are deliberately narrow rather than generic ROCm replacements.
+Their host APIs reject incompatible dtypes, shapes, qtypes, layouts, and GPU
+targets; supported fallbacks remain owned by the selected runtime.
 
-docker run --rm --network none --entrypoint python3 \
-  --user "$(id -u):$(id -g)" \
-  --security-opt label=disable \
-  --volume "$PWD:/r9v:ro" \
-  --volume "$MODEL_DIR:/models:ro" \
-  --volume "$R9V_DATA_DIR:/r9v-data" \
-  r9v-qwen38-flash-next:latest \
-  /r9v/tools/prepare_ple.py \
-  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
-  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf \
-  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf \
-  --output /r9v-data/per_layer_token_embd.iq4_nl.bin
+The Qwen profile ships three production `gfx1201` kernel families:
 
-export R9V_PLE_PATH="$R9V_DATA_DIR/per_layer_token_embd.iq4_nl.bin"
-export R9V_CACHE_DIR="$R9V_DATA_DIR/cache"
-./r9v run qwen38 --model-dir "$MODEL_DIR"
-```
+- `dense_mmvq_hip` for MTP multi-row GGUF GEMV reuse, exact Q8 attention M=3,
+  and HyperConnection down/up paths;
+- `tiered_iq_moe_hip` for mixed VRAM/UVA expert GEMV, graph-safe LRU caching,
+  and the bit-exact group-16 MoE prefill path;
+- `fused_gdn_mtp_hip` for the TP2 speculative GDN core.
 
-After the full base image has been built once, kernel/plugin development can
-skip the PyTorch/vLLM base rebuild with
-`R9V_RUNTIME_ONLY=1 ./scripts/build-image.sh`. Full release builds keep the
-default (`R9V_RUNTIME_ONLY=0`) so the pinned source graph is rebuilt.
-
-The server listens at `http://127.0.0.1:8004/v1`. See
-[installation.md](docs/installation.md) for package layout, device ordering,
-and health checks, and [pi.md](docs/pi.md) for Pi coding-agent and per-call
-PP/TG integration.
-
-### Single R9700: Muse Glimmer
-
-The single-card path is a completely custom R9V engine rather than vLLM. The
-Muse profile currently fails closed at `build` and `run` because publishing the
-legacy research workspace would not be reproducible or license-clean.
-
-What users can verify now:
-
-```bash
-./r9v show muse
-./r9v doctor muse
-```
-
-The release gate is a curated native runtime that rebuilds the accepted
-executable and code object, then adds tokenizer-aware text generation. Vision,
-DFlash, and an OpenAI-compatible API are not part of the current Muse V1
-claim.
+These kernels are qualified only as part of their exact profile. Dense-prefill
+tuning outside the selected group-16 path remains experimental and is not a V1
+requirement. Porting to another model or GPU requires new parity, graph-replay,
+placement, and end-to-end qualification. See the
+[kernel scope and safety contract](kernels/r9v-gfx1201/README.md).
 
 ## Benchmarks
 
-### Muse Glimmer 30B R9V V1
+Benchmark numbers apply only to the named profile, reference hardware, and
+recorded protocol. They are not blanket performance claims for every R9700.
 
-The exact V1/V12 GGUF was measured on one isolated R9700 against llama.cpp at
-the same source revision. Values are means of three measured samples after one
-warmup.
+### Muse Glimmer 30B — internal V12, public R9V V1
+
+The exact 24,554,611,392-byte V12/V1 GGUF was measured on one isolated Radeon
+AI PRO R9700. Values are arithmetic means of three samples after one warmup.
+Both llama.cpp baselines use revision
+`dd1ea524333b1e697489067d7a4c39c60d32beee` and the same model bytes.
 
 | Cell | R9V custom HIP | llama.cpp ROCm | llama.cpp Vulkan |
 |---|---:|---:|---:|
@@ -131,81 +109,54 @@ warmup.
 | PP8192 | 2,078.20 | 1,419.88 | 1,126.46 |
 | TG256 | 26.84 | 24.30 | 24.92 |
 
-This is a speed result, not a quality endorsement. V1 is a rough draft and is
-substantially worse than Unsloth Q5/Q6 in the recorded quality evaluation. See
-the full [benchmark protocol](profiles/muse-glimmer-30b/v1-r9700/BENCHMARKS.md)
-and [model card](packages/models/muse-glimmer-30b/v1-v12/README.md).
+This is a speed result from a frozen raw-token proof engine, not a quality or
+product-readiness endorsement. R9V V1/V12 records mean KLD `0.006121`, versus
+`0.003071` for Unsloth UD-Q5_K_XL and `0.001034` for UD-Q6_K_XL on the same
+122,400-position evaluator. It is therefore not quality-competitive with the
+Q5/Q6 quants. Exact samples, binary hashes, protocol differences, and caveats
+are in the [Muse benchmark record](profiles/muse-glimmer-30b/v1-r9700/BENCHMARKS.md).
 
-### Qwen3.8 Flash Next
+### Qwen3.8 Flash Next — R9V versus stock/public Radiance
 
-The public-source ROCm 7.14 image was measured through its streaming OpenAI
-chat endpoint with MTP2, vision support, SSD PLE, 128K cache allocation, rank-1
-LRU16 expert caching, and every R4D path disabled.
+The comparison target is the same dual-R9700 topology and benchmark cells. The
+R9V row is the qualified V1 reference. The comparator was built separately
+from public Radiance, public vLLM PR #53899, and the public GGUF plugin. Its
+compatibility overlay only made Qwen4Exp GGUF, MTP, PLE, and UVA loading work;
+it contained no R9V performance kernels or placement code.
 
-| Prompt + completion | PP | TG |
-|---:|---:|---:|
-| 278 + 256, three runs | 61.41 mean | 78.11 mean |
-| 8,206 + 256 | 55.75 | 76.47 |
-| 32,779 + 256 | 57.01 | 72.85 |
+| Runtime | PP8192 (tok/s) | TG256 (tok/s) | Status |
+|---|---:|---:|---|
+| R9V Qwen V1 | 1,512.01 | 78.11 | Qualified R9V reference |
+| Stock/public Radiance | 45.27 | 26.22 | Public stack, MTP2, CPU-RAM PLE, exact TP2 R4D all-reduce |
 
-These are the public runtime result on the reference dual-R9700 machine, not
-the older development-image figures. See the exact methodology, dispatch
-policy, and remaining package gate in
-[the Qwen qualification](docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md).
-
-The bit-exact group-16 MoE prefill path selected for V1 was also subjected to
-a repeated prefix-cache-miss soak through the OpenAI completions endpoint:
-
-| Target prompt | Runs | Mean PP | Median PP | Range |
-|---:|---:|---:|---:|---:|
-| 8K | 10 | 1,512.01 | 1,510.20 | 1,286.32–1,688.07 |
-| 32K | 3 | 1,401.83 | 1,365.25 | 1,358.90–1,481.34 |
-| 64K | 2 | 1,357.02 | 1,357.02 | 1,351.96–1,362.07 |
-
-This is the current V1 PP result. The grouped kernel passed real GGUF parity,
-full model startup, graph warmup, and sustained serving. Dense-prefill tuning
-remains experimental and is not required for V1. A subsequent clean image
-rebuild with no development overlays reproduced an 8K median of 1,484.00 PP
-tok/s across three cache-miss prompts (1,442.67 mean), and that verified image
-is now the local `latest` tag.
-The [raw PP trials](docs/qualification/results/qwen38-group16-pp-v1.json) are
-included without prompt contents and pin the benchmark corpus revision/hash.
-
-A target-only llama.cpp ROCm comparison at commit `6c5afc86a`, with MTP
-disabled and the full 28.8 GB PLE table resident in RAM, measured 534.33 PP
-tok/s at 8K and 28.44 TG tok/s over 256 generated tokens. The corresponding
-qualified R9V cells are 2.83x and 2.75x faster. See the
+Both PP cells are means of ten forced prefix-cache-miss requests over the same
+Aider corpus slices; both TG cells are means of three 278+256 OpenAI requests
+with thinking disabled. R9V is 33.40x faster on PP8192 and 2.98x faster on
+TG256 in these exact cells. Radiance used its public exact, non-quantized TP2
+all-reduce, AITER unified attention, public vLLM UVA expert offload, and a
+fully materialized CPU-RAM PLE table. Exact samples, revisions, overlay scope,
+and launch policy are in the
 [Qwen qualification](docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md) and
-[raw llama.cpp samples](docs/qualification/results/qwen38-llamacpp-rocm-no-mtp-ram-ple.json).
+[machine-readable comparator record](docs/qualification/results/qwen38-public-radiance-dual-r9700.json).
 
 ## Repository layout
 
-Human navigation is topology-first:
-
 ```text
-profiles/topology/
-  single-r9700/       # Muse custom-engine profiles
-  dual-r9700/         # Qwen adapted-vLLM profiles
+profiles/topology/   hardware-first profile indexes
+profiles/            exact runnable compositions and qualification reports
+packages/models/     model artifacts, hashes, sources, and model licenses
+packages/placements/ workload- and topology-specific residency manifests
+runtimes/            engine capabilities and pinned source ABI
+hardware/            GPU, RAM, PCIe, and rank contracts
+kernels/             pinned R9V kernel sources
+vendor/              pinned vLLM and GGUF-plugin forks
+schemas/             fail-closed descriptor formats
 ```
 
-The implementation remains normalized so model files and runtimes are not
-copied between profiles:
+See [profiles/README.md](profiles/README.md) for profile composition and
+lifecycle rules.
 
-```text
-packages/models/      exact artifacts, hashes, sources, model licenses
-packages/placements/  hardware/workload-specific residency manifests
-runtimes/              engine capabilities and pinned source ABI
-hardware/              GPU count, architecture, RAM, PCIe and rank contract
-profiles/              runnable compositions and qualification reports
-kernels/               pinned R9V kernel source
-vendor/                pinned vLLM and GGUF-plugin forks
-schemas/               fail-closed descriptor formats
-```
-
-Use [profiles/README.md](profiles/README.md) when adding another exact quant or
-hardware topology.
-
-## Licensing
+## Licensing and provenance
 
 R9V-owned catalog code and original kernels are Apache-2.0. The vLLM and GGUF
 plugin forks retain Apache-2.0; llama.cpp/ggml-derived quant primitives retain
@@ -216,19 +167,20 @@ their MIT notice. Model packages remain separate:
   provenance recorded.
 - Radiance's unlicensed source is not redistributed.
 
-The exact boundaries and remaining public-tag gates are documented in
+The exact boundaries and remaining release gates are documented in
 [licensing.md](docs/licensing.md),
 [the provenance audit](docs/provenance-audit.md),
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and
 [release-gates.md](docs/release-gates.md).
 
-## Safety and scope
+## Safety
 
-- Current kernels are specialized for `gfx1201`; unsupported architectures
-  fail the profile contract.
-- Qwen device ordering and expert placement are semantic. Other PCIe/RAM
-  layouts may require regenerated placement settings.
-- Every R4D path remains hard-disabled. R4D was not used for the published
-  development results.
-- Benchmark numbers describe exact profiles and reference machines, not all
-  R9700 systems.
+- Current production kernels target `gfx1201`; unsupported architectures fail
+  the profile contract.
+- Device ordering and expert placement are semantic for the dual-R9700 Qwen
+  profile; other layouts may require a new placement profile.
+- Every R4D path remains hard-disabled in R9V. The separately identified
+  public Radiance comparator enabled only its exact TP2 BF16 all-reduce; R4D
+  attention, GDN, quantized all-reduce, and skinny GEMM were not used.
+- Model hashes, runtime revisions, topology, and benchmark protocol are part of
+  every performance claim.

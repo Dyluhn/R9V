@@ -35,12 +35,9 @@ projector. Qwen remains the model author and upstream rights holder.
 
 The 26.82 GiB `per_layer_token_embd.weight` payload is already present inside
 target shard 2 and is intentionally not uploaded again. Extract it to the fast
-SSD with R9V's metadata-driven tool:
-
-```bash
-python tools/prepare_ple.py target/*.gguf \
-  --output /fast-ssd/r9v/per_layer_token_embd.iq4_nl.bin
-```
+SSD with R9V's metadata-driven tool. The extraction utility is shipped in the
+R9V source repository, not this model repository; follow the complete
+[build, extraction, and launch instructions](https://github.com/Dyluhn/R9V/blob/main/docs/installation.md#2-fetch-or-arrange-the-model-bundle).
 
 ## Reference configuration
 
@@ -51,11 +48,12 @@ python tools/prepare_ple.py target/*.gguf \
 - Q8 vision input, one image/request.
 - SSD PLE and tiered expert placement.
 
-Development qualification measured 78.38 tok/s at 8K context, 79.27 at 32K,
-78.57 at 64K, and 77.82 at a 120,010-token prompt on the reference machine.
-These are not yet the public release benchmark. R9V will rerun the frozen
-package from a clean checkout before promoting this profile from release
-candidate to qualified.
+The immutable 22-file model package is public and remotely hash-verified. The
+R9V runtime has passed its reference-machine performance qualification and
+remains a release candidate until the documented package installation passes
+from a clean host. See the
+[R9V qualification report](https://github.com/Dyluhn/R9V/blob/main/docs/qualification/qwen38-ud-iq4-xs-dual-r9700.md)
+for exact benchmark cells and protocol.
 
 ## License
 
@@ -63,3 +61,5 @@ These model artifacts are distributed under Qwen Community License 1.0; see
 `LICENSE`. The R9V Apache-2.0 code license does not apply to model weights.
 Users are responsible for reviewing the Qwen license, including its separate
 terms for certain commercial MaaS/AI-work-assistant uses and scale thresholds.
+Artifact attribution and exact upstream revisions are recorded in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

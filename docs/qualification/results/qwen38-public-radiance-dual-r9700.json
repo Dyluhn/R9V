@@ -1,0 +1,84 @@
+{
+  "schema": "r9v.comparator-benchmark.v1",
+  "date": "2026-08-30",
+  "topology": "dual-r9700-tp2",
+  "model": "Qwen3.8-Flash-Next UD-IQ4_XS",
+  "runtime": {
+    "name": "public-vllm-radiance-baseline",
+    "image": "sha256:651b26a665a41834268ec1e661b116931b66a453a52e9b64cec1b90b311f6163",
+    "radiance_revision": "620a59d9e00df26571f60618291bf2dc6a9174fe",
+    "vllm_revision": "935728b4a95e110d91a41ab4e02b6bed06ec66ab",
+    "gguf_plugin_revision": "c5e3717b4eb81770bd351b2868dd8087e04ee9fe",
+    "compatibility_overlay": "Qwen4Exp GGUF mapping, TP-aware packed shard loading, ROCm PLE plumbing, padded-route sanitization, N-D linear flatten/restore, and non-finite Q8 lane sanitization",
+    "r9v_performance_code": false,
+    "r9v_custom_kernels": false,
+    "r4d": {
+      "enabled": true,
+      "scope": "exact TP2 BF16 all-reduce only",
+      "kernel": "ar_oneshot_2rank_exact",
+      "quantized_all_reduce": false,
+      "attention_and_gdn": false
+    },
+    "mtp_tokens": 2,
+    "ple_residency": "fully materialized pageable CPU RAM through public PLE offload",
+    "expert_offload": "public vLLM UVA, 37.5 logical GiB per rank",
+    "attention": "ROCM_AITER_UNIFIED_ATTN",
+    "max_model_len": 8448,
+    "max_num_batched_tokens": 1024,
+    "kv_cache_memory_bytes": 1073741824,
+    "source_diff_sha256": {
+      "radiance": "8be37f2ecd39a51fb39156720d1fd6da8db117d0e3be3019604ecef70ec4f2a7",
+      "vllm": "1d54b12d151a5373f9216792dfd7516cea66b700754d2c9f26b6048c0bb01b7e",
+      "gguf_plugin": "b2607daf1c987c4015e32fefa32d948331eb138ccf1db19e395a4e28ea3af905"
+    }
+  },
+  "protocol": {
+    "tg_harness_sha256": "196e6f7af18a69398b2b222ff2154dee6c56e259a6af1031d2b7a9cf39b36219",
+    "tg_prompt_sha256": "5223ff2fe77292258301122e1773f1d9ceb9459d02de2d1e5d4fc7e4da3b7b08",
+    "pp_harness_sha256": "98ef76aa30c01fc2cd9e1a1a8b4713e7f767de8b8a91b3a7c36d9723ea39d951",
+    "pp_corpus_sha256": "a9a89dfd830af253103f86ff25dcba55364b22db779664d2fb36a3c2fd058710",
+    "pp_prefix_cache_policy": "unique nonce per request; measured prefix-cache hits were zero",
+    "thinking": false,
+    "launch_script_sha256": "e271b8a8da25ecf26603475b0c987026054fe265e5770654e7d638b90fa3c8c3"
+  },
+  "tg256": {
+    "prompt_tokens": 278,
+    "completion_tokens": 256,
+    "warmups": 1,
+    "samples_tok_s": [
+      26.248984429487212,
+      26.210716300380213,
+      26.19519773980817
+    ],
+    "mean_tok_s": 26.218299489891866,
+    "min_tok_s": 26.19519773980817,
+    "max_tok_s": 26.248984429487212,
+    "output_sha256": "10a8c20689b73ebf7f1341ca94407fede1df3733998ae12e7519f09d4b5e4e71",
+    "output_correctness": "three deterministic outputs were coherent and byte-identical"
+  },
+  "pp8192": {
+    "target_prompt_tokens": 8192,
+    "prompt_tokens": 8192,
+    "prompt_tokens_samples": [8192, 8192, 8192, 8192, 8192, 8192, 8192, 8192, 8192, 8136],
+    "completion_tokens": 1,
+    "warmups": 0,
+    "samples_tok_s": [
+      46.359503425297646,
+      44.403627511032646,
+      43.73660301694399,
+      46.328224723484745,
+      45.135157841452994,
+      48.59211889840177,
+      46.98551910713279,
+      43.617301867105006,
+      42.96449685604261,
+      44.611163227832705
+    ],
+    "mean_tok_s": 45.27337164747269,
+    "median_tok_s": 44.87316053464285,
+    "min_tok_s": 42.96449685604261,
+    "max_tok_s": 48.59211889840177,
+    "prefix_cache_hits_tokens": 0,
+    "warm_state": "server graph/model warmup plus one TG warmup and three TG measurements preceded the PP matrix"
+  }
+}

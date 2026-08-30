@@ -1,3 +1,14 @@
+---
+license: apache-2.0
+base_model: meta-models/Muse-Glimmer-30B
+pipeline_tag: image-text-to-text
+tags:
+  - gguf
+  - rocm
+  - muse-glimmer
+  - experimental
+---
+
 # Muse Glimmer 30B R9V V1
 
 > **Rough-draft release.** This is the first public R9V model package, not the
@@ -7,6 +18,10 @@
 
 `V1` is the public release name. `V12` is the internal research lineage of the
 exact GGUF and remains in manifests and hashes for reproducibility.
+
+The complete package, including the optional projector and DFlash sidecar, is
+pinned at Hugging Face revision
+`093f8ced7a8e2308b0f597084ebdbfa5f6614f75`.
 
 ## What it is
 
@@ -47,13 +62,16 @@ not a recommendation over Unsloth's quality quants.
 - The TG run reports 208 attention-pin fallbacks per 256-token sample; this is
   disclosed in the benchmark record rather than hidden.
 
-See the profile [benchmark report](../../../../profiles/muse-glimmer-30b/v1-r9700/BENCHMARKS.md)
-and [qualification report](../../../../profiles/muse-glimmer-30b/v1-r9700/QUALIFICATION.md).
+See the R9V
+[benchmark report](https://github.com/Dyluhn/R9V/blob/main/profiles/muse-glimmer-30b/v1-r9700/BENCHMARKS.md)
+and
+[qualification report](https://github.com/Dyluhn/R9V/blob/main/profiles/muse-glimmer-30b/v1-r9700/QUALIFICATION.md).
 
 ## License and provenance
 
-The model artifact remains under Apache License 2.0. It is derived immediately
-from Unsloth's pinned Q8_0 GGUF of Meta's Muse Glimmer 30B model and was
-requantized with llama.cpp/ggml tooling. Exact revisions and hashes are in
-`sources.lock.json`; complete attribution and Meta usage-policy guidance are in
-[`MODEL_LICENSES/Muse-Glimmer-30B.md`](../../../../MODEL_LICENSES/Muse-Glimmer-30B.md).
+The model artifact remains under [Apache License 2.0](LICENSE). It is derived
+immediately from Unsloth's pinned Q8_0 GGUF of Meta's Muse Glimmer 30B model
+and was requantized with llama.cpp/ggml tooling. Exact revisions and hashes are
+in [`sources.lock.json`](sources.lock.json); complete attribution and Meta
+usage-policy guidance are in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

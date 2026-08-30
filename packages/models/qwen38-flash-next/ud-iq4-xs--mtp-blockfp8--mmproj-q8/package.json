@@ -5,10 +5,10 @@
   "quant": "Unsloth UD-IQ4_XS target + official block-FP8 MTP + ggml-org Q8_0 mmproj",
   "license": "Qwen Community License 1.0",
   "distribution": {
-    "status": "prepared",
+    "status": "published",
     "repository": "Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS",
-    "revision": null,
-    "note": "The local serving path is qualified; public artifact upload and a clean-checkout release benchmark are separate release actions."
+    "revision": "bf836f0c20b6c92fcad4226ad3115eb8a19f7582",
+    "note": "All 22 published files were remotely size- and SHA256-verified at this immutable revision. A clean-host fetch/verify/build/run remains the final profile qualification gate."
   },
   "artifacts": [
     {
@@ -16,6 +16,13 @@
       "path": "LICENSE",
       "bytes": 3220,
       "sha256": "9fc8eea719a230d8eae622605f56b5f094183df8b8d446c57eeb2628bc988313",
+      "required": true
+    },
+    {
+      "role": "third-party-notices",
+      "path": "THIRD_PARTY_NOTICES.md",
+      "bytes": 1591,
+      "sha256": "cc9e2ae32f08edf2060d36477150a60df589fc24f800247e45bb6053e31480b7",
       "required": true
     },
     {

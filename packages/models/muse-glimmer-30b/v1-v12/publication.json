@@ -1,0 +1,28 @@
+{
+  "schema": "r9v.huggingface-publication.v1",
+  "repository": "Dyluhn/Muse-Glimmer-30B-R9V-V1",
+  "repo_type": "model",
+  "package_descriptor": "package.json",
+  "metadata": [
+    {"source": "README.md", "destination": "README.md"},
+    {"source": "LICENSE", "destination": "LICENSE"},
+    {"source": "THIRD_PARTY_NOTICES.md", "destination": "THIRD_PARTY_NOTICES.md"},
+    {"source": "package.json", "destination": "package.json"},
+    {"source": "sources.lock.json", "destination": "sources.lock.json"},
+    {"source": "quality.json", "destination": "quality.json"},
+    {"source": "publication.json", "destination": "publication.json"}
+  ],
+  "payload_sources": {
+    "target/Muse-Glimmer-30B-R9V-V1.gguf": {
+      "argument": "target"
+    },
+    "vision/mmproj-kquant.gguf": {
+      "argument": "sidecar_root",
+      "relative_path": "mmproj-kquant.gguf"
+    },
+    "draft/dflash-kquant.gguf": {
+      "argument": "sidecar_root",
+      "relative_path": "dflash-kquant.gguf"
+    }
+  }
+}

@@ -95,7 +95,11 @@ def timed_completion(
             if item.get("usage"):
                 usage = item["usage"]
             choices = item.get("choices") or []
-            if choices and choices[0].get("text") and first_content is None:
+            # A generated token can legitimately decode to an empty string
+            # (for example a special token).  The SSE choice still marks the
+            # first output-token event and therefore the end of prompt
+            # processing; requiring truthy text silently drops valid PP runs.
+            if choices and "text" in choices[0] and first_content is None:
                 first_content = now
     ended = time.perf_counter()
     if first_content is None or usage is None:
@@ -118,6 +122,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="qwen3.8-flash-next")
     parser.add_argument("--target-tokens", type=int, default=8192)
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument(
+        "--start-run",
+        type=int,
+        default=1,
+        help="one-based run number, for resuming an interrupted matrix",
+    )
+    parser.add_argument(
+        "--total-runs",
+        type=int,
+        help="total matrix size used to preserve corpus offsets when resuming",
+    )
     parser.add_argument("--max-tokens", type=int, default=16)
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument(
@@ -136,6 +151,11 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target-tokens must be at least 128")
     if args.runs < 1:
         parser.error("--runs must be positive")
+    if args.start_run < 1:
+        parser.error("--start-run must be positive")
+    total_runs = args.total_runs or args.runs
+    if total_runs < args.start_run + args.runs - 1:
+        parser.error("--total-runs does not cover the requested run range")
     if args.max_tokens < 1:
         parser.error("--max-tokens must be positive")
     if args.pause_seconds < 0:
@@ -159,10 +179,14 @@ def main() -> None:
         )
     run_results = []
     max_offset = max(0, len(corpus) - minimum_chars)
-    for run in range(args.runs):
-        offset = 0 if args.runs == 1 else max_offset * run // (args.runs - 1)
+    total_runs = args.total_runs or args.runs
+    for request_index in range(args.runs):
+        run = args.start_run + request_index
+        offset = (
+            0 if total_runs == 1 else max_offset * (run - 1) // (total_runs - 1)
+        )
         nonce = time.time_ns()
-        prefix = f"R9V PP validation run={run + 1} nonce={nonce}.\n"
+        prefix = f"R9V PP validation run={run} nonce={nonce}.\n"
         prompt, fitted_tokens = fit_prompt(
             args.url.rstrip("/"),
             args.model,
@@ -178,10 +202,10 @@ def main() -> None:
             args.max_tokens,
             args.timeout,
         )
-        result.update({"run": run + 1, "offset": offset, "fitted_tokens": fitted_tokens})
+        result.update({"run": run, "offset": offset, "fitted_tokens": fitted_tokens})
         run_results.append(result)
         print(json.dumps(result, sort_keys=True), flush=True)
-        if run + 1 < args.runs and args.pause_seconds:
+        if request_index + 1 < args.runs and args.pause_seconds:
             time.sleep(args.pause_seconds)
 
     rates = [float(result["pp_tok_s"]) for result in run_results]
@@ -199,6 +223,8 @@ def main() -> None:
         payload = {
             "corpus": str(args.corpus.resolve()),
             "target_tokens": args.target_tokens,
+            "start_run": args.start_run,
+            "total_runs": total_runs,
             "max_tokens": args.max_tokens,
             "pause_seconds": args.pause_seconds,
             "results": run_results,
