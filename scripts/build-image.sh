@@ -7,6 +7,13 @@ base_image=${R9V_BASE_IMAGE:-r9v-vllm-qwen38-base:latest}
 runtime_image=${R9V_IMAGE:-r9v-qwen38-flash-next:latest}
 max_jobs=${R9V_MAX_JOBS:-8}
 
+if ! docker buildx version >/dev/null 2>&1; then
+    printf '%s\n' \
+        'Docker Buildx is required by the vLLM Dockerfile.' \
+        'Install the official docker/buildx plugin, then rerun this command.' >&2
+    exit 1
+fi
+
 for required in \
     "$repo_root/vendor/vllm/docker/Dockerfile.rocm" \
     "$repo_root/vendor/vllm-gguf-plugin/setup.py" \
@@ -18,7 +25,7 @@ for required in \
     }
 done
 
-docker build \
+docker buildx build --load \
     --file "$repo_root/vendor/vllm/docker/Dockerfile.rocm" \
     --target vllm-openai \
     --build-arg REMOTE_VLLM=0 \
@@ -27,7 +34,7 @@ docker build \
     --tag "$base_image" \
     "$repo_root/vendor/vllm"
 
-docker build \
+docker buildx build --load \
     --file "$repo_root/docker/Dockerfile.runtime" \
     --build-arg BASE_IMAGE="$base_image" \
     --build-arg GFX_ARCH=gfx1201 \

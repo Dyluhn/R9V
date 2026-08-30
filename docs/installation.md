@@ -29,6 +29,13 @@ cd R9V
 The submodule commits are the release inputs. Do not replace them with branch
 heads if you want the reported reference behavior.
 
+The build requires Docker with the official Buildx CLI plugin. Confirm it
+before starting the source build:
+
+```bash
+docker buildx version
+```
+
 ## 2. Build the image
 
 The first stage uses vLLM's Apache-2.0 ROCm Dockerfile on the pinned R9V fork.

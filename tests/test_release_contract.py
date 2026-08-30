@@ -121,3 +121,10 @@ def test_root_readme_local_links_exist() -> None:
     for target in local_targets:
         path = target.split("#", maxsplit=1)[0]
         assert (ROOT / path).exists(), target
+
+
+def test_image_build_requires_buildx_and_loads_local_images() -> None:
+    script = (ROOT / "scripts/build-image.sh").read_text(encoding="utf-8")
+
+    assert "docker buildx version" in script
+    assert script.count("docker buildx build --load") == 2
