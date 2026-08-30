@@ -36,6 +36,18 @@ user path is incomplete. `release-candidate` means the runtime is qualified on
 the reference topology but a release gate remains. A profile becomes
 `qualified` only after its advertised download-to-user path passes end to end.
 
+## Model downloads
+
+| Model package | Direct download | Package contents | Runtime status |
+|---|---|---|---|
+| Qwen3.8 Flash Next R9V IQ4_XS | **[Hugging Face model repository](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS)** | Target GGUF shards, block-FP8 MTP, Q8 vision projector, metadata, and placement manifest | Dual-R9700 OpenAI runtime is a release candidate |
+| Muse Glimmer 30B R9V V1 | **[Hugging Face model repository](https://huggingface.co/Dyluhn/Muse-Glimmer-30B-R9V-V1)** | V1/V12 GGUF, projector, DFlash sidecar, license, and provenance | Model is public; custom single-R9700 user runtime is still experimental |
+
+Both repositories are public and immutable artifact revisions are pinned in
+their R9V package descriptors. The model license shown in each repository
+applies to its weights; downloading a model does not imply that its runtime has
+passed every profile qualification gate.
+
 Browse the catalog from a recursive clone:
 
 ```bash

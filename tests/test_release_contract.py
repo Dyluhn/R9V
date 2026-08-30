@@ -120,6 +120,11 @@ def test_root_readme_does_not_overstate_release_readiness() -> None:
     assert "immutable 90.36 GiB model package is public" in readme
     assert "clean-host package installation test" in readme
     assert "./r9v list --by-topology" in readme
+    assert (
+        "https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS"
+        in readme
+    )
+    assert "https://huggingface.co/Dyluhn/Muse-Glimmer-30B-R9V-V1" in readme
 
 
 def test_root_readme_local_links_exist() -> None:
