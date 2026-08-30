@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
 import json
@@ -106,7 +107,7 @@ def test_root_readme_does_not_overstate_release_readiness() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "fully custom native R9V engines" in readme
-    assert "adapted vLLM/Radiance" in readme
+    assert "adapted vLLM deployment architecture informed by" in readme
     assert "package upload is not public yet" in readme
     assert "clean-checkout release benchmark" in readme
     assert "./r9v list --by-topology" in readme
@@ -125,7 +126,15 @@ def test_root_readme_local_links_exist() -> None:
 
 def test_image_build_requires_buildx_and_loads_local_images() -> None:
     script = (ROOT / "scripts/build-image.sh").read_text(encoding="utf-8")
+    dockerfile = (
+        ROOT / "vendor/vllm/docker/Dockerfile.r9v_rocm714"
+    ).read_text(encoding="utf-8")
 
     assert "docker buildx version" in script
     assert script.count("docker buildx build --load") == 2
     assert 'R9V_VLLM_VERSION="$vllm_version"' in script
+    assert "Dockerfile.r9v_rocm714" in script
+    assert "rocm/dev-ubuntu-24.04:7.14.0-full@sha256:" in dockerfile
+    assert "TORCH_VERSION=2.11.0" in dockerfile
+    assert "TRITON_VERSION=3.6.0" in dockerfile
+    assert "FLYDSL_VERSION=0.2.4" in dockerfile

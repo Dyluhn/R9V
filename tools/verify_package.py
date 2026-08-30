@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Verify an installed R9V model package against its immutable descriptor."""
 
 from __future__ import annotations

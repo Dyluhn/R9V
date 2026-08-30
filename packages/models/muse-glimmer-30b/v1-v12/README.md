@@ -49,3 +49,11 @@ not a recommendation over Unsloth's quality quants.
 
 See the profile [benchmark report](../../../../profiles/muse-glimmer-30b/v1-r9700/BENCHMARKS.md)
 and [qualification report](../../../../profiles/muse-glimmer-30b/v1-r9700/QUALIFICATION.md).
+
+## License and provenance
+
+The model artifact remains under Apache License 2.0. It is derived immediately
+from Unsloth's pinned Q8_0 GGUF of Meta's Muse Glimmer 30B model and was
+requantized with llama.cpp/ggml tooling. Exact revisions and hashes are in
+`sources.lock.json`; complete attribution and Meta usage-policy guidance are in
+[`MODEL_LICENSES/Muse-Glimmer-30B.md`](../../../../MODEL_LICENSES/Muse-Glimmer-30B.md).

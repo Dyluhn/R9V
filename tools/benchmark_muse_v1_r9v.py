@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Benchmark the frozen Muse V1 R9V proof engine without changing its runtime."""
 
 from __future__ import annotations

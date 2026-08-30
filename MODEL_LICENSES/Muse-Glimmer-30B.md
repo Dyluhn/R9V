@@ -11,9 +11,12 @@ Immediate quantization source:
 - source `Muse-Glimmer-30B-Q8_0.gguf`
 - SHA256 `f2c087d694ca8242a4a436076df7c041703ab051ac4b72bb1bfe2698299b0e86`
 
-Base model owner: Meta. Quantized Q8 source: Unsloth. Conversion and
-requantization tooling: llama.cpp/ggml (MIT). R9V supplies the V1/V12 tensor
-assignments, packaging, runtime specialization, and explicit quality and
-qualification disclosures.
+Base model owner: Meta, revision
+`a4e59da52a7bc87ae7251dd5545c0dd437c44b68`. Quantized Q8 source: Unsloth.
+Conversion and requantization tooling: llama.cpp/ggml (MIT). R9V supplies the
+V1/V12 tensor assignments, packaging, runtime specialization, and explicit
+quality and qualification disclosures.
 
-Users should also review Meta's Muse usage policy and model card.
+Users should also review Meta's
+[model card](https://huggingface.co/meta-models/Muse-Glimmer-30B) and
+[Muse usage policy](https://huggingface.co/meta-models/Muse-Glimmer-30B/blob/a4e59da52a7bc87ae7251dd5545c0dd437c44b68/USAGE_POLICY.md).

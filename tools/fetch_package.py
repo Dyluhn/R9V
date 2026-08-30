@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Fetch a published immutable R9V model package from Hugging Face."""
 
 from __future__ import annotations

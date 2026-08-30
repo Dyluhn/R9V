@@ -38,16 +38,21 @@ docker buildx version
 
 ## 2. Build the image
 
-The first stage uses vLLM's Apache-2.0 ROCm Dockerfile on the pinned R9V fork.
-The second stage installs the pinned GGUF plugin and compiles the three R9V
-kernel extensions for `gfx1201`.
+The first stage rebuilds PyTorch 2.11, Triton 3.6, AITER, and the Apache-2.0
+vLLM fork against the immutable official ROCm 7.14 base used for
+qualification. The ROCm base is digest-pinned because the mutable
+`rocm/vllm-dev:base` moved to a stack that cannot establish HIP IPC on the
+reference host. The second stage installs the pinned GGUF plugin and compiles
+the three R9V kernel extensions for `gfx1201`.
 
 ```bash
 R9V_MAX_JOBS=8 ./scripts/build-image.sh
 ```
 
-This is a source build and is intentionally expensive. It avoids depending on
-an unpublished local Radiance image or any R4D component.
+This is an intentionally expensive source build. Budget tens of GiB of Docker
+build storage and substantial CPU time on the first run; BuildKit reuses the
+component layers afterward. It does not depend on an unpublished Radiance
+image or any R4D component.
 
 ## 3. Fetch or arrange the model bundle
 

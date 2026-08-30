@@ -5,9 +5,9 @@ The following items block the next public tag:
 
 ## Repository-wide
 
-- Commit and publish the independently implemented multimodal draft-mask
-  alignment helper and its invariant-based tests; the historical copied hunk
-  has been removed from the working tree.
+- Retain the independently implemented multimodal draft-mask alignment helper
+  and its invariant-based tests in the pinned vLLM revision; the historical
+  copied hunk must remain absent.
 - Repeat the file/hunk provenance pass in `docs/provenance-audit.md` against
   the final committed revisions and retain the result with the release.
 - Preserve the exact llama.cpp `b2899` MIT notice in the wrapper, plugin fork,
@@ -27,9 +27,10 @@ The following items block the next public tag:
 
 ## Muse R9V V1 profile
 
-- Resolve the full Meta base-model revision in `sources.lock.json`.
 - Publish the exact 24,554,611,392-byte V1/V12 GGUF to an immutable model
   revision with the rough-draft quality warning intact.
+- Include Apache License 2.0 and the Meta/Unsloth/llama.cpp attribution notice
+  in that model package, and pin both files in its package descriptor.
 - Curate and license-audit the minimal proof-engine source; do not import the
   legacy research workspace wholesale.
 - Rebuild and hash-match the accepted executable and gfx1201 code object.

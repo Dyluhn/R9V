@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -37,7 +38,7 @@ fi
 
 case "$profile_id" in
     qwen38-flash-next/*)
-        check_file "$repo_root/vendor/vllm/docker/Dockerfile.rocm"
+        check_file "$repo_root/vendor/vllm/docker/Dockerfile.r9v_rocm714"
         check_file "$repo_root/vendor/vllm-gguf-plugin/setup.py"
         check_file "$repo_root/kernels/r9v-gfx1201/README.md"
         printf 'NOTE rank order is semantic; confirm R9V_VISIBLE_DEVICES before launch.\n'

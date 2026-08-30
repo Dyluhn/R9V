@@ -59,7 +59,8 @@ standalone fused-GDN adapter carry explicit license/modification headers.
 
 ## Final-tag requirements
 
-1. Commit the root and all three submodule changes.
+1. Keep the root and all three submodules pinned to the audited revisions, with
+   no dirty or untracked release inputs.
 2. Update the release lock to those exact commits.
 3. Repeat this comparison against the frozen tree and retain its output.
 4. Inspect the built source, wheel, image, and kernel artifacts for their

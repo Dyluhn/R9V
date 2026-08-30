@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """Discover, inspect, validate, and run exact R9V model profiles."""
 
 from __future__ import annotations

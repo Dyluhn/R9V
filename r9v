@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """R9V profile catalog command."""
 
 from tools.r9v import main

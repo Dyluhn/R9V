@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -18,7 +19,7 @@ if ! docker buildx version >/dev/null 2>&1; then
 fi
 
 for required in \
-    "$repo_root/vendor/vllm/docker/Dockerfile.rocm" \
+    "$repo_root/vendor/vllm/docker/Dockerfile.r9v_rocm714" \
     "$repo_root/vendor/vllm-gguf-plugin/setup.py" \
     "$repo_root/kernels/r9v-gfx1201/README.md"; do
     [[ -f "$required" ]] || {
@@ -29,12 +30,11 @@ for required in \
 done
 
 docker buildx build --load \
-    --file "$repo_root/vendor/vllm/docker/Dockerfile.rocm" \
-    --target vllm-openai \
-    --build-arg REMOTE_VLLM=0 \
+    --file "$repo_root/vendor/vllm/docker/Dockerfile.r9v_rocm714" \
+    --target r9v-vllm-base \
     --build-arg R9V_VLLM_VERSION="$vllm_version" \
-    --build-arg ARG_PYTORCH_ROCM_ARCH=gfx1201 \
-    --build-arg max_jobs="$max_jobs" \
+    --build-arg GFX_ARCH=gfx1201 \
+    --build-arg MAX_JOBS="$max_jobs" \
     --tag "$base_image" \
     "$repo_root/vendor/vllm"
 

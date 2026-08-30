@@ -82,8 +82,9 @@ invariant: the multimodal marker mask must select the same compacted rows as
 the draft-token buffer. Compatibility environment-variable names do not
 import or relicense Radiance source.
 
-The public tag remains gated on committing that replacement and completing a
-file-level provenance review of the fork deltas.
+That replacement and its tests are pinned in the audited vLLM revision. The
+public tag remains gated on repeating the file-level provenance review against
+the final frozen release revisions.
 
 ## Muse Glimmer / R9V V1
 

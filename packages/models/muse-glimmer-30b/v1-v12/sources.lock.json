@@ -3,9 +3,9 @@
   "package": "muse-glimmer-30b-r9v-v1-v12",
   "base_model": {
     "repository": "meta-models/Muse-Glimmer-30B",
-    "revision_prefix": "a4e59da",
+    "revision": "a4e59da52a7bc87ae7251dd5545c0dd437c44b68",
     "license": "Apache-2.0",
-    "note": "Resolve and record the full base-model commit before publication."
+    "model_card": "https://huggingface.co/meta-models/Muse-Glimmer-30B/tree/a4e59da52a7bc87ae7251dd5545c0dd437c44b68"
   },
   "immediate_quant_source": {
     "repository": "unsloth/Muse-Glimmer-30B-GGUF",

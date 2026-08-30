@@ -8,22 +8,23 @@ benchmark fragments.
 
 The project currently has two distinct runtime families:
 
-- **Single GPU:** fully custom native R9V engines specialized around one exact
-  model quant and `gfx1201` kernel set.
-- **Dual GPU:** an adapted vLLM/Radiance deployment architecture using an
-  Apache-2.0 vLLM fork, the GGUF plugin, and R9V kernels. The release tree does
-  not redistribute the unlicensed Radiance launcher or R4D source.
+- **Single GPU:** fully custom native R9V engines. The current profile targets
+  the exact Muse Glimmer V1 quant and `gfx1201` kernel set.
+- **Dual GPU:** an adapted vLLM deployment architecture informed by the
+  Radiance profiling workflow, using an Apache-2.0 vLLM fork, the GGUF plugin,
+  and R9V kernels. The release tree does not redistribute the unlicensed
+  Radiance launcher or R4D source.
 
 ## Current status
 
 | Topology | Supported model/profile | Engine | Public status | User surface |
 |---|---|---|---|---|
 | Single R9700 | `muse-glimmer-30b/v1/single-r9700` | Custom native HIP engine | Experimental canonical V1 | Frozen raw-token proof; curated user runtime pending |
-| Dual R9700 | `qwen38-flash-next/ud-iq4-xs/dual-r9700-128k` | Adapted vLLM/Radiance stack | Release candidate | OpenAI-compatible text, tools, and vision |
+| Dual R9700 | `qwen38-flash-next/ud-iq4-xs/dual-r9700-128k` | Adapted vLLM stack; Radiance-informed workflow | Release candidate | OpenAI-compatible text, tools, and vision |
 
 The Qwen runtime works end-to-end on the reference machine, but its public
 model revision and clean-checkout release benchmark are still pending. The
-Muse engines have frozen model and benchmark identities, but the curated
+Muse has frozen model and benchmark identities, but the curated
 source-complete user runtime has not yet been published. Those distinctions
 are deliberate: R9V does not label a local proof as a downloadable release.
 
@@ -57,18 +58,31 @@ descriptor contains an immutable revision. Once that revision is published,
 the supported path is:
 
 ```bash
+export MODEL_DIR=/path/to/qwen38-r9v
+export R9V_DATA_DIR=/fast-ssd/r9v
+mkdir -p "$R9V_DATA_DIR"
+
 R9V_MAX_JOBS=8 ./r9v build qwen38
 
 ./r9v fetch qwen38 \
-  --model-dir /path/to/qwen38-r9v \
+  --model-dir "$MODEL_DIR" \
   --accept-model-license
 
-python tools/prepare_ple.py /path/to/qwen38-r9v/target/*.gguf \
-  --output /fast-ssd/r9v/per_layer_token_embd.iq4_nl.bin
+docker run --rm --entrypoint python3 \
+  --security-opt label=disable \
+  --volume "$PWD:/r9v:ro" \
+  --volume "$MODEL_DIR:/models:ro" \
+  --volume "$R9V_DATA_DIR:/r9v-data" \
+  r9v-qwen38-flash-next:latest \
+  /r9v/tools/prepare_ple.py \
+  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf \
+  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf \
+  /models/target/Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf \
+  --output /r9v-data/per_layer_token_embd.iq4_nl.bin
 
-export R9V_PLE_PATH=/fast-ssd/r9v/per_layer_token_embd.iq4_nl.bin
-export R9V_CACHE_DIR=/fast-ssd/r9v/cache
-./r9v run qwen38 --model-dir /path/to/qwen38-r9v
+export R9V_PLE_PATH="$R9V_DATA_DIR/per_layer_token_embd.iq4_nl.bin"
+export R9V_CACHE_DIR="$R9V_DATA_DIR/cache"
+./r9v run qwen38 --model-dir "$MODEL_DIR"
 ```
 
 The server listens at `http://127.0.0.1:8004/v1`. See
@@ -78,8 +92,8 @@ PP/TG integration.
 
 ### Single R9700: Muse Glimmer
 
-The single-card path is a completely custom R9V engine rather than vLLM. Both
-Muse profiles currently fail closed at `build` and `run` because publishing the
+The single-card path is a completely custom R9V engine rather than vLLM. The
+Muse profile currently fails closed at `build` and `run` because publishing the
 legacy research workspace would not be reproducible or license-clean.
 
 What users can verify now:

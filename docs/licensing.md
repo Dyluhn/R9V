@@ -24,9 +24,10 @@ components or model weights.
 | Qwen3.8 Flash Next target, MTP, projector, metadata, and derived PLE | Qwen Community License 1.0 | Distributed separately with the exact Qwen license. Users must review the commercial MaaS/AI-work-assistant and scale clauses. |
 | Muse Glimmer 30B R9V V1 | Apache-2.0 | The modified quantization retains Meta's license and identifies Meta, the pinned Unsloth Q8 source, and llama.cpp tooling. Meta's usage policy is linked as additional use guidance. |
 
-The Qwen package's `LICENSE` is copied byte-for-byte from the official model
-repository. The Muse source locks record the immediate Unsloth revision and
-the Meta model lineage.
+The Qwen package's staged `LICENSE` preserves the official license text with
+normalized line endings, and its exact bytes are pinned in the package
+descriptor. The Muse source locks record the immediate Unsloth revision and
+the full Meta base-model revision.
 
 ## Release checklist
 
