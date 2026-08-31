@@ -5,7 +5,7 @@
   "architecture": "gfx1201",
   "gpu_count": 2,
   "vram_bytes_per_gpu": 34384920576,
-  "host_ram_min_bytes": 128000000000,
+  "reference_host_ram_bytes": 128000000000,
   "reference_topology": [
     {"rank": 0, "role": "display", "pcie": "Gen5 x16"},
     {"rank": 1, "role": "headless", "pcie": "Gen4 x4"}

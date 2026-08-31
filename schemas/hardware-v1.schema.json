@@ -11,6 +11,11 @@
     "architecture": {"type": "string", "minLength": 1},
     "gpu_count": {"type": "integer", "minimum": 1},
     "vram_bytes_per_gpu": {"type": "integer", "minimum": 1},
+    "reference_host_ram_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Host RAM of the qualified reference machine. Not an enforced minimum; smaller hosts are untested."
+    },
     "reference_topology": {"type": "array"},
     "constraints": {"type": "object"},
     "portable_knobs": {"type": "array", "items": {"type": "string"}}

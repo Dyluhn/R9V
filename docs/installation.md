@@ -19,7 +19,12 @@ The host prerequisites are:
 - Linux with two 32 GiB Radeon AI PRO R9700 (`gfx1201`) GPUs, a working ROCm
   host driver and `amd-smi` inventory CLI, and access to `/dev/kfd` and
   `/dev/dri`;
-- at least 128 GiB host RAM;
+- host RAM: the profile is qualified on a 128 GiB reference host. Smaller
+  hosts are untested, not rejected — expert weights are UVA/page-cache
+  resident and the PLE defaults to SSD residency, so less RAM degrades to
+  SSD-bound expert access rather than failing outright. On a smaller host,
+  keep `R9V_PLE_RESIDENCY_MODE=ssd` and consider lowering
+  `R9V_PLE_PINNED_RESERVE_BYTES` (default 16 GiB);
 - Git, Python 3.10 or newer, `curl`, Docker with daemon access, and the official
   Docker Buildx CLI plugin;
 - host `render` and `video` group records for the device GIDs passed into the
@@ -186,7 +191,8 @@ docker rm "$container"
 - Two 32 GiB Radeon R9700 (`gfx1201`) GPUs in TP2.
 - Qwen3.8 in this branch is currently dual-R9700 only.
 - Rank 0 is the display GPU; rank 1 is the more tightly packed card.
-- 128 GiB host RAM.
+- 128 GiB host RAM on the reference machine (not an enforced minimum).
+- Rank 0 on PCIe Gen5 x16; rank 1 on PCIe Gen4 x4.
 - 128K BF16 QSA KV configuration and one concurrent sequence.
 - Expert placement is prompt-profile dependent. Other workloads should collect
   a route corpus and regenerate the manifest rather than assuming this ranking

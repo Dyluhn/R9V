@@ -47,7 +47,7 @@ Verify all of these before step 1:
 |---|---|
 | Two 32 GiB Radeon AI PRO R9700 (`gfx1201`) | `amd-smi list` |
 | ROCm driver, `/dev/kfd` and `/dev/dri` access | `ls /dev/kfd /dev/dri` |
-| ≥ 128 GiB host RAM | `free -g` |
+| Host RAM (128 GiB on the reference host) | `free -g` — see note below |
 | Docker daemon + Buildx plugin | `docker info`, `docker buildx version` |
 | Python ≥ 3.10, Git, `curl` | `python3 --version` |
 | Hugging Face CLI | `hf version` (needed by `fetch`) |
@@ -56,6 +56,13 @@ Verify all of these before step 1:
 
 `./r9v doctor qwen38` automates most of this. Trust its output over your own
 guesses.
+
+Host RAM note: 128 GiB is the qualified reference machine, not an enforced
+minimum. Expert weights are UVA/page-cache resident and the PLE defaults to
+SSD residency, so a smaller host degrades to SSD-bound expert access rather
+than refusing to start. If the user has less than 128 GiB, warn them that the
+configuration is untested and performance will likely drop, but do not treat
+it as a hard blocker.
 
 ## Setup sequence
 

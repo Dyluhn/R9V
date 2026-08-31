@@ -55,7 +55,9 @@ Host requirements:
 - Linux with a working ROCm driver, `amd-smi`, and access to `/dev/kfd` and
   `/dev/dri`
 - two 32 GiB Radeon AI PRO R9700 (`gfx1201`) GPUs
-- at least 128 GiB host RAM
+- host RAM: qualified on a 128 GiB reference host. Less is untested but not
+  rejected — expert weights are UVA/page-cache resident, so a smaller host
+  degrades to SSD-bound expert access rather than failing outright
 - Git, Python 3.10+, `curl`, Docker with the Buildx plugin, and the
   Hugging Face `hf` CLI
 - roughly 150 GiB of free storage: a 90.36 GiB model package, a 26.82 GiB
@@ -155,7 +157,15 @@ and contained no R9V performance kernels or placement code.
 | R9V Qwen V1 | 1,512.01 | 78.11 |
 | Stock/public Radiance | 45.27 | 26.22 |
 
-That is 33.4x on prefill and 2.98x on decode in these cells. PP cells are
+That is 33.4x on prefill and 2.98x on decode in these cells.
+
+The reference host is asymmetric: rank 0 sits on PCIe Gen5 x16, rank 1 on
+Gen4 x4, so all TP2 all-reduce and UVA expert traffic for rank 1 crosses a
+Gen4 x4 link. Treat these numbers as a floor for better-connected hosts — a
+symmetric Gen5 x8/x8 layout is expected to improve on them significantly,
+though that has not been measured yet.
+
+PP cells are
 means of ten forced prefix-cache-miss requests over the same Aider corpus
 slices; TG cells are means of three 278+256 OpenAI requests with thinking
 disabled. Radiance ran with its public non-quantized TP2 all-reduce, AITER
@@ -225,6 +235,10 @@ Boundaries and remaining release gates are documented in
   profile contract.
 - Device ordering and expert placement are semantic for the dual-R9700 Qwen
   profile. Other layouts need a new placement profile.
+- Dual-GPU benchmarks were taken on an asymmetric PCIe layout (Gen5 x16 +
+  Gen4 x4); hosts with more interconnect bandwidth should do better.
+- The 128 GiB host RAM figure is the qualified reference machine, not an
+  enforced minimum. Smaller hosts are untested.
 - Expert placement is tuned from a specific prompt corpus. Different workloads
   should collect their own route corpus and regenerate the manifest.
 - Model hashes, runtime revisions, topology, and benchmark protocol are part
