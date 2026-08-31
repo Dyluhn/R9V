@@ -75,6 +75,8 @@ exposing only the intended GPU.
   two small bulk shapes. The run is valid, but this remains an optimization
   and qualification gap.
 - R9V uses about 25.04 GB peak allocated VRAM in the TG cell.
-- Vision, DFlash, chat templating, and API overhead are excluded.
+- Vision, DFlash, chat templating, and API overhead are excluded. Both R9V
+  and llama.cpp support DFlash2 with this model's sidecar, so the TG cells
+  are plain autoregressive decode, not either engine's fastest configuration.
 - Quality is addressed separately and is the larger release caveat: V1 is
   substantially worse than Unsloth Q5/Q6 on the recorded evaluator.

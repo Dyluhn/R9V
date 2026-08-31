@@ -188,6 +188,11 @@ that column.
 | llama.cpp ROCm | 1,477.87 | 1,477.57 | 1,419.88 | 24.30 |
 | llama.cpp Vulkan | 1,204.85 | 1,182.54 | 1,126.46 | 24.92 |
 
+TG256 was measured without DFlash2 speculative decoding on every runtime,
+even though both R9V and llama.cpp support it with this model's DFlash
+sidecar. The decode column is the plain autoregressive path, not either
+engine's fastest configuration.
+
 This is a speed result from a frozen proof engine, not a quality endorsement.
 The V1/V12 quant records mean KLD 0.006121 versus 0.003071 for Unsloth
 UD-Q5_K_XL and 0.001034 for UD-Q6_K_XL on the same 122,400-position evaluator,
