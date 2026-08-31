@@ -188,10 +188,20 @@ that column.
 | llama.cpp ROCm | 1,477.87 | 1,477.57 | 1,419.88 | 24.30 |
 | llama.cpp Vulkan | 1,204.85 | 1,182.54 | 1,126.46 | 24.92 |
 
-TG256 was measured without DFlash2 speculative decoding on every runtime,
-even though both R9V and llama.cpp support it with this model's DFlash
-sidecar. The decode column is the plain autoregressive path, not either
-engine's fastest configuration.
+The TG256 column is plain autoregressive decode. Both engines also support
+DFlash2 speculative decoding with the package's sidecar; measured separately
+(greedy, 128 new tokens, means of three, same GPU and model bytes):
+
+| Prompt depth | llama.cpp raw | llama.cpp +DFlash2 | R9V raw | R9V +DFlash2 |
+|---|---:|---:|---:|---:|
+| 136 (repetitive) | 24.10 | 232.65 | 26.05 | 110.69 |
+| 8192 (corpus) | 23.55 | 40.55 | 24.39 | 59.65 |
+
+The repetitive short prompt saturates draft acceptance on both engines, so
+those cells are best-case ceilings. The 8K corpus cell is the representative
+one: R9V accepts 61% of drafts against llama.cpp's 12%, decoding 1.47x
+faster assisted. Protocol, acceptance counts, and caveats are in the
+[Muse benchmark record](profiles/muse-glimmer-30b/v1-r9700/BENCHMARKS.md).
 
 This is a speed result from a frozen proof engine, not a quality endorsement.
 The V1/V12 quant records mean KLD 0.006121 versus 0.003071 for Unsloth
