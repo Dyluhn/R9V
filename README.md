@@ -258,3 +258,36 @@ Boundaries and remaining release gates are documented in
   should collect their own route corpus and regenerate the manifest.
 - Model hashes, runtime revisions, topology, and benchmark protocol are part
   of every performance claim here.
+
+## Field position (scanned 2026-08-30)
+
+A comparison of R9V against the model-specific narrow-engine field — the
+cluster defined by [antirez/ds4](https://github.com/antirez/ds4) (~22k stars,
+DeepSeek V4 on Metal/CUDA/ROCm) and
+[Neroued/ninfer](https://github.com/Neroued/ninfer) (pinned Qwen checkpoints
+on a single RTX 5090). R9V is currently the only public member of this
+family targeting AMD RDNA4.
+
+Where R9V matches or leads its peers: fail-closed exact-artifact catalogs,
+hash-verified model downloads, speculative decoding in the shipped runtime,
+and benchmark provenance (hashes, protocols, and raw samples attached to
+every claim).
+
+Where the peers are ahead, in priority order:
+
+1. **Concurrency** — ds4 batches up to 16 concurrent sessions and ninfer
+   publishes concurrent-decode numbers; the R9V Qwen profile currently
+   qualifies one sequence at a time.
+2. **Task-quality evals** — both peers publish GPQA/AIME-class scores; R9V
+   publishes distributional quality (KLD) only.
+3. **Anthropic Messages API** — both peers serve `/v1/messages` alongside
+   OpenAI; R9V is OpenAI-only.
+
+On the same silicon, a handful of small public repos deploy general stacks
+on dual-R9700/gfx1201 (SGLang and vLLM recipes). None carry qualification
+records; R9V's benchmarks are the citable datapoints for this topology.
+
+The full rubric and scan record live in [`.sota/`](.sota/); the scan was
+produced with the [sota-scan](https://github.com/MerlijnW70/sota-scan)
+methodology plus a [DeepGit](https://github.com/zamalali/DeepGit)-style
+discovery pass.

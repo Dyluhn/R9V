@@ -1,0 +1,19 @@
+{
+  "domain": "model-specific-narrow-engine",
+  "version": 1,
+  "capabilities": [
+    { "id": "exact-model-artifact-policy", "tier": "table-stakes", "test": "refuses arbitrary checkpoints; pins exact model/quant artifacts fail-closed" },
+    { "id": "verified-model-download", "tier": "table-stakes", "test": "fetches a pinned revision and hash-verifies every artifact" },
+    { "id": "openai-compatible-server", "tier": "table-stakes", "test": "serves /v1/chat/completions for the flagship profile" },
+    { "id": "speculative-decoding-user-path", "tier": "table-stakes", "test": "speculative decode active in the shipped runtime, not only in research benches" },
+    { "id": "published-reproducible-benchmarks", "tier": "table-stakes", "test": "benchmark records with protocol, hashes, and raw samples" },
+    { "id": "task-quality-eval-published", "tier": "table-stakes", "test": "publishes task-capability scores (GPQA/AIME class), not only distributional quality" },
+    { "id": "multi-session-concurrency", "tier": "table-stakes", "test": "serves more than one concurrent sequence/session" },
+    { "id": "anthropic-messages-api", "tier": "table-stakes", "test": "serves an Anthropic-compatible /v1/messages surface" },
+    { "id": "agent-integration-docs", "tier": "table-stakes", "test": "documents wiring into coding agents (Claude Code/Codex/Pi class)" },
+    { "id": "vision-multimodal", "tier": "edge", "test": "accepts image (or richer) inputs on the served API" },
+    { "id": "multi-hardware-backends", "tier": "edge", "test": "runs the same model on 2+ vendor backends" },
+    { "id": "debug-introspection-dumps", "tier": "edge", "test": "exposes logits/kernel-selection style introspection artifacts" },
+    { "id": "prebuilt-runtime-distribution", "tier": "edge", "test": "offers a prebuilt image/binary path that avoids an hours-long source build" }
+  ]
+}

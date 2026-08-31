@@ -1,0 +1,41 @@
+{
+  "date": "2026-08-30",
+  "domains": ["model-specific-narrow-engine"],
+  "rubric_version": 1,
+  "mode": "standard",
+  "benchmark_assumption": "Scored on the flagship dual-R9700 Qwen release-candidate profile; the Muse proof engine's missing user path is tracked as a maturity gap, not scored per-capability.",
+  "field": [
+    { "repo": "antirez/ds4", "cluster": "model-specific-narrow-engine", "type": "canonical", "stars": 21931, "pushed": "2026-08-31" },
+    { "repo": "Neroued/ninfer", "cluster": "model-specific-narrow-engine", "type": "technically-advanced", "stars": 1189, "pushed": "2026-08-30" },
+    { "repo": "zeux/calm", "cluster": "model-specific-narrow-engine", "type": "stale-reference", "stars": 646, "pushed": "2025-05-29" },
+    { "repo": "franchyi/spark.c", "cluster": "model-specific-narrow-engine", "type": "niche-relevant", "stars": 0, "pushed": null },
+    { "repo": "ggml-org/llama.cpp", "cluster": "portable-general-engine", "type": "canonical", "stars": 126409, "pushed": "2026-08-30" },
+    { "repo": "ollama/ollama", "cluster": "portable-general-engine", "type": "popular", "stars": 179797, "pushed": "2026-08-29" },
+    { "repo": "vllm-project/vllm", "cluster": "datacenter-serving", "type": "canonical", "stars": 90520, "pushed": "2026-08-31" },
+    { "repo": "sgl-project/sglang", "cluster": "datacenter-serving", "type": "popular", "stars": 32941, "pushed": "2026-08-31" },
+    { "repo": "NVIDIA/TensorRT-LLM", "cluster": "vendor-specific-serving", "type": "canonical", "stars": 14505, "pushed": "2026-08-30" },
+    { "repo": "EricLBuehler/mistral.rs", "cluster": "consumer-gpu-quant-engine", "type": "popular", "stars": 7639, "pushed": "2026-08-30" },
+    { "repo": "turboderp-org/exllamav3", "cluster": "consumer-gpu-quant-engine", "type": "technically-advanced", "stars": 1209, "pushed": "2026-08-28" },
+    { "repo": "mlc-ai/mlc-llm", "cluster": "compiler-based-engine", "type": "canonical", "stars": 23112, "pushed": "2026-08-17" },
+    { "repo": "mattbucci/2x-R9700-RDNA4-GFX1201-sglang-inference", "cluster": "rdna4-deployment-recipes", "type": "niche-relevant", "stars": 28, "pushed": null },
+    { "repo": "patcarter883/rdna4-vllm", "cluster": "rdna4-deployment-recipes", "type": "niche-relevant", "stars": 12, "pushed": null }
+  ],
+  "matrix": [
+    { "id": "exact-model-artifact-policy", "us": "met", "tier": "table-stakes" },
+    { "id": "verified-model-download", "us": "met", "tier": "table-stakes" },
+    { "id": "openai-compatible-server", "us": "met", "tier": "table-stakes" },
+    { "id": "speculative-decoding-user-path", "us": "met", "tier": "table-stakes" },
+    { "id": "published-reproducible-benchmarks", "us": "met", "tier": "table-stakes" },
+    { "id": "task-quality-eval-published", "us": "missing", "tier": "table-stakes" },
+    { "id": "multi-session-concurrency", "us": "missing", "tier": "table-stakes" },
+    { "id": "anthropic-messages-api", "us": "missing", "tier": "table-stakes" },
+    { "id": "agent-integration-docs", "us": "met", "tier": "table-stakes" },
+    { "id": "vision-multimodal", "us": "partial", "tier": "edge" },
+    { "id": "multi-hardware-backends", "us": "missing", "tier": "edge" },
+    { "id": "debug-introspection-dumps", "us": "partial", "tier": "edge" },
+    { "id": "prebuilt-runtime-distribution", "us": "missing", "tier": "edge" }
+  ],
+  "coverage": { "met": 6, "total": 9, "pct": 67 },
+  "tier": "BEHIND",
+  "gaps_total": 3
+}
