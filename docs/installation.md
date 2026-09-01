@@ -252,9 +252,11 @@ docker rm "$container"
 - The reference run used asymmetric links. Preflight checks configured payload
   floors rather than requiring those exact link labels.
 - 128K BF16 QSA KV configuration and one concurrent sequence.
-- Expert placement is prompt-profile dependent. Other workloads should collect
-  a route corpus and regenerate the manifest rather than assuming this ranking
-  is optimal.
+- The published expert placement was ranked from a multiprompt route corpus.
+  Any workload runs correctly on it; a heavily divergent prompt mix may see
+  more cold-expert traffic and lower decode throughput than the published
+  figure. A route-corpus/manifest regeneration tool is planned but not yet
+  shipped.
 
 ## Final release acceptance gate
 

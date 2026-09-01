@@ -254,6 +254,10 @@ python -m pytest -q tests
 ./scripts/ci-static.sh
 ```
 
+Planned portability work — prebuilt images, measured qualification, wider
+R9700 topologies, and groundwork for other MoE architectures — is tracked in
+[docs/portability-roadmap.md](docs/portability-roadmap.md).
+
 ## Licensing and provenance
 
 R9V-owned catalog code and original kernels are Apache-2.0. The vLLM and GGUF
@@ -281,8 +285,9 @@ Boundaries and remaining release gates are documented in
   Gen4 x4); hosts with more interconnect bandwidth should do better.
 - The 128 GiB host RAM figure is the qualified reference machine, not an
   enforced minimum. Smaller hosts are untested.
-- Expert placement is tuned from a specific prompt corpus. Different workloads
-  should collect their own route corpus and regenerate the manifest.
+- The published expert placement was ranked from a multiprompt route corpus.
+  It is correct for any workload; a heavily divergent prompt mix may see more
+  cold-expert traffic and lower decode throughput than the published figure.
 - Model hashes, runtime revisions, topology, and benchmark protocol are part
   of every performance claim here.
 
