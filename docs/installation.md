@@ -20,11 +20,10 @@ The host prerequisites are:
   host driver and `amd-smi` inventory CLI, and access to `/dev/kfd` and
   `/dev/dri`;
 - host RAM: the profile is qualified on a 128 GiB reference host. Smaller
-  hosts are untested, not rejected — expert weights are UVA/page-cache
-  resident and the PLE defaults to SSD residency, so less RAM degrades to
-  SSD-bound expert access rather than failing outright. On a smaller host,
-  keep `R9V_PLE_RESIDENCY_MODE=ssd` and consider lowering
-  `R9V_PLE_PINNED_RESERVE_BYTES` (default 16 GiB);
+  hosts are untested, not rejected. Cold expert allocations are pinned and do
+  not spill to SSD; less RAM instead reduces startup headroom and the
+  filesystem cache available to the SSD-backed PLE table. On a smaller host,
+  keep `R9V_PLE_RESIDENCY_MODE=ssd`;
 - Git, Python 3.10 or newer, `curl`, Docker with daemon access, and the official
   Docker Buildx CLI plugin;
 - host `render` and `video` group records for the device GIDs passed into the
@@ -132,22 +131,77 @@ test "$(stat -c %s "$R9V_PLE_PATH")" -eq 28800138240
 
 ## 5. Launch
 
-Confirm that ROCm device indices `0,1` map to the intended display/headless
-cards with the host's ROCm inventory tool before launch. Device order is
-semantic: the reference manifest puts the larger dynamic cache on TP rank 1.
-If the required order is not `0,1`, set `R9V_VISIBLE_DEVICES` explicitly.
+Confirm that ROCm device indices map to the intended TP ranks before launch.
+Device order is semantic: the reference manifest gives rank 1 more static
+experts and a 16-slot LRU cache. Set the visible order, then lock the resolved
+PCI addresses so a driver or hardware change cannot silently reverse it.
+
+For persistent machine settings, copy the provided template and point both the
+doctor and launcher at it. Entries use conditional defaults, so a value
+exported directly in the shell still takes precedence.
+
+The complete meaning, discovery command, safe range, and correction procedure
+for every setting is in the
+[dual-R9700 configuration reference](../profiles/qwen38-flash-next/dual-r9700/README.md).
+
+```bash
+cp profiles/qwen38-flash-next/dual-r9700/user-config.example.env \
+  /path/to/my-r9v-qwen.env
+export R9V_CONFIG_FILE=/path/to/my-r9v-qwen.env
+```
 
 ```bash
 amd-smi list
 
 export R9V_CACHE_DIR="$R9V_DATA_DIR/cache"
 export R9V_VISIBLE_DEVICES=0,1
+export R9V_EXPECTED_GPU_BDFS=0000:03:00.0,0000:13:00.0  # use your amd-smi BDFs
+export R9V_EXPECTED_PCIE_LINKS=Gen5x16,Gen4x4          # use your negotiated links
 ./r9v doctor qwen38 --model-dir "$MODEL_DIR"
 ./r9v run qwen38 --model-dir "$MODEL_DIR"
 ```
 
 `./scripts/launch.sh` remains the compatibility entry point. Environment
-values supplied by the caller override profile defaults.
+values supplied by the caller override profile defaults. Launch runs the same
+read-only preflight automatically and fails on broken requirements. For
+debugging only, `R9V_PREFLIGHT=0` bypasses that gate and prints a warning.
+
+The host contract is configurable rather than tied to one motherboard:
+
+| Setting | Meaning | Qualified default |
+|---|---|---|
+| `R9V_VISIBLE_DEVICES` | HIP devices in TP-rank order | `0,1` |
+| `R9V_EXPECTED_GPU_BDFS` | Optional PCI-address lock in rank order | unset; doctor warns |
+| `R9V_EXPECTED_PCIE_LINKS` | Optional exact negotiated links in rank order | unset; doctor warns |
+| `R9V_MIN_PCIE_BANDWIDTH_GBPS` | Minimum theoretical payload per rank | `15,7` |
+| `R9V_MIN_HOST_RAM_BYTES` | Hard total-RAM floor; `0` only reports | `0` |
+| `R9V_MIN_HOST_AVAILABLE_BYTES` | Hard pre-launch available-RAM floor | `0` |
+| `R9V_TIERED_EXPERT_CACHE_RANKS` | Ranks receiving the dynamic expert cache | `1` |
+| `R9V_TIERED_EXPERT_CACHE_SLOTS` | LRU slots per selected rank | `16` |
+| `R9V_MAX_EFFECTIVE_EXPERTS_PER_RANK` | Static-manifest plus cache VRAM ceiling | `329,385` |
+| `R9V_PLE_RESIDENCY_MODE` | `ssd`, `bounded`, or fully `pinned` | `ssd` |
+| `R9V_REQUIRE_PLE_NONROTATIONAL` | Reject a PLE file backed by rotating media | `1` |
+
+The exact PCIe setting accepts forms such as `Gen5x16,Gen4x4` or
+`32x16,16x4`. It verifies the negotiated hardware result; it cannot change
+the link. The independent bandwidth check uses the negotiated speed and width,
+so equivalent or faster links satisfy the performance floor even when their
+generation/width differs from the reference host.
+The `112.5` CPU-offload values are logical loader-accounting budgets, not
+112.5 GiB RAM allocations; do not lower them merely to match installed RAM.
+
+After the server is ready, run the runtime half of the doctor:
+
+```bash
+./r9v doctor qwen38 --model-dir "$MODEL_DIR" --runtime
+```
+
+It verifies the container environment, materialized tiered experts on both TP
+ranks, the `reuse3v2` decode path, grouped prefill evidence, MTP counters, and
+PLE timing availability. For a low-TG diagnosis, relaunch once with
+`R9V_PLE_WORKER_TIMING=1`; the runtime report then prints the latest PLE
+latency split. This adds timing logs but does not move the n-gram table to RAM.
+`--json` emits the same checks as a support-bundle-friendly document.
 
 By default, the server exposes OpenAI-compatible text, tool-call, and image
 inputs at `http://127.0.0.1:8004/v1`. See `docs/pi.md` for the Pi coding-agent
@@ -190,9 +244,11 @@ docker rm "$container"
 
 - Two 32 GiB Radeon R9700 (`gfx1201`) GPUs in TP2.
 - Qwen3.8 in this branch is currently dual-R9700 only.
-- Rank 0 is the display GPU; rank 1 is the more tightly packed card.
+- Rank roles are configurable; the published placement gives rank 1 the
+  larger static placement and dynamic cache.
 - 128 GiB host RAM on the reference machine (not an enforced minimum).
-- Rank 0 on PCIe Gen5 x16; rank 1 on PCIe Gen4 x4.
+- The reference run used asymmetric links. Preflight checks configured payload
+  floors rather than requiring those exact link labels.
 - 128K BF16 QSA KV configuration and one concurrent sequence.
 - Expert placement is prompt-profile dependent. Other workloads should collect
   a route corpus and regenerate the manifest rather than assuming this ranking

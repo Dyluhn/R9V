@@ -1,5 +1,7 @@
 # R9V
 
+[![CI](https://github.com/Dyluhn/R9V/actions/workflows/ci.yml/badge.svg)](https://github.com/Dyluhn/R9V/actions/workflows/ci.yml)
+
 R9V is a catalog of model-specific inference systems for AMD RDNA4. There is
 no universal engine here. Each profile pins one model and quant package to a
 runtime, a kernel set, a hardware contract, a placement policy, and a
@@ -8,15 +10,16 @@ qualification record, and it refuses to run anywhere else.
 The approach was inspired by [antirez's DS4](https://github.com/antirez/ds4)
 and [Neroued's ninfer](https://github.com/Neroued/ninfer): narrow inference
 engines built around an exact model and machine instead of treating every
-checkpoint as a generic workload. R9V is an independent implementation and
-shares no code with either project.
+checkpoint as a generic workload. This is inspiration, not shared code provenance:
+R9V is an independent implementation and shares no code with either project.
 
 Two runtime families exist today:
 
-- **Single GPU** — fully custom native HIP engines, specialized for one model,
-  one quant, and the `gfx1201` kernel set.
-- **Dual GPU** — an adapted vLLM deployment built from a pinned Apache-2.0
-  vLLM fork, a GGUF plugin, and R9V kernels.
+- **Single GPU** — fully custom native R9V engines using HIP, specialized for
+  one model, one quant, and the `gfx1201` kernel set.
+- **Dual GPU** — an adapted vLLM deployment architecture informed by the
+  Radiance profiling workflow, built from a pinned Apache-2.0 vLLM fork, a
+  GGUF plugin, and R9V kernels.
 
 Radiance was a development and profiling reference for the dual-GPU work. Its
 unlicensed launcher and R4D source are not redistributed here, and every R4D
@@ -37,8 +40,8 @@ If you are pointing an AI assistant at this repository, hand it
 Status meanings:
 
 - **Release candidate** — qualified on the reference topology, with one release
-  gate still open. For Qwen, that gate is a clean-host package installation
-  test; the serving path itself is qualified.
+  gate still open. For Qwen, that gate is a clean-host package installation test;
+  the serving path itself is qualified.
 - **Experimental** — the artifact and its proof are preserved, but the public
   user path is incomplete. The Muse profile currently ships a frozen raw-token
   proof engine; a curated user runtime is pending.
@@ -49,6 +52,7 @@ Status meanings:
 
 The dual-R9700 Qwen profile serves OpenAI-compatible text, tool-call, and
 single-image requests at `http://127.0.0.1:8004/v1`.
+The immutable 90.36 GiB model package is public on Hugging Face.
 
 Host requirements:
 
@@ -56,8 +60,9 @@ Host requirements:
   `/dev/dri`
 - two 32 GiB Radeon AI PRO R9700 (`gfx1201`) GPUs
 - host RAM: qualified on a 128 GiB reference host. Less is untested but not
-  rejected — expert weights are UVA/page-cache resident, so a smaller host
-  degrades to SSD-bound expert access rather than failing outright
+  rejected. Cold expert allocations are pinned and do not silently spill to
+  SSD; less RAM instead reduces startup headroom and the filesystem cache
+  available to the SSD-backed PLE table
 - Git, Python 3.10+, `curl`, Docker with the Buildx plugin, and the
   Hugging Face `hf` CLI
 - roughly 150 GiB of free storage: a 90.36 GiB model package, a 26.82 GiB
@@ -80,9 +85,14 @@ R9V_MAX_JOBS=8 ./r9v build qwen38       # full source build; slow the first time
 
 [docs/installation.md](docs/installation.md) walks through each step,
 including the PLE extraction between build and run, GPU device ordering (the
-order is semantic for this profile), and how to poll for readiness. The
+order is semantic for this profile), configurable topology/RAM/storage checks,
+and how to poll for readiness. The
 submodule commits are release inputs — replacing them with branch heads
 forfeits the reported reference behavior.
+
+Every portable setting, discovery command, doctor result, and corrective
+action is documented in the
+[dual-R9700 Qwen configuration reference](profiles/qwen38-flash-next/dual-r9700/README.md).
 
 For hooking the server up to the Pi coding agent, see [docs/pi.md](docs/pi.md).
 
@@ -154,7 +164,7 @@ and contained no R9V performance kernels or placement code.
 
 | Runtime | PP8192 (tok/s) | TG256 (tok/s) |
 |---|---:|---:|
-| R9V Qwen V1 | 1,512.01 | 78.11 |
+| R9V Qwen V1 | **1,512.01** (+3,239.98%) | **78.11** (+197.90%) |
 | Stock/public Radiance | 45.27 | 26.22 |
 
 That is 33.4x on prefill and 2.98x on decode in these cells.
@@ -184,7 +194,7 @@ that column.
 
 | Runtime | PP512 (tok/s) | PP2048 (tok/s) | PP8192 (tok/s) | TG256 (tok/s) |
 |---|---:|---:|---:|---:|
-| R9V custom HIP | 1,500.68 (+1.5%) | 2,175.17 (+47.2%) | 2,078.20 (+46.4%) | 26.84 (+7.7%) |
+| R9V custom HIP | **1,500.68** (+1.54%) | **2,175.17** (+47.21%) | **2,078.20** (+46.36%) | **26.84** (+7.70%) |
 | llama.cpp ROCm | 1,477.87 | 1,477.57 | 1,419.88 | 24.30 |
 | llama.cpp Vulkan | 1,204.85 | 1,182.54 | 1,126.46 | 24.92 |
 
@@ -226,6 +236,23 @@ schemas/             fail-closed descriptor formats
 
 See [profiles/README.md](profiles/README.md) for profile composition and
 lifecycle rules.
+
+## Development and CI
+
+Every push and pull request runs the dependency-light CPU suite on Python 3.10
+and 3.14. A separate static job checks Ruff, shell syntax and ShellCheck,
+JSON descriptors, the profile graph, and exact submodule gitlinks. It does not
+pretend to qualify GPU performance: model downloads, ROCm compilation, kernel
+parity, graph replay, and benchmark reproduction remain explicit qualification
+gates on a matching R9700 host.
+
+Run the same checks locally with:
+
+```bash
+python -m pip install --requirement requirements-ci.txt
+python -m pytest -q tests
+./scripts/ci-static.sh
+```
 
 ## Licensing and provenance
 

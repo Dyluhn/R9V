@@ -246,6 +246,31 @@ def test_image_build_requires_buildx_and_loads_local_images() -> None:
     assert "FLYDSL_VERSION=0.2.4" in dockerfile
 
 
+def test_ci_is_read_only_pinned_and_covers_release_checks() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    script = (ROOT / "scripts/ci-static.sh").read_text(encoding="utf-8")
+
+    assert "permissions:\n  contents: read" in workflow
+    assert "pull_request:" in workflow
+    assert "submodules: recursive" in workflow
+    assert (
+        "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803"
+        in workflow
+    )
+    assert (
+        "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1"
+        in workflow
+    )
+    assert "self-hosted" not in workflow
+    for check in (
+        "ruff check",
+        "shellcheck",
+        "./r9v validate",
+        "git submodule status",
+    ):
+        assert check in script
+
+
 def test_qwen_launch_pins_measured_rocm_dispatch_policy() -> None:
     launcher = (ROOT / "scripts/launch.sh").read_text(encoding="utf-8")
 

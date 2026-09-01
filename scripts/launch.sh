@@ -5,6 +5,17 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$script_dir/.." && pwd)
 profile=${R9V_PROFILE:-$repo_root/profiles/qwen38-flash-next/dual-r9700/profile.env}
 [[ -r "$profile" ]] || { printf 'Profile not found: %s\n' "$profile" >&2; exit 1; }
+config_file=${R9V_CONFIG_FILE:-}
+if [[ -n $config_file ]]; then
+    [[ -r $config_file ]] || {
+        printf 'R9V_CONFIG_FILE is not readable: %s\n' "$config_file" >&2
+        exit 1
+    }
+    set -a
+    # shellcheck disable=SC1090
+    source "$config_file"
+    set +a
+fi
 set -a
 # shellcheck disable=SC1090
 source "$profile"
@@ -16,6 +27,7 @@ model_dir=${R9V_MODEL_DIR:?Set R9V_MODEL_DIR to the packaged model directory}
 ple_path=${R9V_PLE_PATH:?Set R9V_PLE_PATH to the extracted PLE payload}
 cache_dir=${R9V_CACHE_DIR:-$repo_root/.cache}
 visible_devices=${R9V_VISIBLE_DEVICES:-0,1}
+: "${R9V_PREFLIGHT:=1}"
 : "${R9V_TIERED_PREFILL_GROUP_SIZE:=0}"
 : "${R9V_PLE_PINNED_RESERVE_BYTES:=17179869184}"
 : "${R9V_DEV_FUSED_MOE_PY:=}"
@@ -44,6 +56,10 @@ case $R9V_PLE_RESIDENCY_MODE in
 esac
 [[ $R9V_PLE_PINNED_RESERVE_BYTES =~ ^[0-9]+$ ]] || {
     printf 'R9V_PLE_PINNED_RESERVE_BYTES must be a non-negative integer\n' >&2
+    exit 2
+}
+[[ $R9V_PREFLIGHT == 0 || $R9V_PREFLIGHT == 1 ]] || {
+    printf 'R9V_PREFLIGHT must be 0 or 1\n' >&2
     exit 2
 }
 
@@ -148,6 +164,12 @@ for required in \
     "$ple_path"; do
     [[ -f "$required" ]] || { printf 'Required file missing: %s\n' "$required" >&2; exit 1; }
 done
+
+if [[ $R9V_PREFLIGHT == 1 ]]; then
+    "$repo_root/scripts/profile-doctor.sh"
+else
+    printf 'WARN launch preflight is disabled by R9V_PREFLIGHT=0\n' >&2
+fi
 
 if docker container inspect "$container" >/dev/null 2>&1; then
     printf 'Container already exists: %s\nStop/remove it explicitly before relaunch.\n' \
