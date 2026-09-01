@@ -244,6 +244,41 @@ stat -c '%n %s bytes' "$R9V_PLE_PATH"
 If the size check fails, regenerate this derived file from the verified target
 shards. Do not pad, truncate, or repair it manually.
 
+### `R9V_PLE_EXPECTED_SHA256`
+
+The size check catches a truncated extraction but not a corrupt one. This
+optional setting records the sha256 of the derived PLE table so a bad
+extraction fails at doctor time instead of surfacing later as unexplained
+decode latency. The published default is in [`profile.env`](profile.env):
+
+```bash
+: "${R9V_PLE_EXPECTED_SHA256:=dd55c28902f38cd88134b2a569c51282c5ffce30080487e1a645740115c56cc3}"
+```
+
+Hashing reads the whole 26.82 GiB file and takes minutes, so it is not part of
+a normal doctor run. Request it explicitly:
+
+```bash
+./r9v doctor qwen38 --model-dir "$R9V_MODEL_DIR" --hash-ple
+```
+
+| Configuration | Without `--hash-ple` | With `--hash-ple` |
+|---|---|---|
+| Empty or unset | `NOTE`: verified by size only | `NOTE`: verified by size only |
+| 64 hex characters | `NOTE`: configured but unverified this run | `PASS` on match, `FAIL` on mismatch |
+| Any other value | `FAIL`: not 64 hexadecimal characters | `FAIL`: not 64 hexadecimal characters |
+
+Verify the file manually with:
+
+```bash
+sha256sum "$R9V_PLE_PATH"
+```
+
+A mismatch means the derived payload is wrong, not that the expectation is
+wrong. Delete only this derived file and regenerate it from the verified target
+shards. Never hand-repair the payload, and do not update the expected hash to
+match a file whose provenance you have not re-established.
+
 ### `R9V_PLE_RESIDENCY_MODE`
 
 | Value | Behavior | Release status |
@@ -384,7 +419,8 @@ Static doctor verifies:
   of each rank's full path to the root port against per-rank floors.
 - Total/available host RAM policy.
 - Cache rank/slots and static-manifest-plus-cache VRAM ceiling.
-- PLE payload size, filesystem, and physical media.
+- PLE payload size, filesystem, and physical media, plus its sha256 when
+  `--hash-ple` is requested.
 - Model-package artifact sizes.
 
 Runtime doctor additionally verifies:

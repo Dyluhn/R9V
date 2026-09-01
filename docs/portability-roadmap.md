@@ -43,10 +43,15 @@ qualification record says so.
    hot/cold split for their workload, and is a prerequisite for new GPU-count
    placements and for new MoE models.
 
-5. **PLE payload hash.** The derived PLE file is verified by size only. Add
-   its sha256 to the package manifest, or distribute the derived file
-   directly, so a bad extraction fails at doctor time instead of surfacing as
-   unexplained decode latency.
+5. **PLE payload hash (shipped).** The derived PLE file used to be verified by
+   size only, so a corrupt extraction passed preflight and surfaced later as
+   unexplained decode latency. `R9V_PLE_EXPECTED_SHA256` now carries the
+   published sha256 of the derived table, and `doctor --hash-ple` verifies it;
+   a mismatch fails preflight with a regenerate-from-shards remediation.
+   Hashing reads the whole 26.82 GiB file, so it stays opt-in: a normal run
+   reports the configured hash as unverified rather than paying the minutes.
+   Distributing the derived file directly, instead of every host deriving and
+   then hashing it, remains open.
 
 6. **UD-Q4_K_XL quant arm.** A second Unsloth quant at ~4.8 bpw as the
    quality ceiling on the existing dual-R9700 host contract. Host RAM is

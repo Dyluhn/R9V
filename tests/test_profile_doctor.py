@@ -10,6 +10,7 @@ from tools.profile_doctor import (
     KfdGpu,
     Reporter,
     _check_manifest_budget,
+    _check_ple_hash,
     _check_profile_policy,
     discover_kfd_gpus,
     parse_amd_smi_list,
@@ -17,6 +18,18 @@ from tools.profile_doctor import (
     parse_prometheus_metrics,
     pcie_payload_gbps,
 )
+
+# A stand-in for the 26.8 GiB derived PLE table. Tests never hash the real one.
+PLE_SAMPLE = b"r9v-ple-test-payload"
+PLE_SAMPLE_SHA256 = (
+    "e28b313ed08f5e62eb9c36da7775280ad2720c02e1aa1c2a9767bab93ff7b4b0"
+)
+
+
+def _sample_ple(tmp_path: Path) -> Path:
+    path = tmp_path / "per_layer_token_embd.iq4_nl.bin"
+    path.write_bytes(PLE_SAMPLE)
+    return path
 
 
 def test_amd_smi_inventory_preserves_device_order_and_bdf() -> None:
@@ -351,6 +364,63 @@ def test_runtime_check_proves_decode_path_and_mtp_metrics(monkeypatch) -> None:
     assert not [check for check in reporter.checks if check.status == "FAIL"]
 
 
+def test_ple_hash_passes_when_the_payload_matches(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("R9V_PLE_EXPECTED_SHA256", PLE_SAMPLE_SHA256)
+    reporter = Reporter()
+
+    _check_ple_hash(reporter, _sample_ple(tmp_path), True)
+
+    check = next(check for check in reporter.checks if check.name == "ple-hash")
+    assert check.status == "PASS"
+
+
+def test_ple_hash_mismatch_fails_with_regeneration_remediation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = _sample_ple(tmp_path)
+    path.write_bytes(PLE_SAMPLE + b"corruption")
+    monkeypatch.setenv("R9V_PLE_EXPECTED_SHA256", PLE_SAMPLE_SHA256)
+    reporter = Reporter()
+
+    _check_ple_hash(reporter, path, True)
+
+    check = next(check for check in reporter.checks if check.name == "ple-hash")
+    assert check.status == "FAIL"
+    assert check.details is not None
+    assert check.details["expected_sha256"] == PLE_SAMPLE_SHA256
+    assert check.details["actual_sha256"] != PLE_SAMPLE_SHA256
+    assert check.remediation is not None
+    assert "regenerate it from the" in check.remediation
+    assert "Never hand-repair" in check.remediation
+
+
+def test_ple_hash_is_noted_but_skipped_unless_requested(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # A corrupt payload must not be read at all when --hash-ple is absent.
+    path = _sample_ple(tmp_path)
+    path.write_bytes(PLE_SAMPLE + b"corruption")
+    monkeypatch.setenv("R9V_PLE_EXPECTED_SHA256", PLE_SAMPLE_SHA256)
+    reporter = Reporter()
+
+    _check_ple_hash(reporter, path, False)
+
+    check = next(check for check in reporter.checks if check.name == "ple-hash")
+    assert check.status == "NOTE"
+    assert "--hash-ple" in check.message
+
+    monkeypatch.setenv("R9V_PLE_EXPECTED_SHA256", "")
+    unset = Reporter()
+
+    _check_ple_hash(unset, path, True)
+
+    check = next(check for check in unset.checks if check.name == "ple-hash")
+    assert check.status == "NOTE"
+    assert "size only" in check.message
+
+
 def test_every_actionable_doctor_result_has_remediation() -> None:
     source = Path(doctor.__file__).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -385,6 +455,7 @@ def test_qwen_configuration_reference_covers_every_portable_setting() -> None:
         "R9V_MIN_HOST_AVAILABLE_BYTES",
         "R9V_CPU_OFFLOAD_GB",
         "R9V_PLE_PATH",
+        "R9V_PLE_EXPECTED_SHA256",
         "R9V_PLE_RESIDENCY_MODE",
         "R9V_REQUIRE_PLE_NONROTATIONAL",
         "R9V_PLE_WORKER_TIMING",

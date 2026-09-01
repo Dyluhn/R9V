@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -18,6 +19,7 @@ from typing import Any
 
 
 PLE_EXPECTED_BYTES = 28_800_138_240
+PLE_HASH_CHUNK_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -681,7 +683,62 @@ def _flatten_lsblk(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return result
 
 
-def _check_ple_storage(reporter: Reporter) -> None:
+def _sha256_file(path: Path, chunk_bytes: int = PLE_HASH_CHUNK_BYTES) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(chunk_bytes), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _check_ple_hash(reporter: Reporter, path: Path, requested: bool) -> None:
+    expected = os.environ.get("R9V_PLE_EXPECTED_SHA256", "").strip().lower()
+    if not expected:
+        reporter.note(
+            "ple-hash",
+            "R9V_PLE_EXPECTED_SHA256 is empty; the PLE payload is verified by "
+            "size only",
+        )
+        return
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        reporter.fail(
+            "ple-hash",
+            "R9V_PLE_EXPECTED_SHA256 is not 64 hexadecimal characters",
+            "Set R9V_PLE_EXPECTED_SHA256 to the published sha256 of the "
+            "derived PLE file, or leave it empty to skip the hash check.",
+        )
+        return
+    if not requested:
+        reporter.note(
+            "ple-hash",
+            f"R9V_PLE_EXPECTED_SHA256={expected} is configured but unverified "
+            "in this run; rerun with --hash-ple to read the whole file",
+        )
+        return
+    try:
+        actual = _sha256_file(path)
+    except OSError as error:
+        reporter.fail(
+            "ple-hash",
+            f"cannot read {path} for hashing: {error}",
+            "Repair the storage/permission error on the PLE file, then rerun "
+            "the doctor with --hash-ple.",
+        )
+        return
+    if actual != expected:
+        reporter.fail(
+            "ple-hash",
+            f"PLE sha256 is {actual}, expected {expected}",
+            "Delete only this derived PLE file and regenerate it from the "
+            "verified target shards. Never hand-repair the payload.",
+            expected_sha256=expected,
+            actual_sha256=actual,
+        )
+    else:
+        reporter.passed("ple-hash", f"{path} matches sha256 {expected}")
+
+
+def _check_ple_storage(reporter: Reporter, hash_ple: bool = False) -> None:
     raw_path = os.environ.get("R9V_PLE_PATH")
     if not raw_path:
         reporter.warn(
@@ -720,6 +777,7 @@ def _check_ple_storage(reporter: Reporter) -> None:
         )
     else:
         reporter.passed("ple-payload", f"{path} is {_human_bytes(actual)}")
+        _check_ple_hash(reporter, path, hash_ple)
 
     mount = _run(["findmnt", "-J", "-T", str(path), "-o", "SOURCE,FSTYPE,TARGET"])
     if mount.returncode != 0:
@@ -1161,6 +1219,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="also inspect the running container, startup logs, and metrics",
     )
+    parser.add_argument(
+        "--hash-ple",
+        action="store_true",
+        help=(
+            "verify the PLE payload against R9V_PLE_EXPECTED_SHA256; this "
+            "reads the whole ~26.8 GiB file and takes minutes"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument(
         "--strict",
@@ -1231,7 +1297,7 @@ def main(argv: list[str] | None = None) -> int:
     _check_host_memory(reporter, proc_root)
     _check_profile_policy(reporter, expected_count, selected)
     _check_manifest_budget(reporter, expected_count)
-    _check_ple_storage(reporter)
+    _check_ple_storage(reporter, args.hash_ple)
     _check_model_package(reporter, repo_root, profile_id)
     if args.runtime:
         _check_runtime(reporter, expected_count)
