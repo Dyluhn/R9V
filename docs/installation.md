@@ -184,9 +184,11 @@ The host contract is configurable rather than tied to one motherboard:
 
 The exact PCIe setting accepts forms such as `Gen5x16,Gen4x4` or
 `32x16,16x4`. It verifies the negotiated hardware result; it cannot change
-the link. The independent bandwidth check uses the negotiated speed and width,
-so equivalent or faster links satisfy the performance floor even when their
-generation/width differs from the reference host.
+the link. The independent bandwidth check walks every hop from the device to
+the root port and scores the slowest negotiated link, so equivalent or faster
+paths satisfy the performance floor even when their generation/width differs
+from the reference host, and a card that negotiates x16 behind a narrower
+upstream bridge is scored at the bridge's capacity.
 The `112.5` CPU-offload values are logical loader-accounting budgets, not
 112.5 GiB RAM allocations; do not lower them merely to match installed RAM.
 

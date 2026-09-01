@@ -145,11 +145,19 @@ devices. This setting only verifies the result. If it fails, repair the
 hardware/firmware topology or deliberately update the lock after deciding the
 new topology is correct.
 
+The lock matches the endpoint's own negotiated link. Upstream-hop capacity is
+enforced separately by the bandwidth floor below, which walks the full path.
+
 ### `R9V_MIN_PCIE_BANDWIDTH_GBPS`
 
 This is the minimum theoretical one-direction PCIe payload bandwidth for each
-TP rank, not a benchmark result. The doctor reads the currently negotiated
-speed and width from sysfs and accounts for PCIe link encoding.
+TP rank, not a benchmark result. The doctor reads the negotiated speed and
+width of every hop from the device up to the root port, accounts for PCIe
+link encoding, and applies the floor to the slowest hop. An endpoint that
+negotiates x16 behind a x4 upstream bridge is therefore scored at the x4
+bottleneck, and the report names the capping hop. Endpoint sysfs alone cannot
+be trusted for this: a card can read Gen5x16 at the endpoint while an
+upstream switch or bifurcated link caps the real path.
 
 The published defaults are:
 
@@ -372,8 +380,8 @@ Static doctor verifies:
 
 - Docker, ROCm device nodes, source/submodule inputs, and two `gfx1201` GPUs.
 - HIP index to BDF to TP-rank mapping.
-- Exact negotiated PCIe links when configured, plus payload against per-rank
-  floors.
+- Exact negotiated PCIe links when configured, plus the slowest-hop payload
+  of each rank's full path to the root port against per-rank floors.
 - Total/available host RAM policy.
 - Cache rank/slots and static-manifest-plus-cache VRAM ceiling.
 - PLE payload size, filesystem, and physical media.

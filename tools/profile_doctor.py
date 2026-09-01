@@ -291,6 +291,26 @@ def pcie_payload_gbps(speed_gts: float, width: int) -> float:
     return speed_gts * width * encoding_efficiency / 8.0
 
 
+def pcie_upstream_links(sys_root: Path, bdf: str) -> list[tuple[str, float, int]]:
+    """Negotiated links of every bridge between the device and the root port."""
+    try:
+        device = (sys_root / "bus/pci/devices" / bdf).resolve()
+    except OSError:
+        return []
+    links: list[tuple[str, float, int]] = []
+    for node in device.parents:
+        if not re.fullmatch(
+            r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", node.name
+        ):
+            continue
+        speed = _read_first_float(node / "current_link_speed")
+        width = _read_first_int(node / "current_link_width")
+        if speed is None or width is None:
+            continue
+        links.append((node.name, speed, width))
+    return links
+
+
 def _read_first_float(path: Path) -> float | None:
     try:
         text = path.read_text(encoding="utf-8")
@@ -422,14 +442,26 @@ def _selected_gpus(
                 "Choose an index or UUID shown by `amd-smi list` and update R9V_VISIBLE_DEVICES.",
             )
             continue
+        if any(existing.bdf == gpu.bdf for _, existing, _, _, _ in selected):
+            reporter.fail(
+                "gpu-order",
+                f"rank {rank} repeats device {gpu.bdf}",
+                "List each GPU exactly once in R9V_VISIBLE_DEVICES; TP ranks "
+                "must map to distinct devices.",
+            )
+            continue
         pci = sys_root / "bus/pci/devices" / gpu.bdf
         speed = _read_first_float(pci / "current_link_speed")
         width = _read_first_int(pci / "current_link_width")
-        bandwidth = (
-            pcie_payload_gbps(speed, width)
-            if speed is not None and width is not None
-            else None
-        )
+        bandwidth: float | None = None
+        capping_hop: tuple[str, float, int] | None = None
+        if speed is not None and width is not None:
+            bandwidth = pcie_payload_gbps(speed, width)
+            for hop in pcie_upstream_links(sys_root, gpu.bdf):
+                hop_payload = pcie_payload_gbps(hop[1], hop[2])
+                if hop_payload + 1e-9 < bandwidth:
+                    bandwidth = hop_payload
+                    capping_hop = hop
         mapped = kfd.get(gpu.bdf)
         if mapped is None:
             reporter.fail(
@@ -479,20 +511,35 @@ def _selected_gpus(
                 )
         else:
             minimum = minimum_bandwidth[rank] if minimum_bandwidth else 0.0
-            message = (
-                f"rank {rank} {gpu.bdf}: {speed:g} GT/s x{width}, "
-                f"~{bandwidth:.2f} GB/s payload"
-            )
+            if capping_hop is None:
+                message = (
+                    f"rank {rank} {gpu.bdf}: {speed:g} GT/s x{width}, "
+                    f"~{bandwidth:.2f} GB/s payload"
+                )
+            else:
+                message = (
+                    f"rank {rank} {gpu.bdf}: endpoint {speed:g} GT/s x{width}, "
+                    f"path capped by upstream hop {capping_hop[0]} at "
+                    f"{capping_hop[1]:g} GT/s x{capping_hop[2]}, "
+                    f"~{bandwidth:.2f} GB/s payload"
+                )
             if minimum and bandwidth + 1e-9 < minimum:
                 reporter.fail(
                     "pcie-link",
                     f"{message}; configured minimum is {minimum:g} GB/s",
-                    "Check BIOS lane allocation and card order. Reorder "
-                    "R9V_VISIBLE_DEVICES if appropriate; lower the minimum "
-                    "only if you accept an unqualified slower topology.",
+                    "Check BIOS lane allocation and card order, including "
+                    "upstream bridges. Reorder R9V_VISIBLE_DEVICES if "
+                    "appropriate; lower the minimum only if you accept an "
+                    "unqualified slower topology.",
+                    capping_hop=capping_hop[0] if capping_hop else None,
                 )
             else:
-                reporter.passed("pcie-link", message, minimum_gbps=minimum)
+                reporter.passed(
+                    "pcie-link",
+                    message,
+                    minimum_gbps=minimum,
+                    capping_hop=capping_hop[0] if capping_hop else None,
+                )
             if expected_links:
                 expected = expected_links[rank]
                 speed_matches = abs(speed - expected.speed_gts) < 0.01
@@ -608,7 +655,7 @@ def _check_host_memory(reporter: Reporter, proc_root: Path) -> None:
     if reference and total < reference:
         reporter.warn(
             "host-memory-reference",
-            f"host is below the {_human_bytes(reference)} qualified reference; "
+            f"host is below the {reference / 1e9:g} GB qualified reference; "
             "PLE page-cache misses and startup headroom may differ",
             "Keep PLE residency on SSD, enable PLE timing for qualification, "
             "and do not reduce the logical CPU-offload budget to match RAM.",
@@ -619,6 +666,11 @@ def _check_host_memory(reporter: Reporter, proc_root: Path) -> None:
             "offload-accounting",
             f"R9V_CPU_OFFLOAD_GB={offload} is loader accounting, not a host-RAM allocation",
         )
+
+
+def _any_rotational(disks: list[dict[str, Any]]) -> bool:
+    # Older util-linux emits JSON strings ("1"/"0") instead of booleans.
+    return any(node.get("rota") in (True, 1, "1") for node in disks)
 
 
 def _flatten_lsblk(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -726,7 +778,7 @@ def _check_ple_storage(reporter: Reporter) -> None:
         f"{node.get('path')}:{node.get('tran') or 'unknown'}"
         for node in disks
     ) or "unknown"
-    rotating = any(bool(node.get("rota")) for node in disks)
+    rotating = _any_rotational(disks)
     try:
         require_nonrotational = _parse_bool(
             os.environ.get("R9V_REQUIRE_PLE_NONROTATIONAL"), True

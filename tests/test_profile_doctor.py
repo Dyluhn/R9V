@@ -114,6 +114,98 @@ def test_selected_gpu_check_rejects_mismatched_exact_link(
     assert "cannot change a negotiated PCIe link" in exact[1].remediation
 
 
+def test_pcie_floor_scores_the_slowest_upstream_hop(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Endpoint sysfs on both cards reads Gen5x16, but rank 1 sits behind a
+    # bridge that negotiated Gen4x4. The floor must score the bridge, not the
+    # endpoint.
+    for bridge, bdf, hop_speed, hop_width in (
+        ("0000:00:01.0", "0000:03:00.0", "32.0 GT/s", "16"),
+        ("0000:00:01.1", "0000:13:00.0", "16.0 GT/s", "4"),
+    ):
+        bridge_dir = tmp_path / "devices/pci0000:00" / bridge
+        device_dir = bridge_dir / bdf
+        device_dir.mkdir(parents=True)
+        (bridge_dir / "current_link_speed").write_text(hop_speed, encoding="utf-8")
+        (bridge_dir / "current_link_width").write_text(hop_width, encoding="utf-8")
+        (device_dir / "current_link_speed").write_text("32.0 GT/s", encoding="utf-8")
+        (device_dir / "current_link_width").write_text("16", encoding="utf-8")
+        by_bus = tmp_path / "bus/pci/devices"
+        by_bus.mkdir(parents=True, exist_ok=True)
+        (by_bus / bdf).symlink_to(device_dir)
+    inventory = (
+        "GPU: 0\n BDF: 0000:03:00.0\n"
+        "GPU: 1\n BDF: 0000:13:00.0\n"
+    )
+    monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/amd-smi")
+    monkeypatch.setattr(
+        doctor,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, inventory, ""),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "discover_kfd_gpus",
+        lambda _root: [
+            KfdGpu("0000:03:00.0", 120001, 128),
+            KfdGpu("0000:13:00.0", 120001, 129),
+        ],
+    )
+    monkeypatch.setenv("R9V_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("R9V_MIN_PCIE_BANDWIDTH_GBPS", "15,15")
+    monkeypatch.delenv("R9V_EXPECTED_PCIE_LINKS", raising=False)
+    reporter = Reporter()
+
+    selected = doctor._selected_gpus(reporter, 2, tmp_path)
+
+    links = [check for check in reporter.checks if check.name == "pcie-link"]
+    assert [check.status for check in links] == ["PASS", "FAIL"]
+    assert "upstream hop 0000:00:01.1" in links[1].message
+    assert "16 GT/s x4" in links[1].message
+    assert abs(selected[1][4] - 7.876923) < 1e-5
+
+
+def test_visible_devices_rejects_duplicate_selection(
+    tmp_path: Path, monkeypatch
+) -> None:
+    inventory = "GPU: 0\n BDF: 0000:03:00.0\nGPU: 1\n BDF: 0000:13:00.0\n"
+    monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/amd-smi")
+    monkeypatch.setattr(
+        doctor,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, inventory, ""),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "discover_kfd_gpus",
+        lambda _root: [
+            KfdGpu("0000:03:00.0", 120001, 128),
+            KfdGpu("0000:13:00.0", 120001, 129),
+        ],
+    )
+    monkeypatch.setenv("R9V_VISIBLE_DEVICES", "0,0")
+    reporter = Reporter()
+
+    selected = doctor._selected_gpus(reporter, 2, tmp_path)
+
+    assert len(selected) == 1
+    assert any(
+        check.name == "gpu-order"
+        and check.status == "FAIL"
+        and "repeats device" in check.message
+        for check in reporter.checks
+    )
+
+
+def test_rotational_flag_accepts_boolean_and_string_lsblk_forms() -> None:
+    assert doctor._any_rotational([{"rota": True}])
+    assert doctor._any_rotational([{"rota": "1"}])
+    assert not doctor._any_rotational([{"rota": False}])
+    assert not doctor._any_rotational([{"rota": "0"}])
+    assert not doctor._any_rotational([{"rota": None}])
+
+
 def test_prometheus_metrics_sum_engine_labels() -> None:
     metrics = parse_prometheus_metrics(
         """
