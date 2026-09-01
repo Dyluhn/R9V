@@ -6,7 +6,7 @@ qualification record says so.
 
 ## Near-term items
 
-1. **Startup pinned-memory reduction (top priority).** The loader currently
+1. **Startup pinned-memory reduction (shipped; follow-up open).** The loader currently
    pins the full expert set (~27.7 GiB per rank) as host masters, then
    compacts hot experts to VRAM and cold experts to a second pinned buffer,
    and only then drops the masters — a startup peak of roughly 55-75 GiB
@@ -17,10 +17,12 @@ qualification record says so.
    masters pageable (ideally mmap-backed from the package file), compacting
    per layer, and pinning only the cold-owner buffers cuts the startup peak
    to roughly the cold set plus one layer of scratch, and is the change that
-   makes 64 GiB hosts realistic. Validate with byte-identical compaction
-   output, a measured cgroup peak through startup, and unchanged decode.
-   This lands in the vendored plugin/loader, so it carries submodule pin,
-   `runtime.json`, and `sources.lock` updates plus an image rebuild.
+   makes 64 GiB hosts realistic. Shipped: masters now load pageable with
+   per-layer compaction and pinned cold owners only — measured peak
+   unreclaimable host memory fell 75.1 to 57.7 GiB (-23%) with decode and
+   steady state unchanged. Remaining: mmap-backed or interleaved
+   load+compact masters (blocked today by w13 fusion and TP narrowing at
+   load) to reach the ~19 GiB peak that makes 64 GiB hosts realistic.
 
 2. **Prebuilt runtime image.** Publish the dual-R9700 Qwen image to a
    registry, digest-pinned to the exact vLLM/plugin/kernel submodule

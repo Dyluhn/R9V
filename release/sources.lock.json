@@ -19,7 +19,7 @@
       "repository": "https://github.com/Dyluhn/vllm-gguf-plugin",
       "development_base": "fd0f0e8195c813a185a41a6866512ba56a5b84c9",
       "release_branch": "r9v/qwen38-flash-next",
-      "release_revision": "7d270e2a8460acf2939eacebadf7402b957ee5ec",
+      "release_revision": "09b1199015c6b45de5c13dc4b36857ce27d9b0cd",
       "license": "Apache-2.0"
     },
     "r9v_gfx1201_kernels": {
@@ -80,7 +80,10 @@
       "packed_bytes": 28800138240,
       "tensor_name": "per_layer_token_embd.weight",
       "tensor_type": "IQ4_NL",
-      "gguf_shape": [160, 320001536],
+      "gguf_shape": [
+        160,
+        320001536
+      ],
       "distribution": "derive-locally-from-target-shard"
     }
   }

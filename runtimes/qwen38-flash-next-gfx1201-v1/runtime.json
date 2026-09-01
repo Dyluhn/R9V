@@ -2,21 +2,32 @@
   "schema": "r9v.runtime.v1",
   "id": "qwen38-flash-next-gfx1201-v1",
   "engine": "vllm-rocm",
-  "targets": ["gfx1201"],
+  "targets": [
+    "gfx1201"
+  ],
   "capabilities": {
-    "model_architectures": ["qwen4_exp"],
+    "model_architectures": [
+      "qwen4_exp"
+    ],
     "api": "OpenAI-compatible",
-    "tensor_parallel": [2],
+    "tensor_parallel": [
+      2
+    ],
     "vision": true,
     "mtp": true,
     "ssd_ple": true,
     "tiered_experts": true,
-    "target_qtypes": ["IQ3_S", "IQ4_XS", "IQ4_NL", "Q8_0"],
+    "target_qtypes": [
+      "IQ3_S",
+      "IQ4_XS",
+      "IQ4_NL",
+      "Q8_0"
+    ],
     "context_tokens": 131072
   },
   "source": {
     "vllm_revision": "4b20917386dcdfb619ee62ff24c45efeae176fdf",
-    "gguf_plugin_revision": "7d270e2a8460acf2939eacebadf7402b957ee5ec",
+    "gguf_plugin_revision": "09b1199015c6b45de5c13dc4b36857ce27d9b0cd",
     "kernel_revision": "7905d9e0a3323411ef5d6dfb2f356061a9a491e3"
   },
   "safety": {
