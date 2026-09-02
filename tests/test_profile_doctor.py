@@ -64,7 +64,56 @@ def test_kfd_location_id_maps_to_pci_bdf(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert discover_kfd_gpus(tmp_path)[0].bdf == "0000:13:00.0"
+    gpu = discover_kfd_gpus(tmp_path)[0]
+    assert gpu.bdf == "0000:13:00.0"
+    assert gpu.node_id == 1
+
+
+def test_selected_gpu_indices_follow_kfd_not_amd_smi_order(
+    tmp_path: Path, monkeypatch
+) -> None:
+    for bdf in ("0000:03:00.0", "0000:ca:00.0", "0000:cd:00.0"):
+        device = tmp_path / "bus/pci/devices" / bdf
+        device.mkdir(parents=True)
+        (device / "current_link_speed").write_text("16.0 GT/s", encoding="utf-8")
+        (device / "current_link_width").write_text("16", encoding="utf-8")
+    inventory = (
+        "GPU: 0\n BDF: 0000:03:00.0\n NODE_ID: 6\n"
+        "GPU: 1\n BDF: 0000:ca:00.0\n NODE_ID: 4\n"
+        "GPU: 2\n BDF: 0000:cd:00.0\n NODE_ID: 5\n"
+    )
+    monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/amd-smi")
+    monkeypatch.setattr(
+        doctor,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, inventory, ""),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "discover_kfd_gpus",
+        lambda _root: [
+            KfdGpu("0000:ca:00.0", 120001, 128, 4),
+            KfdGpu("0000:cd:00.0", 120001, 129, 5),
+            KfdGpu("0000:03:00.0", 120001, 130, 6),
+        ],
+    )
+    monkeypatch.setenv("R9V_VISIBLE_DEVICES", "0,1")
+    monkeypatch.setenv("R9V_EXPECTED_GPU_BDFS", "0000:ca:00.0,0000:cd:00.0")
+    monkeypatch.setenv("R9V_MIN_PCIE_BANDWIDTH_GBPS", "0,0")
+    reporter = Reporter()
+
+    selected = doctor._selected_gpus(reporter, 2, tmp_path)
+
+    assert [(rank, gpu.index, gpu.bdf) for rank, gpu, *_ in selected] == [
+        (0, 1, "0000:ca:00.0"),
+        (1, 2, "0000:cd:00.0"),
+    ]
+    assert not [check for check in reporter.checks if check.status == "FAIL"]
+    architecture = [
+        check for check in reporter.checks if check.name == "gpu-architecture"
+    ]
+    assert "amd-smi device 1" in architecture[0].message
+    assert "amd-smi device 2" in architecture[1].message
 
 
 def test_pcie_payload_estimate_matches_gen4_x4() -> None:

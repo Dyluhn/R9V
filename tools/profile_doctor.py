@@ -91,6 +91,7 @@ class KfdGpu:
     bdf: str
     gfx_target: int
     render_minor: int | None
+    node_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -183,7 +184,7 @@ def _amd_gpu_from_fields(fields: dict[str, str]) -> AmdGpu:
 def discover_kfd_gpus(sys_root: Path = Path("/sys")) -> list[KfdGpu]:
     result: list[KfdGpu] = []
     topology = sys_root / "class/kfd/kfd/topology/nodes"
-    for properties in sorted(topology.glob("*/properties")):
+    for properties in topology.glob("*/properties"):
         fields: dict[str, int] = {}
         try:
             lines = properties.read_text(encoding="utf-8").splitlines()
@@ -205,9 +206,24 @@ def discover_kfd_gpus(sys_root: Path = Path("/sys")) -> list[KfdGpu]:
                 bdf=f"{domain:04x}:{bus:02x}:{device:02x}.{function}",
                 gfx_target=fields["gfx_target_version"],
                 render_minor=fields.get("drm_render_minor"),
+                node_id=(
+                    int(properties.parent.name)
+                    if properties.parent.name.isdigit()
+                    else None
+                ),
             )
         )
-    return result
+    # Numeric HIP_VISIBLE_DEVICES/ROCR_VISIBLE_DEVICES values address GPU
+    # agents in KFD node order. amd-smi has its own index space and can list
+    # the same devices in a different order, especially on mixed-GPU hosts.
+    return sorted(
+        result,
+        key=lambda gpu: (
+            gpu.node_id is None,
+            gpu.node_id if gpu.node_id is not None else 0,
+            gpu.bdf,
+        ),
+    )
 
 
 def _csv(value: str | None) -> list[str]:
@@ -386,7 +402,7 @@ def _selected_gpus(
             "Save `amd-smi list` output and report it as an R9V compatibility issue.",
         )
         return []
-    by_index = {gpu.index: gpu for gpu in inventory}
+    by_bdf = {gpu.bdf: gpu for gpu in inventory}
     by_uuid = {
         gpu.uuid.lower(): gpu for gpu in inventory if gpu.uuid is not None
     }
@@ -396,7 +412,7 @@ def _selected_gpus(
         reporter.fail(
             "gpu-order",
             f"R9V_VISIBLE_DEVICES selects {len(visible)} devices; profile needs {expected_count}",
-            f"Set R9V_VISIBLE_DEVICES to exactly {expected_count} comma-separated amd-smi indices.",
+            f"Set R9V_VISIBLE_DEVICES to exactly {expected_count} comma-separated HIP indices.",
             configured=visible,
         )
         return []
@@ -406,7 +422,7 @@ def _selected_gpus(
         reporter.fail(
             "gpu-order",
             f"R9V_EXPECTED_GPU_BDFS needs {expected_count} entries",
-            "Copy the BDFs from `amd-smi list` in the same order as R9V_VISIBLE_DEVICES.",
+            "Run the doctor without the lock and copy its HIP-rank-resolved BDF suggestion.",
             configured=expected_bdfs,
         )
         return []
@@ -428,20 +444,41 @@ def _selected_gpus(
         )
         return []
 
-    kfd = {gpu.bdf: gpu for gpu in discover_kfd_gpus(sys_root)}
+    kfd_devices = discover_kfd_gpus(sys_root)
+    kfd = {gpu.bdf: gpu for gpu in kfd_devices}
     selected: list[tuple[int, AmdGpu, float | None, int | None, float | None]] = []
     for rank, token in enumerate(visible):
         gpu: AmdGpu | None = None
+        hip_index: int | None = None
         if token.isdigit():
-            gpu = by_index.get(int(token))
+            hip_index = int(token)
+            if 0 <= hip_index < len(kfd_devices):
+                gpu = by_bdf.get(kfd_devices[hip_index].bdf)
         else:
             normalized_uuid = token.lower().removeprefix("gpu-")
             gpu = by_uuid.get(normalized_uuid)
         if gpu is None:
+            if hip_index is not None and 0 <= hip_index < len(kfd_devices):
+                missing_bdf = kfd_devices[hip_index].bdf
+                message = (
+                    f"rank {rank} HIP device {token} resolves through KFD to "
+                    f"{missing_bdf}, which is absent from amd-smi"
+                )
+                remediation = (
+                    "Fix the ROCm/KFD and amd-smi inventory disagreement before "
+                    "launching; do not substitute the same-numbered amd-smi device."
+                )
+            else:
+                message = f"rank {rank} HIP device {token!r} was not found"
+                remediation = (
+                    "Choose a numeric HIP/KFD device index or GPU UUID and update "
+                    "R9V_VISIBLE_DEVICES. Use the doctor's resolved BDF output, not "
+                    "amd-smi's display index, to confirm the physical cards."
+                )
             reporter.fail(
                 "gpu-order",
-                f"rank {rank} device {token!r} was not found",
-                "Choose an index or UUID shown by `amd-smi list` and update R9V_VISIBLE_DEVICES.",
+                message,
+                remediation,
             )
             continue
         if any(existing.bdf == gpu.bdf for _, existing, _, _, _ in selected):
@@ -480,9 +517,11 @@ def _selected_gpus(
         else:
             reporter.passed(
                 "gpu-architecture",
-                f"rank {rank} device {gpu.index} {gpu.bdf} is gfx1201",
+                f"rank {rank} HIP device {token} -> {gpu.bdf} is gfx1201 "
+                f"(amd-smi device {gpu.index})",
                 rank=rank,
-                device_index=gpu.index,
+                hip_device=token,
+                amd_smi_index=gpu.index,
                 bdf=gpu.bdf,
                 uuid=gpu.uuid,
             )

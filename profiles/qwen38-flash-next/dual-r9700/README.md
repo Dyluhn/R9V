@@ -75,13 +75,24 @@ This is the comma-separated HIP device order. The first value becomes TP rank
 published expert placement is asymmetric, so reversing the devices changes
 which physical card receives the larger static placement and dynamic cache.
 
-Discover indices and PCI addresses with:
+Numeric HIP indices follow KFD GPU-node order. `amd-smi` has a separate index
+space and may list the same physical devices in a different order on mixed-GPU
+or multi-switch systems. Discover both views with:
 
 ```bash
 amd-smi list
+for node in /sys/class/kfd/kfd/topology/nodes/*; do
+  test -r "$node/properties" || continue
+  printf 'KFD node %s: ' "${node##*/}"
+  grep -E '^(location_id|domain|gfx_target_version) ' "$node/properties"
+done
 ```
 
-Example:
+The doctor resolves each configured HIP index through KFD to its physical BDF
+and reports the corresponding `amd-smi` index. Trust that resolved mapping, not
+an assumption that HIP index 0 must mean `amd-smi` GPU 0.
+
+Example on a host where the two index spaces happen to agree:
 
 ```text
 GPU: 0
@@ -452,9 +463,11 @@ remaining warnings are understood.
 
 ### GPUs are enumerated in the wrong order
 
-Use `amd-smi list`, set `R9V_VISIBLE_DEVICES` in the intended rank order, and
-set `R9V_EXPECTED_GPU_BDFS` in that same order. Rerun static doctor before
-launching.
+Set `R9V_VISIBLE_DEVICES` in the intended HIP/KFD rank order, leave the BDF
+lock empty, and run the doctor. Confirm its resolved HIP-index-to-BDF mapping,
+then copy the suggested `R9V_EXPECTED_GPU_BDFS` value and rerun before
+launching. Never translate a numeric HIP index by looking up the same numeric
+row in `amd-smi list`.
 
 ### PCIe bandwidth is below the configured floor
 
