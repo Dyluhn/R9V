@@ -95,6 +95,8 @@ name = "r9v-format"
 version = "0.1.0"
 dependencies = [
  "r9v-common",
+ "r9v-ir",
+ "thiserror",
 ]
 
 [[package]]

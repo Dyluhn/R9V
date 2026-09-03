@@ -89,3 +89,9 @@ What: Spec 1 §3.4 lists `logits_postprocess -> sample` as a permitted fusion pa
 Why it blocks or misleads: During decode `q = 1` the query dimension is degenerate, but prefill and speculative verify steps have `q > 1`, creating a structural rank contradiction across the fused edge.
 Option taken: Modeled the fusion pattern for decode-class steps where `q = 1` allows squeezing the degenerate dimension into `[S, V]`, and documented that multi-token sampling requires per-token dispatch.
 Proposed resolution: Clarify in Spec 1 §3.4 that `logits_postprocess -> sample` fusion applies specifically to decode-class sequences with `q = 1`.
+
+## SI-14 — A2.1 — spec 2 §2.3 / spec 4 §5.1, §8
+What: Spec 2 §2.3 defines the `L1S` index region as "per tile, 2 bits per kept element in the lane order SWMMAC expects (spec 4 fixes the exact operand order)", but spec 4 names `swmmac_*` only as a leaf wrapper (§8) and as an inner-loop note (§5.1: "`L1S`: same with `swmmac_*` in the inner loop and the index region streamed alongside") without fixing any index-operand lane order. The referenced order does not exist in the spec.
+Why it blocks or misleads: Card A2.1 must emit an index-region byte layout that kernels (A5.4) and the loader (A2.8) will share, but there is no specified order to implement; A0.S1 verified only the dense `L1` lane formula, not any sparse operand order.
+Option taken: `L1S` index bytes reuse the A0.S1-verified §2.2 lane formula over the compressed-K tile (lane = kgroup*16+n, four kept slots per lane, slot 0 in the lowest 2 bits), recorded as DECISION(A2.1) in `crates/r9v-format/src/sparse.rs`.
+Proposed resolution: State the `L1S` index lane order explicitly in spec 2 §2.3 (or point to the verified §2.2 order), removing the forward reference to spec 4.
