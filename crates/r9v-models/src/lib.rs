@@ -17,7 +17,7 @@ pub mod summary;
 
 pub use builder::{
     BoundWeight, FusionDecl, Graph, GraphBuilder, ModelGraph, SchemeClass, SealedGraphBuilder,
-    TiedDecl, WeightRole,
+    SubgraphCapture, TiedDecl, Value, WeightRole,
 };
 pub use error::ModelsError;
 pub use generic::{build_ffn, build_layer, build_mixer, build_model, build_mtp_subgraph};

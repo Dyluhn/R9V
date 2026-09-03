@@ -9,16 +9,17 @@ use r9v_ir::op::{
     ActivationKind, AttentionMask, ConvActivation, MlaAttentionSpec, MlaLatent, MoeGroup,
     NgramCombine, NgramSource, NormAxis,
 };
-use r9v_ir::tensor::{Dim, ShapeSymbol, Tensor};
+use r9v_ir::tensor::{Dim, ShapeSymbol};
 use r9v_ir::DType;
 
 use crate::builder::{
     checked_add, checked_mul, checked_u32, FusionDecl, GraphBuilder, ModelGraph, SchemeClass,
-    WeightRole,
+    Value, WeightRole,
 };
 use crate::error::ModelsError;
 use crate::spec::{
-    Ffn, LayerSpec, Mixer, ModelSpec, MtpSource, MtpSpec, NormPlacement, Retain, StateSpec,
+    Ffn, LayerSpec, Mixer, ModelSpec, MtpSource, MtpSpec, NormPlacement, Retain, RopeSpec,
+    StateSpec,
 };
 
 /// Lowers a full [`ModelSpec`] into an Op IR step graph (Spec 8 §2, §3, §5).
@@ -41,7 +42,7 @@ pub fn build_model(
     let mut x = builder.op_embed_gather(tokens.clone(), w_embed, model.embed_scale)?;
 
     // 3. Build each layer sequentially
-    let mut captured_hidden_at_layer: Option<Tensor> = None;
+    let mut captured_hidden_at_layer: Option<Value> = None;
 
     for (i, layer_spec) in model.layers.iter().enumerate() {
         let layer_idx = checked_u32(i, "build_model layer index")?;
@@ -90,6 +91,10 @@ pub fn build_model(
                     SchemeClass::Matmul,
                 )?;
                 let proj = builder.op_matmul(ngram_out, w_proj, DType::F16)?;
+                // DECISION(A1.14): the n-gram injection residual stays
+                // unscaled: LayerSpec.residual_scale governs the layer's own
+                // mixer/FFN residuals (Spec 8 §3.1), while this model-level
+                // injection shows a plain residual_add there. SI-18.
                 x = builder.op_residual_add(x, proj, DType::F16)?;
             }
         }
@@ -143,7 +148,14 @@ pub fn build_model(
         )?
     };
 
-    let logits = builder.op_matmul(h_final.clone(), w_head, DType::F32)?;
+    let lm_logits = builder.op_matmul(h_final.clone(), w_head, DType::F32)?;
+    // A set final_logit_softcap lowers to one logit_softcap op; None emits
+    // nothing, reproducing the A1.3 graph exactly (Spec 8 §3; card A1.14,
+    // SI-19).
+    let logits = match model.final_logit_softcap {
+        Some(cap) => builder.op_logit_softcap(lm_logits, cap)?,
+        None => lm_logits,
+    };
     builder.export("logits", logits)?;
 
     // 7. Multi-Token Prediction (MTP) subgraph
@@ -167,9 +179,9 @@ pub fn build_layer(
     builder: &mut GraphBuilder,
     layer_idx: u32,
     spec: &LayerSpec,
-    x: Tensor,
+    x: Value,
     model: &ModelSpec,
-) -> Result<Tensor, ModelsError> {
+) -> Result<Value, ModelsError> {
     build_layer_with_ns(builder, layer_idx, spec, x, model, "")
 }
 
@@ -179,10 +191,10 @@ fn build_layer_with_ns(
     builder: &mut GraphBuilder,
     layer_idx: u32,
     spec: &LayerSpec,
-    mut x: Tensor,
+    mut x: Value,
     model: &ModelSpec,
     weight_ns: &str,
-) -> Result<Tensor, ModelsError> {
+) -> Result<Value, ModelsError> {
     spec.validate(layer_idx)?;
 
     match spec.norm {
@@ -204,7 +216,12 @@ fn build_layer_with_ns(
                 )?;
                 let mixer_out =
                     build_mixer_with_ns(builder, layer_idx, &spec.mixer, h, model, weight_ns)?;
-                x = builder.op_residual_add(x, mixer_out, DType::F16)?;
+                x = builder.op_residual_add_scaled(
+                    x,
+                    mixer_out,
+                    spec.residual_scale,
+                    DType::F16,
+                )?;
             }
 
             if spec.ffn != Ffn::None {
@@ -223,7 +240,7 @@ fn build_layer_with_ns(
                 )?;
                 let ffn_out =
                     build_ffn_with_ns(builder, layer_idx, &spec.ffn, h, model, weight_ns)?;
-                x = builder.op_residual_add(x, ffn_out, DType::F16)?;
+                x = builder.op_residual_add_scaled(x, ffn_out, spec.residual_scale, DType::F16)?;
             }
         }
         NormPlacement::Sandwich => {
@@ -257,7 +274,7 @@ fn build_layer_with_ns(
                     NormAxis::Last,
                     DType::F16,
                 )?;
-                x = builder.op_residual_add(x, post, DType::F16)?;
+                x = builder.op_residual_add_scaled(x, post, spec.residual_scale, DType::F16)?;
             }
 
             if spec.ffn != Ffn::None {
@@ -284,7 +301,7 @@ fn build_layer_with_ns(
                 )?;
                 let post =
                     builder.op_norm(ffn_out, w_post, spec.norm_kind, NormAxis::Last, DType::F16)?;
-                x = builder.op_residual_add(x, post, DType::F16)?;
+                x = builder.op_residual_add_scaled(x, post, spec.residual_scale, DType::F16)?;
             }
         }
         NormPlacement::Parallel => {
@@ -325,10 +342,10 @@ fn build_layer_with_ns(
             };
 
             if let Some(m_out) = mixer_out {
-                x = builder.op_residual_add(x, m_out, DType::F16)?;
+                x = builder.op_residual_add_scaled(x, m_out, spec.residual_scale, DType::F16)?;
             }
             if let Some(f_out) = ffn_out {
-                x = builder.op_residual_add(x, f_out, DType::F16)?;
+                x = builder.op_residual_add_scaled(x, f_out, spec.residual_scale, DType::F16)?;
             }
         }
     }
@@ -343,9 +360,9 @@ pub fn build_mixer(
     builder: &mut GraphBuilder,
     layer_idx: u32,
     mixer: &Mixer,
-    h: Tensor,
+    h: Value,
     model: &ModelSpec,
-) -> Result<Tensor, ModelsError> {
+) -> Result<Value, ModelsError> {
     build_mixer_with_ns(builder, layer_idx, mixer, h, model, "")
 }
 
@@ -354,10 +371,10 @@ fn build_mixer_with_ns(
     builder: &mut GraphBuilder,
     layer_idx: u32,
     mixer: &Mixer,
-    h: Tensor,
+    h: Value,
     model: &ModelSpec,
     weight_ns: &str,
-) -> Result<Tensor, ModelsError> {
+) -> Result<Value, ModelsError> {
     match mixer {
         Mixer::Attention {
             h: heads,
@@ -382,17 +399,13 @@ fn build_mixer_with_ns(
             let head_dv = *dv;
 
             if let Some(mla_spec) = mla {
-                // Defensive: `LayerSpec::validate` already rejects this
-                // combination, but `build_mixer` is public and takes a bare
-                // `Mixer`, so the lowering refuses it directly too rather
-                // than silently dropping the norm.
-                if qk_norm.is_some() {
-                    return Err(ModelsError::InvalidLayerSpec {
-                        layer: layer_idx,
-                        reason: "mla with qk_norm is unsupported: qk_norm applies to the per-head q/k pair and the MLA form has no per-head k tensor".to_string(),
-                    });
-                }
-                // Multi-Head Latent Attention (MLA, DeepSeek-style)
+                // Multi-Head Latent Attention (MLA, DeepSeek-style; card
+                // A1.14, SI-20). Compressed latents and decoupled rotary
+                // parts travel as explicit edges: the query splits into
+                // (q_nope, q_rope) with rope applied to the rotary part only,
+                // and the attention query is reconstructed by concatenation
+                // with the declared head dims. No compressed latent channel
+                // passes through RoPE.
                 let w_q_a = builder.weight(
                     format!("blk.{layer_idx}.{weight_ns}attn_q_a.weight"),
                     WeightRole::Matmul,
@@ -426,7 +439,7 @@ fn build_mixer_with_ns(
                     ],
                     SchemeClass::Matmul,
                 )?;
-                let q_flat = if *qkv_bias {
+                let mut q_flat = if *qkv_bias {
                     let b_q_b = builder.weight(
                         format!("blk.{layer_idx}.{weight_ns}attn_q_b.bias"),
                         WeightRole::Vector,
@@ -437,17 +450,6 @@ fn build_mixer_with_ns(
                 } else {
                     builder.op_matmul(c_q, w_q_b, DType::F16)?
                 };
-                let q_3d = builder.op_reshape(
-                    q_flat,
-                    vec![
-                        Dim::Symbolic(ShapeSymbol::T),
-                        Dim::Concrete(h_heads),
-                        Dim::Concrete(qk_sum),
-                    ],
-                )?;
-
-                let pos = builder.positions(model.positions)?;
-                let q = builder.op_rope(q_3d, pos.clone(), rope)?;
 
                 let kv_in_dim = checked_add(
                     mla_spec.kv_lora_rank,
@@ -460,7 +462,7 @@ fn build_mixer_with_ns(
                     &[Dim::Concrete(kv_in_dim), Dim::Concrete(model.dm)],
                     SchemeClass::Matmul,
                 )?;
-                let c_kv_flat = if *qkv_bias {
+                let mut c_kv_flat = if *qkv_bias {
                     let b_kv_a = builder.weight(
                         format!("blk.{layer_idx}.{weight_ns}attn_kv_a.bias"),
                         WeightRole::Vector,
@@ -471,7 +473,62 @@ fn build_mixer_with_ns(
                 } else {
                     builder.op_matmul(h.clone(), w_kv_a, DType::F16)?
                 };
-                let c_kv = builder.op_reshape(
+
+                // qk_norm lowers exactly like the standard path — after
+                // projection, before rope, one weight per side — with the
+                // head axis over the combined query width and a row norm over
+                // the head-less KV rows, which have no per-head structure
+                // (card A1.14, SI-20).
+                if let Some(norm) = qk_norm {
+                    let w_q_norm = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}attn_q_norm.weight"),
+                        WeightRole::Vector,
+                        &[Dim::Concrete(q_flat_dim)],
+                        SchemeClass::Vector,
+                    )?;
+                    q_flat = builder.op_norm(
+                        q_flat,
+                        w_q_norm,
+                        *norm,
+                        NormAxis::Head(qk_sum),
+                        DType::F16,
+                    )?;
+                    let w_kv_norm = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}attn_k_norm.weight"),
+                        WeightRole::Vector,
+                        &[Dim::Concrete(kv_in_dim)],
+                        SchemeClass::Vector,
+                    )?;
+                    c_kv_flat =
+                        builder.op_norm(c_kv_flat, w_kv_norm, *norm, NormAxis::Last, DType::F16)?;
+                }
+
+                let q_3d = builder.op_reshape(
+                    q_flat,
+                    vec![
+                        Dim::Symbolic(ShapeSymbol::T),
+                        Dim::Concrete(h_heads),
+                        Dim::Concrete(qk_sum),
+                    ],
+                )?;
+                let (q_nope, q_rope_raw) = builder.op_split(q_3d, mla_spec.qk_nope_dim)?;
+
+                // DECISION(A1.14): the decoupled rotary parts rotate with
+                // rot_dim set to the rotary width itself: every channel of
+                // q_rope/k_rope is positional by construction, while the
+                // standard rot_dim names the full-path width and exceeds the
+                // rope part whenever they differ. Rejected reusing
+                // rope.rot_dim verbatim (validation must reject rot_dim > D,
+                // never silently clamp). Spec 8 §3.1, SI-20.
+                let mla_rope = RopeSpec {
+                    rot_dim: mla_spec.qk_rope_dim,
+                    ..rope.clone()
+                };
+                let pos = builder.positions(model.positions)?;
+                let q_rope = builder.op_rope(q_rope_raw, pos.clone(), &mla_rope)?;
+                let q = builder.op_concat(q_nope, q_rope)?;
+
+                let c_kv_3d = builder.op_reshape(
                     c_kv_flat,
                     vec![
                         Dim::Symbolic(ShapeSymbol::T),
@@ -479,7 +536,8 @@ fn build_mixer_with_ns(
                         Dim::Concrete(kv_in_dim),
                     ],
                 )?;
-                let k_rope = builder.op_rope(c_kv.clone(), pos, rope)?;
+                let (c_kv, k_rope_raw) = builder.op_split(c_kv_3d, mla_spec.kv_lora_rank)?;
+                let k_rope = builder.op_rope(k_rope_raw, pos, &mla_rope)?;
 
                 // Validated at the `LayerSpec` boundary; this `?` is the second
                 // line of defense for direct `build_mixer` callers.
@@ -498,7 +556,7 @@ fn build_mixer_with_ns(
                     kv_lora_rank: mla_spec.kv_lora_rank,
                     rope_dim: mla_spec.qk_rope_dim,
                 });
-                builder.op_state_write_kv(c_kv, k_rope, handle, *cache, latent_info)?;
+                builder.op_state_write_kv(k_rope, c_kv, handle, *cache, latent_info)?;
 
                 let mask = if let Some(w) = window {
                     AttentionMask::CausalWindow(*w)
@@ -924,9 +982,9 @@ pub fn build_ffn(
     builder: &mut GraphBuilder,
     layer_idx: u32,
     ffn: &Ffn,
-    h: Tensor,
+    h: Value,
     model: &ModelSpec,
-) -> Result<Tensor, ModelsError> {
+) -> Result<Value, ModelsError> {
     build_ffn_with_ns(builder, layer_idx, ffn, h, model, "")
 }
 
@@ -935,10 +993,10 @@ fn build_ffn_with_ns(
     builder: &mut GraphBuilder,
     layer_idx: u32,
     ffn: &Ffn,
-    h: Tensor,
+    h: Value,
     model: &ModelSpec,
     weight_ns: &str,
-) -> Result<Tensor, ModelsError> {
+) -> Result<Value, ModelsError> {
     match ffn {
         Ffn::Dense {
             dff,
@@ -1161,21 +1219,19 @@ fn build_ffn_with_ns(
 pub fn build_mtp_subgraph(
     parent_builder: &mut GraphBuilder,
     mtp: &MtpSpec,
-    _hidden: Tensor,
+    hidden: Value,
     model: &ModelSpec,
 ) -> Result<(), ModelsError> {
     // Validate before the head loop below: `heads` and `layers_per_head`
     // drive allocation and loop counts, and this entry point is public, so
     // adversarial dimensions must fail here rather than hang or OOM.
     mtp.validate(model.layers.len())?;
-    let mut mtp_builder = parent_builder.subgraph("mtp")?;
-    // MTP subgraph consumes the hidden state via input_embed_override (Spec 8 §2)
-    let (sub_hidden, _) = mtp_builder.input_embed_override(model.dm)?;
-    // Parent-to-MTP capture wiring is A1.14's scope; this input is the
-    // per-head restart point so no head is built from another head's output
-    // value. Edge-level identity under descriptor-equality lookup is likewise
-    // A1.14's (SSA identity); heads keep disjoint `blk.N.mtp.*` weights here.
-    let head_input = sub_hidden;
+    // The child graph's input explicitly captures the chosen parent hidden
+    // value (Layer(n) or Last, selected by the caller); every head restarts
+    // from that capture, so no head chains off another head's output
+    // (card A1.14, SI-23).
+    let mut mtp_builder = parent_builder.subgraph_with_capture("mtp", &hidden)?;
+    let head_input = mtp_builder.capture_value()?;
     let per_head = checked_u32(mtp.layers_per_head.len(), "mtp layers per head")?;
     for head in 1..=mtp.heads {
         let head_base = checked_mul(head - 1, per_head, "mtp head ordinal")?;

@@ -25,6 +25,7 @@ fn residual_add_matches_f64_reference() {
         let num_elem: usize = shape.iter().product();
         let op = ResidualAddOp {
             out_dtype: DType::F32,
+            scale: 1.0,
         };
 
         let a_data = generate_f32_data(&mut rng, num_elem, 10.0);
@@ -44,7 +45,7 @@ fn residual_add_matches_f64_reference() {
 
         let a_f64: Vec<f64> = a_data.iter().map(|&v| v as f64).collect();
         let b_f64: Vec<f64> = b_data.iter().map(|&v| v as f64).collect();
-        let ref_f64 = residual_add_f64_reference(&a_f64, &b_f64);
+        let ref_f64 = residual_add_f64_reference(&a_f64, &b_f64, 1.0);
 
         for i in 0..num_elem {
             let actual = y_buf.read_f32(i) as f64;
@@ -69,7 +70,10 @@ fn residual_add_f16_and_bf16_precision_paths() {
     let b_data = generate_f32_data(&mut rng, num_elem, 5.0);
 
     for &dt in &[DType::F16, DType::Bf16] {
-        let op = ResidualAddOp { out_dtype: dt };
+        let op = ResidualAddOp {
+            out_dtype: dt,
+            scale: 1.0,
+        };
 
         let mut a_buf = TypedBuffer::zeros(&shape, dt);
         let mut b_buf = TypedBuffer::zeros(&shape, dt);
@@ -90,7 +94,7 @@ fn residual_add_f16_and_bf16_precision_paths() {
 
         let a_f64: Vec<f64> = (0..num_elem).map(|i| a_buf.read_f32(i) as f64).collect();
         let b_f64: Vec<f64> = (0..num_elem).map(|i| b_buf.read_f32(i) as f64).collect();
-        let ref_f64 = residual_add_f64_reference(&a_f64, &b_f64);
+        let ref_f64 = residual_add_f64_reference(&a_f64, &b_f64, 1.0);
 
         for i in 0..num_elem {
             let actual = y_buf.read_f32(i) as f64;
@@ -110,6 +114,7 @@ fn residual_add_batch_invariance() {
 
     let op = ResidualAddOp {
         out_dtype: DType::F32,
+        scale: 1.0,
     };
 
     // 1. Alone (T = 1)
@@ -188,6 +193,7 @@ fn residual_add_determinism_twice_bit_identical() {
 
     let op = ResidualAddOp {
         out_dtype: DType::F32,
+        scale: 1.0,
     };
 
     let a_data = generate_f32_data(&mut rng, num_elem, 3.0);
@@ -226,9 +232,80 @@ fn residual_add_determinism_twice_bit_identical() {
 }
 
 #[test]
+fn residual_add_non_unit_scale_matches_reference() {
+    // Card A1.14 (SI-18): `y = a + scale * b` with a non-unit scale.
+    let mut rng = SeededRng::new(0xA1_5014);
+    let tol = Tolerance::f32();
+    let shape = [2, 32];
+    let num_elem = 64;
+    let op = ResidualAddOp {
+        out_dtype: DType::F32,
+        scale: 2.5,
+    };
+
+    let a_data = generate_f32_data(&mut rng, num_elem, 4.0);
+    let b_data = generate_f32_data(&mut rng, num_elem, 4.0);
+    let a_buf = TypedBuffer::from_f32(&shape, &a_data);
+    let b_buf = TypedBuffer::from_f32(&shape, &b_data);
+    let mut y_buf = TypedBuffer::zeros(&shape, DType::F32);
+    residual_add(
+        &op,
+        &a_buf.as_view(),
+        &b_buf.as_view(),
+        &mut y_buf.as_view_mut(),
+    )
+    .unwrap();
+
+    let a_f64: Vec<f64> = a_data.iter().map(|&v| v as f64).collect();
+    let b_f64: Vec<f64> = b_data.iter().map(|&v| v as f64).collect();
+    let expected = residual_add_f64_reference(&a_f64, &b_f64, 2.5);
+    for i in 0..num_elem {
+        tol.assert_within(
+            y_buf.read_f32(i) as f64,
+            expected[i],
+            &format!("scaled residual_add at {i}"),
+        );
+    }
+    // The scale is observable: unit-scale output differs.
+    let unit = residual_add_f64_reference(&a_f64, &b_f64, 1.0);
+    assert!(
+        expected
+            .iter()
+            .zip(unit.iter())
+            .any(|(s, u)| (s - u).abs() > 1e-6),
+        "non-unit scale must change the output"
+    );
+}
+
+#[test]
+fn residual_add_rejects_non_finite_or_zero_scale() {
+    let a_buf = TypedBuffer::zeros(&[2, 64], DType::F32);
+    let b_buf = TypedBuffer::zeros(&[2, 64], DType::F32);
+    let mut y_buf = TypedBuffer::zeros(&[2, 64], DType::F32);
+    for scale in [0.0, -0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let op = ResidualAddOp {
+            out_dtype: DType::F32,
+            scale,
+        };
+        let err = residual_add(
+            &op,
+            &a_buf.as_view(),
+            &b_buf.as_view(),
+            &mut y_buf.as_view_mut(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("scale"),
+            "scale {scale} must be rejected, got {err}"
+        );
+    }
+}
+
+#[test]
 fn residual_add_rejects_shape_and_dtype_mismatches() {
     let op = ResidualAddOp {
         out_dtype: DType::F32,
+        scale: 1.0,
     };
 
     let a_buf = TypedBuffer::zeros(&[2, 64], DType::F32);

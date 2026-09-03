@@ -684,15 +684,10 @@ impl LayerSpec {
                     if let Err(e) = mla_spec.validate("attention mla") {
                         problems.push(e);
                     }
-                    // Spec 8 §3.1 defines qk_norm on the per-head q/k pair,
-                    // which the low-rank MLA form has no per-head k for; the
-                    // combination is rejected instead of silently ignored.
-                    if qk_norm.is_some() {
-                        problems.push(ModelsError::InvalidLayerSpec {
-                            layer: layer_idx,
-                            reason: "mla with qk_norm is unsupported: qk_norm applies to the per-head q/k pair and the MLA form has no per-head k tensor".to_string(),
-                        });
-                    }
+                    // Card A1.14 lowers qk_norm on the MLA form instead of
+                    // rejecting it (per-side norms in the generic builder);
+                    // nothing to refuse here beyond the norm's own validation
+                    // above. SI-20.
                 }
                 check_layer_dim(&mut problems, layer_idx, "h", *h, MAX_ATTENTION_HEADS);
                 check_layer_dim(&mut problems, layer_idx, "hkv", *hkv, MAX_KV_HEADS);

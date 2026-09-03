@@ -570,10 +570,10 @@ fn dense_gated_bias_lowers_through_bias_epilogue() {
     assert_eq!(bias_epilogues, 2, "gate and up projections");
 }
 
-/// MLA with `qk_norm` is rejected at validation and at lowering, never
-/// silently dropped.
+/// MLA with `qk_norm` lowers to per-side norms instead of being rejected or
+/// ignored (Spec 8 §3; card A1.14, SI-20).
 #[test]
-fn mla_qk_norm_rejected_not_ignored() {
+fn mla_qk_norm_lowers_instead_of_rejecting() {
     let mixer = Mixer::Attention {
         h: 4,
         hkv: 1,
@@ -603,29 +603,26 @@ fn mla_qk_norm_rejected_not_ignored() {
         ffn: Ffn::None,
         residual_scale: 1.0,
     };
-    let err = layer.validate(0).unwrap_err();
-    assert!(
-        format!("{err:?}").contains("qk_norm"),
-        "validation names qk_norm: {err:?}"
-    );
+    // Validation accepts the combination; the detailed edge oracles live in
+    // the A1.14 cohesion tests.
+    layer.validate(0).expect("mla with qk_norm validates");
 
     let model = tiny_model(vec![tiny_layer()]);
     let mut builder = GraphBuilder::new(IrVersion::CURRENT, "adv-mla-qknorm");
     let (x, _) = builder.input_embed_override(model.dm).expect("override");
-    let err = build_layer(&mut builder, 0, &layer, x, &model).unwrap_err();
-    assert!(
-        format!("{err:?}").contains("qk_norm"),
-        "layer lowering names qk_norm: {err:?}"
-    );
+    build_layer(&mut builder, 0, &layer, x, &model).expect("mla with qk_norm lowers");
+    let graph = builder.finish().expect("qk_norm MLA graph validates");
+    for name in ["blk.0.attn_q_norm.weight", "blk.0.attn_k_norm.weight"] {
+        assert!(
+            graph.bound_weights().iter().any(|w| w.name == name),
+            "missing MLA qk_norm weight {name}"
+        );
+    }
 
-    // The bare-mixer entry point refuses it too (defense past validation).
+    // The bare-mixer entry point lowers it too (no silent drop past validation).
     let mut direct = GraphBuilder::new(IrVersion::CURRENT, "adv-mla-qknorm-direct");
     let (h, _) = direct.input_embed_override(model.dm).expect("override");
-    let err = build_mixer(&mut direct, 0, &mixer, h, &model).unwrap_err();
-    assert!(
-        matches!(err, ModelsError::InvalidLayerSpec { .. }),
-        "mixer lowering rejects MLA qk_norm: {err:?}"
-    );
+    build_mixer(&mut direct, 0, &mixer, h, &model).expect("bare mixer lowers MLA qk_norm");
 }
 
 /// The public spec-facing builders take no namespace plumbing and lower.
@@ -661,13 +658,13 @@ fn public_build_apis_lower_without_namespace_arg() {
     let mixer_out =
         build_mixer(&mut builder, 0, &mixer, h.clone(), &model).expect("public build_mixer lowers");
     assert_eq!(
-        mixer_out.shape(),
+        mixer_out.tensor().shape(),
         &[Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(model.dm)],
         "mixer output is [T, Dm]"
     );
     let ffn_out = build_ffn(&mut builder, 0, &ffn, h, &model).expect("public build_ffn lowers");
     assert_eq!(
-        ffn_out.shape(),
+        ffn_out.tensor().shape(),
         &[Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(model.dm)],
         "ffn output is [T, Dm]"
     );

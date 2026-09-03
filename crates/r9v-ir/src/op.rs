@@ -2140,6 +2140,382 @@ impl ScatterAddRowsOp {
     }
 }
 
+/// Last-axis channel split op (card A1.14, SI-20).
+///
+/// `x [T, H, D] -> (a [T, H, first], b [T, H, D - first])`
+///
+/// Splits the MLA compressed-latent / decoupled-rotary channel ranges into
+/// explicit edges so `rope` consumes only the rotary part (Spec 1 §4.B,
+/// Spec 8 §3.1). Pure data movement: values are copied unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SplitOp {
+    /// Width of the first output along the last axis; must satisfy
+    /// `0 < first < D` so both outputs are non-empty.
+    pub first: u32,
+}
+
+impl SplitOp {
+    /// Validates inputs and outputs against the split contract.
+    pub fn validate(
+        &self,
+        inputs: &[crate::Tensor],
+        outputs: &[crate::Tensor],
+    ) -> Result<(), IrError> {
+        let mut problems = Vec::new();
+
+        if self.first == 0 {
+            problems.push(IrError::OpAttributeInvalid {
+                op: "split",
+                attribute: "first",
+                reason: "split width must be > 0 so both outputs are non-empty".to_string(),
+            });
+        }
+
+        let input_count_valid = inputs.len() == 1;
+        if !input_count_valid {
+            problems.push(IrError::OpInputCountMismatch {
+                op: "split",
+                expected: 1,
+                got: inputs.len(),
+            });
+        }
+
+        let output_count_valid = outputs.len() == 2;
+        if !output_count_valid {
+            problems.push(IrError::OpOutputCountMismatch {
+                op: "split",
+                expected: 2,
+                got: outputs.len(),
+            });
+        }
+
+        if input_count_valid {
+            let x = &inputs[0];
+            check_rank("split", "x", x, 3, &mut problems);
+            check_dtype_in(
+                "split",
+                "x",
+                x,
+                &[DType::F16, DType::Bf16, DType::F32],
+                &mut problems,
+            );
+            if x.class() != Class::Activation {
+                problems.push(IrError::OpClassMismatch {
+                    op: "split",
+                    tensor: "x",
+                    expected: Class::Activation,
+                    got: x.class(),
+                });
+            }
+            if x.rank() == 3 {
+                if let Dim::Concrete(d) = x.shape()[2] {
+                    if self.first >= d {
+                        problems.push(IrError::OpAttributeInvalid {
+                            op: "split",
+                            attribute: "first",
+                            reason: format!(
+                                "split width {} must be < last-axis dim {d} so both outputs are non-empty",
+                                self.first
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        if output_count_valid {
+            for (name, o) in [("a", &outputs[0]), ("b", &outputs[1])] {
+                check_rank("split", name, o, 3, &mut problems);
+                check_dtype_in(
+                    "split",
+                    name,
+                    o,
+                    &[DType::F16, DType::Bf16, DType::F32],
+                    &mut problems,
+                );
+                if o.class() != Class::Activation {
+                    problems.push(IrError::OpClassMismatch {
+                        op: "split",
+                        tensor: name,
+                        expected: Class::Activation,
+                        got: o.class(),
+                    });
+                }
+            }
+        }
+
+        if input_count_valid && output_count_valid {
+            let x = &inputs[0];
+            let a = &outputs[0];
+            let b = &outputs[1];
+            if a.dtype() != x.dtype() {
+                problems.push(IrError::OpDTypeMismatch {
+                    op: "split",
+                    tensor: "a",
+                    expected: vec![x.dtype()].into_boxed_slice(),
+                    got: a.dtype(),
+                });
+            }
+            if b.dtype() != x.dtype() {
+                problems.push(IrError::OpDTypeMismatch {
+                    op: "split",
+                    tensor: "b",
+                    expected: vec![x.dtype()].into_boxed_slice(),
+                    got: b.dtype(),
+                });
+            }
+            if x.rank() == 3 && a.rank() == 3 && b.rank() == 3 {
+                for (axis, axis_name) in [(0, "T"), (1, "H")] {
+                    check_dim_match(
+                        "split",
+                        "a",
+                        a.shape()[axis],
+                        "x",
+                        x.shape()[axis],
+                        axis_name,
+                        &mut problems,
+                    );
+                    check_dim_match(
+                        "split",
+                        "b",
+                        b.shape()[axis],
+                        "x",
+                        x.shape()[axis],
+                        axis_name,
+                        &mut problems,
+                    );
+                }
+                if let (Dim::Concrete(d), Dim::Concrete(da), Dim::Concrete(db)) =
+                    (x.shape()[2], a.shape()[2], b.shape()[2])
+                {
+                    match da.checked_add(db) {
+                        Some(sum) if sum == d => {}
+                        Some(sum) => problems.push(IrError::OpShapeMismatch {
+                            op: "split",
+                            tensor: "a/b",
+                            detail: format!(
+                                "output widths {da} + {db} = {sum} do not reconstruct input dim {d}"
+                            ),
+                        }),
+                        None => problems.push(IrError::OpShapeMismatch {
+                            op: "split",
+                            tensor: "a/b",
+                            detail: format!("output widths {da} + {db} overflow u32"),
+                        }),
+                    }
+                    if da != self.first {
+                        problems.push(IrError::OpShapeMismatch {
+                            op: "split",
+                            tensor: "a",
+                            detail: format!(
+                                "first output width {da} does not match split attr first={}",
+                                self.first
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        IrError::from_problems(problems)
+    }
+
+    /// Returns legal sharding rules (card A1.14, SI-20; Spec 1 §5.2).
+    pub fn legal_layouts(&self) -> &'static [ShardingRule] {
+        sharding::SPLIT_RULES
+    }
+
+    /// Returns legal sharding rules as tuples.
+    pub fn legal_layout_tuples(
+        &self,
+    ) -> Vec<(&'static [ShardLayoutPattern], &'static [ShardLayoutPattern])> {
+        sharding::SPLIT_RULES.iter().map(|r| r.as_tuple()).collect()
+    }
+
+    /// Returns op numerics contract: pure data movement, no arithmetic.
+    pub fn numerics(&self) -> Numerics {
+        Numerics::none()
+    }
+
+    /// Returns op identifier name.
+    pub const fn op_name(&self) -> &'static str {
+        "split"
+    }
+}
+
+/// Last-axis channel concatenation op (card A1.14, SI-20).
+///
+/// `(a [T, H, Da], b [T, H, Db]) -> y [T, H, Da + Db]`
+///
+/// Reconstructs the MLA per-head query from its explicit non-rotary and
+/// rotated-rotary parts (Spec 1 §4.B, Spec 8 §3.1). Pure data movement:
+/// values are copied unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConcatOp;
+
+impl ConcatOp {
+    /// Validates inputs and outputs against the concat contract.
+    pub fn validate(
+        &self,
+        inputs: &[crate::Tensor],
+        outputs: &[crate::Tensor],
+    ) -> Result<(), IrError> {
+        let mut problems = Vec::new();
+
+        let input_count_valid = inputs.len() == 2;
+        if !input_count_valid {
+            problems.push(IrError::OpInputCountMismatch {
+                op: "concat",
+                expected: 2,
+                got: inputs.len(),
+            });
+        }
+
+        let output_count_valid = outputs.len() == 1;
+        if !output_count_valid {
+            problems.push(IrError::OpOutputCountMismatch {
+                op: "concat",
+                expected: 1,
+                got: outputs.len(),
+            });
+        }
+
+        if input_count_valid {
+            for (name, t) in [("a", &inputs[0]), ("b", &inputs[1])] {
+                check_rank("concat", name, t, 3, &mut problems);
+                check_dtype_in(
+                    "concat",
+                    name,
+                    t,
+                    &[DType::F16, DType::Bf16, DType::F32],
+                    &mut problems,
+                );
+                if t.class() != Class::Activation {
+                    problems.push(IrError::OpClassMismatch {
+                        op: "concat",
+                        tensor: name,
+                        expected: Class::Activation,
+                        got: t.class(),
+                    });
+                }
+            }
+            let (a, b) = (&inputs[0], &inputs[1]);
+            if b.dtype() != a.dtype() {
+                problems.push(IrError::OpDTypeMismatch {
+                    op: "concat",
+                    tensor: "b",
+                    expected: vec![a.dtype()].into_boxed_slice(),
+                    got: b.dtype(),
+                });
+            }
+            if a.rank() == 3 && b.rank() == 3 {
+                for (axis, axis_name) in [(0, "T"), (1, "H")] {
+                    check_dim_match(
+                        "concat",
+                        "b",
+                        b.shape()[axis],
+                        "a",
+                        a.shape()[axis],
+                        axis_name,
+                        &mut problems,
+                    );
+                }
+            }
+        }
+
+        if output_count_valid {
+            let y = &outputs[0];
+            check_rank("concat", "y", y, 3, &mut problems);
+            check_dtype_in(
+                "concat",
+                "y",
+                y,
+                &[DType::F16, DType::Bf16, DType::F32],
+                &mut problems,
+            );
+            if y.class() != Class::Activation {
+                problems.push(IrError::OpClassMismatch {
+                    op: "concat",
+                    tensor: "y",
+                    expected: Class::Activation,
+                    got: y.class(),
+                });
+            }
+        }
+
+        if input_count_valid && output_count_valid {
+            let (a, b, y) = (&inputs[0], &inputs[1], &outputs[0]);
+            if y.dtype() != a.dtype() {
+                problems.push(IrError::OpDTypeMismatch {
+                    op: "concat",
+                    tensor: "y",
+                    expected: vec![a.dtype()].into_boxed_slice(),
+                    got: y.dtype(),
+                });
+            }
+            if a.rank() == 3 && b.rank() == 3 && y.rank() == 3 {
+                for (axis, axis_name) in [(0, "T"), (1, "H")] {
+                    check_dim_match(
+                        "concat",
+                        "y",
+                        y.shape()[axis],
+                        "a",
+                        a.shape()[axis],
+                        axis_name,
+                        &mut problems,
+                    );
+                }
+                if let (Dim::Concrete(da), Dim::Concrete(db), Dim::Concrete(dy)) =
+                    (a.shape()[2], b.shape()[2], y.shape()[2])
+                {
+                    match da.checked_add(db) {
+                        Some(sum) if sum == dy => {}
+                        Some(sum) => problems.push(IrError::OpShapeMismatch {
+                            op: "concat",
+                            tensor: "y",
+                            detail: format!(
+                                "input widths {da} + {db} = {sum} do not match output dim {dy}"
+                            ),
+                        }),
+                        None => problems.push(IrError::OpShapeMismatch {
+                            op: "concat",
+                            tensor: "y",
+                            detail: format!("input widths {da} + {db} overflow u32"),
+                        }),
+                    }
+                }
+            }
+        }
+
+        IrError::from_problems(problems)
+    }
+
+    /// Returns legal sharding rules (card A1.14, SI-20; Spec 1 §5.2).
+    pub fn legal_layouts(&self) -> &'static [ShardingRule] {
+        sharding::CONCAT_RULES
+    }
+
+    /// Returns legal sharding rules as tuples.
+    pub fn legal_layout_tuples(
+        &self,
+    ) -> Vec<(&'static [ShardLayoutPattern], &'static [ShardLayoutPattern])> {
+        sharding::CONCAT_RULES
+            .iter()
+            .map(|r| r.as_tuple())
+            .collect()
+    }
+
+    /// Returns op numerics contract: pure data movement, no arithmetic.
+    pub fn numerics(&self) -> Numerics {
+        Numerics::none()
+    }
+
+    /// Returns op identifier name.
+    pub const fn op_name(&self) -> &'static str {
+        "concat"
+    }
+}
+
 // -----------------------------------------------------------------------------
 // §4.B Normalization and elementwise
 // -----------------------------------------------------------------------------
@@ -2379,11 +2755,14 @@ impl NormOp {
 
 /// Elementwise residual addition op (Spec 1 §4.B).
 ///
-/// `a + b in f32 -> y`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// `a + scale * b in f32 -> y`
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResidualAddOp {
     /// Output activation dtype.
     pub out_dtype: DType,
+    /// Residual branch scale from `LayerSpec.residual_scale` (Spec 8 §3;
+    /// card A1.14, SI-18). `1.0` reproduces the A1.3 `a + b` form exactly.
+    pub scale: f32,
 }
 
 impl ResidualAddOp {
@@ -2400,6 +2779,14 @@ impl ResidualAddOp {
                 op: "residual_add",
                 attribute: "out_dtype",
                 reason: format!("must be f16, bf16, or f32, got {:?}", self.out_dtype),
+            });
+        }
+
+        if !self.scale.is_finite() || self.scale == 0.0 {
+            problems.push(IrError::OpAttributeInvalid {
+                op: "residual_add",
+                attribute: "scale",
+                reason: format!("must be finite and non-zero, got {}", self.scale),
             });
         }
 
@@ -2887,6 +3274,134 @@ impl ActivationOp {
     /// Returns op identifier name.
     pub const fn op_name(&self) -> &'static str {
         "activation"
+    }
+}
+
+/// Final-logit soft-capping op (card A1.14, SI-19).
+///
+/// `x [T, V] f32 -> y [T, V] f32` with `y = cap * tanh(x / cap)` computed in
+/// f32, applied once to the `lm_head` output when
+/// `ModelSpec.final_logit_softcap` is set (Spec 8 §3). `None` lowers to no op,
+/// which reproduces the A1.3 graph exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LogitSoftcapOp {
+    /// Soft-cap threshold; must be finite and positive.
+    pub cap: f32,
+}
+
+impl LogitSoftcapOp {
+    /// Validates inputs and outputs against the softcap contract.
+    pub fn validate(
+        &self,
+        inputs: &[crate::Tensor],
+        outputs: &[crate::Tensor],
+    ) -> Result<(), IrError> {
+        let mut problems = Vec::new();
+
+        if !self.cap.is_finite() || self.cap <= 0.0 {
+            problems.push(IrError::OpAttributeInvalid {
+                op: "logit_softcap",
+                attribute: "cap",
+                reason: format!("must be finite and > 0, got {}", self.cap),
+            });
+        }
+
+        let input_count_valid = inputs.len() == 1;
+        if !input_count_valid {
+            problems.push(IrError::OpInputCountMismatch {
+                op: "logit_softcap",
+                expected: 1,
+                got: inputs.len(),
+            });
+        }
+
+        let output_count_valid = outputs.len() == 1;
+        if !output_count_valid {
+            problems.push(IrError::OpOutputCountMismatch {
+                op: "logit_softcap",
+                expected: 1,
+                got: outputs.len(),
+            });
+        }
+
+        if input_count_valid {
+            let x = &inputs[0];
+            check_rank("logit_softcap", "x", x, 2, &mut problems);
+            check_dtype_in("logit_softcap", "x", x, &[DType::F32], &mut problems);
+            if x.class() != Class::Activation {
+                problems.push(IrError::OpClassMismatch {
+                    op: "logit_softcap",
+                    tensor: "x",
+                    expected: Class::Activation,
+                    got: x.class(),
+                });
+            }
+        }
+
+        if output_count_valid {
+            let y = &outputs[0];
+            check_rank("logit_softcap", "y", y, 2, &mut problems);
+            check_dtype_in("logit_softcap", "y", y, &[DType::F32], &mut problems);
+            if y.class() != Class::Activation {
+                problems.push(IrError::OpClassMismatch {
+                    op: "logit_softcap",
+                    tensor: "y",
+                    expected: Class::Activation,
+                    got: y.class(),
+                });
+            }
+        }
+
+        if input_count_valid && output_count_valid {
+            let (x, y) = (&inputs[0], &outputs[0]);
+            if x.rank() == 2 && y.rank() == 2 {
+                check_dim_match(
+                    "logit_softcap",
+                    "y",
+                    y.shape()[0],
+                    "x",
+                    x.shape()[0],
+                    "T",
+                    &mut problems,
+                );
+                check_dim_match(
+                    "logit_softcap",
+                    "y",
+                    y.shape()[1],
+                    "x",
+                    x.shape()[1],
+                    "V",
+                    &mut problems,
+                );
+            }
+        }
+
+        IrError::from_problems(problems)
+    }
+
+    /// Returns legal sharding rules (card A1.14, SI-19; Spec 1 §5.2).
+    pub fn legal_layouts(&self) -> &'static [ShardingRule] {
+        sharding::LOGIT_SOFTCAP_RULES
+    }
+
+    /// Returns legal sharding rules as tuples.
+    pub fn legal_layout_tuples(
+        &self,
+    ) -> Vec<(&'static [ShardLayoutPattern], &'static [ShardLayoutPattern])> {
+        sharding::LOGIT_SOFTCAP_RULES
+            .iter()
+            .map(|r| r.as_tuple())
+            .collect()
+    }
+
+    /// Returns op numerics contract (Spec 1 §6.1, §6.4: f32 elementwise).
+    pub fn numerics(&self) -> Numerics {
+        Numerics::f32(ReductionOrder::None)
+    }
+
+    /// Returns op identifier name.
+    pub const fn op_name(&self) -> &'static str {
+        "logit_softcap"
     }
 }
 
@@ -4213,8 +4728,34 @@ impl StateWriteKvOp {
                     &mut problems,
                 );
             }
+            // DECISION(A1.14): with `latent`, the exact-split form writes the
+            // decoupled rotary key as `k` (`[T, H, rope_dim]`, rope already
+            // applied) and the compressed latent as `v` (`[T, H,
+            // kv_lora_rank]`, never rotated); the combined form (`k` holding
+            // `kv_lora_rank + rope_dim`) stays accepted for A1.2-era graphs.
+            // Rejected leaving `v` unconstrained in the split form (the latent
+            // width is then exact, not incidental). Spec 1 §4.D, SI-20.
             if let Some(ref l) = self.latent {
-                if k.rank() == 3 {
+                if k.rank() == 3 && v.rank() == 3 {
+                    if let (Dim::Concrete(dk), Dim::Concrete(dv)) = (k.shape()[2], v.shape()[2]) {
+                        let combined = l.kv_lora_rank.checked_add(l.rope_dim);
+                        let is_combined = combined == Some(dk);
+                        let is_split = dk == l.rope_dim && dv == l.kv_lora_rank;
+                        if !is_combined && !is_split {
+                            problems.push(IrError::OpShapeMismatch {
+                                op: "state_write_kv",
+                                tensor: "k/v",
+                                detail: format!(
+                                    "MLA key dim {dk} / value dim {dv} must be the combined latent (rank {} + rope {}) or the exact split pair (rope {} / latent {})",
+                                    l.kv_lora_rank,
+                                    l.rope_dim,
+                                    l.rope_dim,
+                                    l.kv_lora_rank
+                                ),
+                            });
+                        }
+                    }
+                } else if k.rank() == 3 {
                     if let Dim::Concrete(d) = k.shape()[2] {
                         let latent_dim = l.kv_lora_rank.checked_add(l.rope_dim);
                         if latent_dim != Some(d) && d != l.rope_dim {
@@ -6794,6 +7335,10 @@ pub enum Op {
     GatherRows(GatherRowsOp),
     /// Deterministic scatter-add rows (Spec 1 §4.A).
     ScatterAddRows(ScatterAddRowsOp),
+    /// Last-axis channel split (card A1.14, SI-20).
+    Split(SplitOp),
+    /// Last-axis channel concatenation (card A1.14, SI-20).
+    Concat(ConcatOp),
     /// Normalization: RMS or Layer norm (Spec 1 §4.B).
     Norm(NormOp),
     /// Residual addition (Spec 1 §4.B).
@@ -6802,6 +7347,8 @@ pub enum Op {
     ActMul(ActMulOp),
     /// Standalone activation (Spec 1 §4.B).
     Activation(ActivationOp),
+    /// Final-logit softcap (card A1.14, SI-19).
+    LogitSoftcap(LogitSoftcapOp),
     /// Rotary Position Embedding (Spec 1 §4.B).
     Rope(RopeOp),
     /// Matrix multiplication with epilogue (Spec 1 §4.C).
@@ -6855,10 +7402,13 @@ impl Op {
             Op::Copy(op) => op.validate(inputs, outputs),
             Op::GatherRows(op) => op.validate(inputs, outputs),
             Op::ScatterAddRows(op) => op.validate(inputs, outputs),
+            Op::Split(op) => op.validate(inputs, outputs),
+            Op::Concat(op) => op.validate(inputs, outputs),
             Op::Norm(op) => op.validate(inputs, outputs),
             Op::ResidualAdd(op) => op.validate(inputs, outputs),
             Op::ActMul(op) => op.validate(inputs, outputs),
             Op::Activation(op) => op.validate(inputs, outputs),
+            Op::LogitSoftcap(op) => op.validate(inputs, outputs),
             Op::Rope(op) => op.validate(inputs, outputs),
             Op::Matmul(op) => op.validate(inputs, outputs),
             Op::MoeRoute(op) => op.validate(inputs, outputs),
@@ -6902,10 +7452,13 @@ impl Op {
             Op::Copy(op) => Ok(op.numerics()),
             Op::GatherRows(op) => Ok(op.numerics()),
             Op::ScatterAddRows(op) => Ok(op.numerics()),
+            Op::Split(op) => Ok(op.numerics()),
+            Op::Concat(op) => Ok(op.numerics()),
             Op::Norm(op) => Ok(op.numerics()),
             Op::ResidualAdd(op) => Ok(op.numerics()),
             Op::ActMul(op) => Ok(op.numerics()),
             Op::Activation(op) => Ok(op.numerics()),
+            Op::LogitSoftcap(op) => Ok(op.numerics()),
             Op::Rope(op) => Ok(op.numerics()),
             Op::Matmul(op) => {
                 if inputs.len() < 2 {
@@ -6959,10 +7512,13 @@ impl Op {
             Op::Copy(op) => op.op_name(),
             Op::GatherRows(op) => op.op_name(),
             Op::ScatterAddRows(op) => op.op_name(),
+            Op::Split(op) => op.op_name(),
+            Op::Concat(op) => op.op_name(),
             Op::Norm(op) => op.op_name(),
             Op::ResidualAdd(op) => op.op_name(),
             Op::ActMul(op) => op.op_name(),
             Op::Activation(op) => op.op_name(),
+            Op::LogitSoftcap(op) => op.op_name(),
             Op::Rope(op) => op.op_name(),
             Op::Matmul(op) => op.op_name(),
             Op::MoeRoute(op) => op.op_name(),

@@ -10,15 +10,18 @@ pub mod act_mul;
 pub mod activation;
 pub mod buffer;
 pub mod cast;
+pub mod concat;
 pub mod copy;
 pub mod dtype;
 pub mod error;
+pub mod logit_softcap;
 pub mod norm;
 pub mod philox;
 pub mod quant_act;
 pub mod residual_add;
 pub mod rope;
 pub mod sampling;
+pub mod split;
 pub mod tolerance;
 
 pub use act_mul::{act_mul, act_mul_f64_reference};
@@ -28,18 +31,21 @@ pub use activation::{
 };
 pub use buffer::{TensorData, TensorDataMut, TensorView, TensorViewMut, TypedBuffer};
 pub use cast::{cast, cast_f64_reference};
+pub use concat::{concat, concat_f64_reference};
 pub use copy::{copy, copy_f64_reference};
 pub use dtype::{
     bf16_to_f32, dtype_element_size, f16_to_f32, f32_to_bf16, f32_to_f16, fp8_e4m3_decode,
     fp8_e4m3_encode, fp8_e5m2_decode, fp8_e5m2_encode, read_f32_at, read_f64_at, write_f32_at,
 };
 pub use error::T0Error;
+pub use logit_softcap::{logit_softcap, logit_softcap_f64_reference};
 pub use norm::{norm, norm_f64_reference};
 pub use philox::{philox4x32_10, u32_to_unit_f32, RngState};
 pub use quant_act::{fp8_e4m3_encode_f64_oracle, quant_act, quant_act_f64_reference};
 pub use residual_add::{residual_add, residual_add_f64_reference};
 pub use rope::{rope, rope_f64_reference};
 pub use sampling::{logits_postprocess, sample, verify, VerifyOutput};
+pub use split::{split, split_f64_reference};
 pub use tolerance::Tolerance;
 
 use r9v_ir::Op;
@@ -172,6 +178,49 @@ pub fn execute_elementwise_op(
             }
             let (xq, rest) = outputs.split_at_mut(1);
             quant_act(quant_op, &inputs[0], &mut xq[0], &mut rest[0])
+        }
+        Op::Split(split_op) => {
+            if inputs.len() != 1 || outputs.len() != 2 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "split",
+                    attribute: "inputs/outputs",
+                    reason: format!(
+                        "split requires 1 input and 2 outputs, got {} inputs and {} outputs",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                });
+            }
+            let (a, rest) = outputs.split_at_mut(1);
+            split(split_op, &inputs[0], &mut a[0], &mut rest[0])
+        }
+        Op::Concat(concat_op) => {
+            if inputs.len() != 2 || outputs.len() != 1 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "concat",
+                    attribute: "inputs/outputs",
+                    reason: format!(
+                        "concat requires 2 inputs and 1 output, got {} inputs and {} outputs",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                });
+            }
+            concat(concat_op, &inputs[0], &inputs[1], &mut outputs[0])
+        }
+        Op::LogitSoftcap(softcap_op) => {
+            if inputs.len() != 1 || outputs.len() != 1 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "logit_softcap",
+                    attribute: "inputs/outputs",
+                    reason: format!(
+                        "logit_softcap requires 1 input and 1 output, got {} inputs and {} outputs",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                });
+            }
+            logit_softcap(softcap_op, &inputs[0], &mut outputs[0])
         }
         other => Err(T0Error::InvalidAttribute {
             op: other.op_name(),

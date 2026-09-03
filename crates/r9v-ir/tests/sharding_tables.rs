@@ -4,14 +4,14 @@
 use r9v_ir::{
     legal_layout_tuples, legal_layouts, ActMulOp, ActivationKind, ActivationOp, AllGatherOp,
     AllReduceOp, AllToAllOp, AttentionMask, AttentionOp, BarrierOp, CacheScaleGranularity, CastOp,
-    CausalConv1dOp, Class, ConvActivation, CopyOp, DType, Dim, EmbedGatherOp, Epilogue,
+    CausalConv1dOp, Class, ConcatOp, ConvActivation, CopyOp, DType, Dim, EmbedGatherOp, Epilogue,
     ExpertCount, GatherRowsOp, GroupId, HashId, HeadCount, LayoutId, LinearAttnKind,
-    LinearAttnScanOp, LogitsPostprocessOp, MatmulOp, MoeFfnOp, MoeRouteOp, MoeScoring,
-    NgramCombine, NgramGatherOp, NgramSource, NormAxis, NormKind, NormOp, Op, Placement,
-    QuantActOp, QuantScheme, RecvOp, ReduceOp, ReduceScatterOp, ResidualAddOp, RngAlgorithm,
-    RopeOp, RopeScaling, RopeStyle, SampleOp, ScatterAddRowsOp, SendOp, ShardLayout,
-    ShardLayoutPattern, ShardingRule, Smoothing, StateHandle, StateKind, StateWriteKvOp, Tensor,
-    VerifyMethod, VerifyOp,
+    LinearAttnScanOp, LogitSoftcapOp, LogitsPostprocessOp, MatmulOp, MoeFfnOp, MoeRouteOp,
+    MoeScoring, NgramCombine, NgramGatherOp, NgramSource, NormAxis, NormKind, NormOp, Op,
+    Placement, QuantActOp, QuantScheme, RecvOp, ReduceOp, ReduceScatterOp, ResidualAddOp,
+    RngAlgorithm, RopeOp, RopeScaling, RopeStyle, SampleOp, ScatterAddRowsOp, SendOp, ShardLayout,
+    ShardLayoutPattern, ShardingRule, Smoothing, SplitOp, StateHandle, StateKind, StateWriteKvOp,
+    Tensor, VerifyMethod, VerifyOp,
 };
 
 fn all_sample_ops() -> Vec<Op> {
@@ -38,6 +38,8 @@ fn all_sample_ops() -> Vec<Op> {
         Op::Copy(CopyOp::default()),
         Op::GatherRows(GatherRowsOp),
         Op::ScatterAddRows(ScatterAddRowsOp),
+        Op::Split(SplitOp { first: 4 }),
+        Op::Concat(ConcatOp),
         Op::Norm(NormOp {
             kind: NormKind::Rms,
             eps: 1e-5,
@@ -47,6 +49,7 @@ fn all_sample_ops() -> Vec<Op> {
         }),
         Op::ResidualAdd(ResidualAddOp {
             out_dtype: DType::F16,
+            scale: 1.0,
         }),
         Op::ActMul(ActMulOp {
             act: ActivationKind::Silu,
@@ -56,6 +59,7 @@ fn all_sample_ops() -> Vec<Op> {
             act: ActivationKind::Silu,
             clamp: None,
         }),
+        Op::LogitSoftcap(LogitSoftcapOp { cap: 30.0 }),
         Op::Rope(RopeOp {
             rot_dim: 64,
             theta: 10000.0,
@@ -156,7 +160,7 @@ fn all_sample_ops() -> Vec<Op> {
 #[test]
 fn every_op_has_at_least_one_legal_sharding_tuple() {
     let ops = all_sample_ops();
-    assert_eq!(ops.len(), 29, "Must cover all 29 closed ops in Spec 1 §4");
+    assert_eq!(ops.len(), 32, "Must cover all 32 closed ops in Spec 1 §4");
 
     for op in &ops {
         let rules = legal_layouts(op);
@@ -303,6 +307,7 @@ fn matmul_sharding_rules_match_spec() {
 fn residual_add_supports_spec5_residual_trick() {
     let res = ResidualAddOp {
         out_dtype: DType::F16,
+        scale: 1.0,
     };
     let rules = res.legal_layouts();
     // Spec 5 §3.1 / §4.2 residual trick:

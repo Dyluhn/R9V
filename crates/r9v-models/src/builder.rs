@@ -8,13 +8,15 @@
 use std::collections::BTreeMap;
 
 use r9v_ir::graph::{
-    EdgeId, ExternalInputKind, ExternalOutputKind, Graph as IrGraph, PlanId, StepGraphKey,
+    EdgeId, ExternalInputKind, ExternalOutputKind, Graph as IrGraph, PlanId, PositionsKind,
+    StepGraphKey,
 };
 use r9v_ir::op::{
-    ActMulOp, ActivationKind, ActivationOp, AttentionMask, AttentionOp, CausalConv1dOp,
-    ConvActivation, EmbedGatherOp, Epilogue, HashId, LinearAttnKind, LinearAttnScanOp, MatmulOp,
-    MlaAttentionSpec, MlaLatent, MoeFfnOp, MoeGroup, MoeRouteOp, MoeScoring, NgramCombine,
-    NgramGatherOp, NgramSource, NormAxis, NormOp, Op, ResidualAddOp, RopeOp, StateWriteKvOp,
+    ActMulOp, ActivationKind, ActivationOp, AttentionMask, AttentionOp, CausalConv1dOp, ConcatOp,
+    ConvActivation, EmbedGatherOp, Epilogue, HashId, LinearAttnKind, LinearAttnScanOp,
+    LogitSoftcapOp, MatmulOp, MlaAttentionSpec, MlaLatent, MoeFfnOp, MoeGroup, MoeRouteOp,
+    MoeScoring, NgramCombine, NgramGatherOp, NgramSource, NormAxis, NormOp, Op, ResidualAddOp,
+    RopeOp, SplitOp, StateWriteKvOp,
 };
 use r9v_ir::state::StateHandle;
 use r9v_ir::tensor::{Class, Dim, ShapeSymbol, ShardLayout, Tensor};
@@ -106,6 +108,53 @@ pub struct BoundWeight {
     pub tensor: Tensor,
 }
 
+/// Opaque SSA graph value: a structural [`Tensor`] descriptor pinned to the
+/// exact [`EdgeId`] that produced or bound it (Spec 8 §2; card A1.14, SI-22).
+///
+/// Cloning a `Value` preserves its edge identity. Two `Value`s with
+/// structurally identical descriptors never alias: each binder and each op
+/// output mints a fresh edge. There is no lookup from descriptor to edge;
+/// values flow explicitly from the call that created them to the call that
+/// consumes them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Value {
+    tensor: Tensor,
+    edge: EdgeId,
+}
+
+impl Value {
+    /// Binds a descriptor to its minted edge. Visible inside the crate only:
+    /// downstream code receives values, never manufactures them.
+    pub(crate) fn new(tensor: Tensor, edge: EdgeId) -> Self {
+        Self { tensor, edge }
+    }
+
+    /// Structural tensor descriptor (shape, dtype, class, ...).
+    pub fn tensor(&self) -> &Tensor {
+        &self.tensor
+    }
+
+    /// SSA edge identity: the exact graph edge this value reads.
+    pub fn edge(&self) -> EdgeId {
+        self.edge
+    }
+}
+
+/// Explicit parent-to-child hidden-state capture for subgraphs
+/// (Spec 8 §2, §5; Spec 7 §6; card A1.14, SI-23).
+///
+/// Records that the child graph's input edge carries the parent graph's
+/// hidden value: `child_edge` (in the child graph) reads whatever
+/// `parent_edge` (in the parent graph) produced. Heads built from the child
+/// input therefore restart from the captured parent value by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SubgraphCapture {
+    /// Edge in the parent graph providing the hidden value.
+    pub parent_edge: EdgeId,
+    /// Input edge in the child graph carrying the captured value.
+    pub child_edge: EdgeId,
+}
+
 /// Factory entry point for creating a [`GraphBuilder`] (Spec 8 §2).
 pub struct Graph;
 
@@ -128,24 +177,26 @@ pub struct GraphBuilder {
     fusion_decls: Vec<FusionDecl>,
     tied_decls: Vec<TiedDecl>,
     state_specs: Vec<(u32, StateSpec, StateHandle)>,
-    exports: Vec<(String, Tensor)>,
+    exports: Vec<(String, Value)>,
     subgraphs: BTreeMap<String, ModelGraph>,
-    edge_map: Vec<(Tensor, EdgeId)>,
-    tokens_tensor: Option<Tensor>,
+    tokens_value: Option<Value>,
+    positions_value: Option<(PositionsKind, Value)>,
+    capture_parent: Option<EdgeId>,
+    capture_input: Option<Value>,
 }
 
 impl sealed::Sealed for GraphBuilder {}
 impl SealedGraphBuilder for GraphBuilder {}
 
-/// Reads dimension `index` of `tensor`, returning a typed error instead of
+/// Reads dimension `index` of `value`, returning a typed error instead of
 /// panicking on a short shape (Spec 8 §2, §6).
 pub(crate) fn shape_dim(
-    tensor: &Tensor,
+    value: &Value,
     index: usize,
     context: &'static str,
 ) -> Result<Dim, ModelsError> {
-    tensor.shape().get(index).copied().ok_or_else(|| {
-        let rank = tensor.rank();
+    value.tensor().shape().get(index).copied().ok_or_else(|| {
+        let rank = value.tensor().rank();
         ModelsError::ShapeAccess {
             context: context.to_string(),
             reason: format!("rank {rank} has no dimension {index}"),
@@ -153,17 +204,17 @@ pub(crate) fn shape_dim(
     })
 }
 
-/// Extracts the single output tensor of an op emission helper (Spec 8 §2).
+/// Extracts the single output value of an op emission helper (Spec 8 §2).
 pub(crate) fn single_output(
-    outputs: Vec<Tensor>,
+    outputs: Vec<Value>,
     context: &'static str,
-) -> Result<Tensor, ModelsError> {
+) -> Result<Value, ModelsError> {
     outputs
         .into_iter()
         .next()
         .ok_or_else(|| ModelsError::ShapeAccess {
             context: context.to_string(),
-            reason: "op emission produced no output tensor".to_string(),
+            reason: "op emission produced no output value".to_string(),
         })
 }
 
@@ -237,8 +288,10 @@ impl GraphBuilder {
             state_specs: Vec::new(),
             exports: Vec::new(),
             subgraphs: BTreeMap::new(),
-            edge_map: Vec::new(),
-            tokens_tensor: None,
+            tokens_value: None,
+            positions_value: None,
+            capture_parent: None,
+            capture_input: None,
         }
     }
 
@@ -252,25 +305,9 @@ impl GraphBuilder {
         &self.model_id
     }
 
-    fn record_edge(&mut self, tensor: Tensor, edge_id: EdgeId) {
-        self.edge_map.push((tensor, edge_id));
-    }
-
-    /// Resolves the most recent edge ID for a given tensor.
-    pub fn resolve_edge(&self, tensor: &Tensor) -> Result<EdgeId, ModelsError> {
-        for (t, edge_id) in self.edge_map.iter().rev() {
-            if t == tensor {
-                return Ok(*edge_id);
-            }
-        }
-        Err(ModelsError::InvalidModelSpec {
-            reason: format!("tensor not registered in builder DAG: {tensor:?}"),
-        })
-    }
-
     /// Registers the external token IDs input `[T] u32` (Spec 8 §2; Spec 1 §3.2).
-    pub fn input_tokens(&mut self) -> Result<Tensor, ModelsError> {
-        if let Some(existing) = &self.tokens_tensor {
+    pub fn input_tokens(&mut self) -> Result<Value, ModelsError> {
+        if let Some(existing) = &self.tokens_value {
             return Ok(existing.clone());
         }
 
@@ -287,13 +324,13 @@ impl GraphBuilder {
         let edge_id = self
             .graph
             .add_external_input(ExternalInputKind::TokenIds, tensor.clone())?;
-        self.record_edge(tensor.clone(), edge_id);
-        self.tokens_tensor = Some(tensor.clone());
-        Ok(tensor)
+        let value = Value::new(tensor, edge_id);
+        self.tokens_value = Some(value.clone());
+        Ok(value)
     }
 
     /// Registers the multimodal embedding override tensors `[T, Dm] act`, `[T] bool mask` (Spec 8 §2).
-    pub fn input_embed_override(&mut self, dm: u32) -> Result<(Tensor, Tensor), ModelsError> {
+    pub fn input_embed_override(&mut self, dm: u32) -> Result<(Value, Value), ModelsError> {
         let embed_tensor = Tensor::new(
             vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(dm)],
             DType::F16,
@@ -306,7 +343,6 @@ impl GraphBuilder {
         let edge_embed = self
             .graph
             .add_external_input(ExternalInputKind::EmbedOverride, embed_tensor.clone())?;
-        self.record_edge(embed_tensor.clone(), edge_embed);
 
         let mask_tensor = Tensor::new(
             vec![Dim::Symbolic(ShapeSymbol::T)],
@@ -320,41 +356,74 @@ impl GraphBuilder {
         let edge_mask = self
             .graph
             .add_external_input(ExternalInputKind::EmbedMask, mask_tensor.clone())?;
-        self.record_edge(mask_tensor.clone(), edge_mask);
 
-        Ok((embed_tensor, mask_tensor))
+        Ok((
+            Value::new(embed_tensor, edge_embed),
+            Value::new(mask_tensor, edge_mask),
+        ))
     }
 
-    /// Returns the sequence positions tensor based on position encoding kind (Spec 8 §2).
-    pub fn positions(&mut self, kind: PositionEncoding) -> Result<Tensor, ModelsError> {
-        let tokens = self.input_tokens()?;
-        match kind {
-            PositionEncoding::Scalar => Ok(tokens),
-            PositionEncoding::MRope(_) => {
-                let mrope_tensor = Tensor::new(
-                    vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(3)],
-                    DType::U32,
-                    QuantScheme::None,
-                    LayoutId::CONTIGUOUS,
-                    r9v_ir::Placement::Device { rank: 0 },
-                    ShardLayout::Replicated,
-                    Class::Activation,
-                )?;
-                let tokens_edge = self.resolve_edge(&tokens)?;
-                self.record_edge(mrope_tensor.clone(), tokens_edge);
-                Ok(mrope_tensor)
+    /// Returns the `BatchMeta.positions` projection value for the position
+    /// encoding kind (Spec 8 §2; Spec 1 §2.5, §4.B; card A1.14, SI-21).
+    ///
+    /// Scalar models bind the `[T] u32` projection, MRoPE models the
+    /// `[T, 3] u32` projection. The projection is bound at most once: a repeat
+    /// request for the same kind returns the cached value, while a request
+    /// for the other kind reports a conflicting-binding error.
+    pub fn positions(&mut self, kind: PositionEncoding) -> Result<Value, ModelsError> {
+        let requested = match kind {
+            PositionEncoding::Scalar => PositionsKind::Scalar,
+            PositionEncoding::MRope(_) => PositionsKind::Mrope,
+        };
+        if let Some((bound, value)) = &self.positions_value {
+            if *bound == requested {
+                return Ok(value.clone());
             }
+            return Err(ModelsError::InvalidModelSpec {
+                reason: format!(
+                    "conflicting positions binding: graph already projects {bound:?} positions, cannot also project {requested:?} (one BatchMeta per step graph)"
+                ),
+            });
         }
+        let edge_id = self.graph.bind_positions(requested)?;
+        let tensor = self
+            .graph
+            .edges()
+            .get(edge_id.0)
+            .ok_or_else(|| ModelsError::ShapeAccess {
+                context: "graph.bind_positions".to_string(),
+                reason: format!("edge {} missing after successful bind", edge_id.0),
+            })?
+            .tensor
+            .clone();
+        let value = Value::new(tensor, edge_id);
+        self.positions_value = Some((requested, value.clone()));
+        Ok(value)
+    }
+
+    /// Returns the captured parent hidden value feeding this subgraph
+    /// (Spec 8 §2, §5; card A1.14, SI-23).
+    ///
+    /// Reports [`ModelsError::SubgraphError`] on a plain [`GraphBuilder::subgraph`]
+    /// builder that carries no capture.
+    pub fn capture_value(&self) -> Result<Value, ModelsError> {
+        self.capture_input.clone().ok_or_else(|| ModelsError::SubgraphError {
+            name: self.model_id.clone(),
+            reason: "builder carries no parent hidden-state capture; use subgraph_with_capture for MTP heads".to_string(),
+        })
     }
 
     /// Binds a GGUF weight tensor by name, role, expected shape and scheme class (Spec 8 §2, §5).
+    ///
+    /// Every call mints a fresh edge, so two structurally identical weights
+    /// never alias (card A1.14, SI-22).
     pub fn weight(
         &mut self,
         name: impl Into<String>,
         role: WeightRole,
         shape: &[Dim],
         expected: SchemeClass,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let name = name.into();
         let dtype = match (role, expected) {
             (WeightRole::Vector, _) | (_, SchemeClass::Vector) => DType::F32,
@@ -376,7 +445,6 @@ impl GraphBuilder {
         )?;
 
         let edge_id = self.graph.add_tensor(tensor.clone())?;
-        self.record_edge(tensor.clone(), edge_id);
 
         self.bound_weights.push(BoundWeight {
             name,
@@ -386,7 +454,7 @@ impl GraphBuilder {
             tensor: tensor.clone(),
         });
 
-        Ok(tensor)
+        Ok(Value::new(tensor, edge_id))
     }
 
     /// Declares per-layer state specification and returns its opaque handle (Spec 8 §2; Spec 3 §2).
@@ -397,16 +465,17 @@ impl GraphBuilder {
     }
 
     /// Lowers an Op IR node into the step graph DAG (Spec 8 §2).
+    ///
+    /// Inputs carry their SSA identity; each declared output descriptor mints
+    /// a fresh edge, so outputs never alias any existing value (card A1.14,
+    /// SI-22).
     pub fn op(
         &mut self,
         op: Op,
-        inputs: &[Tensor],
+        inputs: &[Value],
         outputs: &[Tensor],
-    ) -> Result<Vec<Tensor>, ModelsError> {
-        let mut input_edges = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            input_edges.push(self.resolve_edge(input)?);
-        }
+    ) -> Result<Vec<Value>, ModelsError> {
+        let input_edges: Vec<EdgeId> = inputs.iter().map(Value::edge).collect();
 
         let node_id = self.graph.add_op(op, &input_edges, outputs)?;
         // The node id was just returned by `add_op`, so a missing entry names
@@ -422,31 +491,31 @@ impl GraphBuilder {
             .outputs
             .clone();
 
-        let mut result_tensors = Vec::with_capacity(outputs.len());
-        for (i, &edge_id) in node_outputs.iter().enumerate() {
-            let out_tensor = outputs
-                .get(i)
-                .ok_or_else(|| ModelsError::ShapeAccess {
-                    context: "graph.add_op".to_string(),
-                    reason: format!(
-                        "node {} reports {} outputs but only {} were declared",
-                        node_id.0,
-                        node_outputs.len(),
-                        outputs.len()
-                    ),
-                })?
-                .clone();
-            self.record_edge(out_tensor.clone(), edge_id);
-            result_tensors.push(out_tensor);
+        if node_outputs.len() != outputs.len() {
+            return Err(ModelsError::ShapeAccess {
+                context: "graph.add_op".to_string(),
+                reason: format!(
+                    "node {} reports {} outputs but {} were declared",
+                    node_id.0,
+                    node_outputs.len(),
+                    outputs.len()
+                ),
+            });
         }
 
-        Ok(result_tensors)
+        let result_values = node_outputs
+            .iter()
+            .zip(outputs.iter())
+            .map(|(&edge_id, out_tensor)| Value::new(out_tensor.clone(), edge_id))
+            .collect();
+
+        Ok(result_values)
     }
 
-    /// Exports a tensor as a named graph output (Spec 8 §2).
-    pub fn export(&mut self, name: impl Into<String>, tensor: Tensor) -> Result<(), ModelsError> {
+    /// Exports a value as a named graph output (Spec 8 §2).
+    pub fn export(&mut self, name: impl Into<String>, value: Value) -> Result<(), ModelsError> {
         let name = name.into();
-        let edge_id = self.resolve_edge(&tensor)?;
+        let edge_id = value.edge();
 
         if name == "logits" {
             let _ = self
@@ -458,7 +527,7 @@ impl GraphBuilder {
                 .add_external_output(ExternalOutputKind::Hidden, edge_id);
         }
 
-        self.exports.push((name, tensor));
+        self.exports.push((name, value));
         Ok(())
     }
 
@@ -487,6 +556,37 @@ impl GraphBuilder {
         Ok(GraphBuilder::new(self.ir_version, sub_id))
     }
 
+    /// Spawns a child builder whose input carries the given parent hidden
+    /// value (Spec 8 §2, §5; card A1.14, SI-23).
+    ///
+    /// The child input is a fresh `SubgraphHidden` external edge with the
+    /// parent value's shape and dtype; the parent edge is recorded so
+    /// [`ModelGraph::capture`] names the exact binding. Every head built from
+    /// [`GraphBuilder::capture_value`] restarts from that captured value.
+    pub fn subgraph_with_capture(
+        &mut self,
+        name: &str,
+        hidden: &Value,
+    ) -> Result<GraphBuilder, ModelsError> {
+        let sub_id = format!("{}.{}", self.model_id, name);
+        let mut child = GraphBuilder::new(self.ir_version, sub_id);
+        let descriptor = Tensor::new(
+            hidden.tensor().shape().to_vec(),
+            hidden.tensor().dtype(),
+            QuantScheme::None,
+            LayoutId::CONTIGUOUS,
+            r9v_ir::Placement::Device { rank: 0 },
+            ShardLayout::Replicated,
+            Class::Activation,
+        )?;
+        let edge_id = child
+            .graph
+            .add_external_input(ExternalInputKind::SubgraphHidden, descriptor.clone())?;
+        child.capture_parent = Some(hidden.edge());
+        child.capture_input = Some(Value::new(descriptor, edge_id));
+        Ok(child)
+    }
+
     /// Adds a finished subgraph to this builder (Spec 8 §2, §5).
     pub fn add_subgraph(
         &mut self,
@@ -504,14 +604,9 @@ impl GraphBuilder {
         Ok(())
     }
 
-    /// Reshapes a tensor edge in the graph DAG to a new shape (Spec 1 §2.3).
-    pub fn op_reshape(
-        &mut self,
-        tensor: Tensor,
-        new_shape: Vec<Dim>,
-    ) -> Result<Tensor, ModelsError> {
-        let edge = self.resolve_edge(&tensor)?;
-        let new_edge_id = self.graph.reshape_edge(edge, new_shape)?;
+    /// Reshapes a value edge in the graph DAG to a new shape (Spec 1 §2.3).
+    pub fn op_reshape(&mut self, value: Value, new_shape: Vec<Dim>) -> Result<Value, ModelsError> {
+        let new_edge_id = self.graph.reshape_edge(value.edge(), new_shape)?;
         let new_tensor = self
             .graph
             .edges()
@@ -522,8 +617,7 @@ impl GraphBuilder {
             })?
             .tensor
             .clone();
-        self.record_edge(new_tensor.clone(), new_edge_id);
-        Ok(new_tensor)
+        Ok(Value::new(new_tensor, new_edge_id))
     }
 
     /// Finalizes graph construction and returns the completed [`ModelGraph`] (Spec 8 §2).
@@ -531,6 +625,20 @@ impl GraphBuilder {
         let mut graph = self.graph;
         let _ = graph.materialize_copies()?;
         graph.validate()?;
+
+        let capture = match (self.capture_parent, &self.capture_input) {
+            (Some(parent_edge), Some(input)) => Some(SubgraphCapture {
+                parent_edge,
+                child_edge: input.edge(),
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(ModelsError::SubgraphError {
+                    name: self.model_id.clone(),
+                    reason: "capture parent and capture input must be set together".to_string(),
+                });
+            }
+        };
 
         Ok(ModelGraph {
             ir_version: self.ir_version,
@@ -542,6 +650,7 @@ impl GraphBuilder {
             state_specs: self.state_specs,
             exports: self.exports,
             subgraphs: self.subgraphs,
+            capture,
         })
     }
 
@@ -552,13 +661,13 @@ impl GraphBuilder {
     /// Emits a normalization op (`NormOp`).
     pub fn op_norm(
         &mut self,
-        x: Tensor,
-        weight: Tensor,
+        x: Value,
+        weight: Value,
         norm_spec: NormSpec,
         axis: NormAxis,
         out_dtype: DType,
-    ) -> Result<Tensor, ModelsError> {
-        let shape = x.shape().to_vec();
+    ) -> Result<Value, ModelsError> {
+        let shape = x.tensor().shape().to_vec();
         let out_tensor = Tensor::new(
             shape,
             out_dtype,
@@ -582,10 +691,10 @@ impl GraphBuilder {
     /// Emits a general matrix multiplication (`MatmulOp`).
     pub fn op_matmul(
         &mut self,
-        x: Tensor,
-        w: Tensor,
+        x: Value,
+        w: Value,
         out_dtype: DType,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let m = shape_dim(&x, 0, "op_matmul x")?;
         let n = shape_dim(&w, 0, "op_matmul w")?;
         let out_tensor = Tensor::new(
@@ -609,11 +718,11 @@ impl GraphBuilder {
     /// Emits a matrix multiplication with bias epilogue (`MatmulOp`).
     pub fn op_matmul_bias(
         &mut self,
-        x: Tensor,
-        w: Tensor,
-        bias: Tensor,
+        x: Value,
+        w: Value,
+        bias: Value,
         out_dtype: DType,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let m = shape_dim(&x, 0, "op_matmul_bias x")?;
         let n = shape_dim(&w, 0, "op_matmul_bias w")?;
         let out_tensor = Tensor::new(
@@ -637,13 +746,13 @@ impl GraphBuilder {
     /// Emits an elementwise gated activation product (`ActMulOp`).
     pub fn op_act_mul(
         &mut self,
-        gate: Tensor,
-        up: Tensor,
+        gate: Value,
+        up: Value,
         act: ActivationKind,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let out_tensor = Tensor::new(
-            gate.shape().to_vec(),
-            gate.dtype(),
+            gate.tensor().shape().to_vec(),
+            gate.tensor().dtype(),
             QuantScheme::None,
             LayoutId::CONTIGUOUS,
             r9v_ir::Placement::Device { rank: 0 },
@@ -656,10 +765,10 @@ impl GraphBuilder {
     }
 
     /// Emits an activation function pass (`ActivationOp`).
-    pub fn op_activation(&mut self, x: Tensor, act: ActivationKind) -> Result<Tensor, ModelsError> {
+    pub fn op_activation(&mut self, x: Value, act: ActivationKind) -> Result<Value, ModelsError> {
         let out_tensor = Tensor::new(
-            x.shape().to_vec(),
-            x.dtype(),
+            x.tensor().shape().to_vec(),
+            x.tensor().dtype(),
             QuantScheme::None,
             LayoutId::CONTIGUOUS,
             r9v_ir::Placement::Device { rank: 0 },
@@ -671,15 +780,27 @@ impl GraphBuilder {
         single_output(res, "op_activation")
     }
 
-    /// Emits a residual addition (`ResidualAddOp`).
+    /// Emits a residual addition (`ResidualAddOp`) with unit branch scale (Spec 8 §3.1).
     pub fn op_residual_add(
         &mut self,
-        a: Tensor,
-        b: Tensor,
+        a: Value,
+        b: Value,
         out_dtype: DType,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
+        self.op_residual_add_scaled(a, b, 1.0, out_dtype)
+    }
+
+    /// Emits a residual addition (`ResidualAddOp`) with an explicit branch
+    /// scale: `y = a + scale * b` in f32 (Spec 8 §3; card A1.14, SI-18).
+    pub fn op_residual_add_scaled(
+        &mut self,
+        a: Value,
+        b: Value,
+        scale: f32,
+        out_dtype: DType,
+    ) -> Result<Value, ModelsError> {
         let out_tensor = Tensor::new(
-            a.shape().to_vec(),
+            a.tensor().shape().to_vec(),
             out_dtype,
             QuantScheme::None,
             LayoutId::CONTIGUOUS,
@@ -687,21 +808,16 @@ impl GraphBuilder {
             ShardLayout::Replicated,
             Class::Activation,
         )?;
-        let op = Op::ResidualAdd(ResidualAddOp { out_dtype });
+        let op = Op::ResidualAdd(ResidualAddOp { out_dtype, scale });
         let res = self.op(op, &[a, b], &[out_tensor])?;
         single_output(res, "op_residual_add")
     }
 
     /// Emits a Rotary Position Embedding op (`RopeOp`).
-    pub fn op_rope(
-        &mut self,
-        x: Tensor,
-        pos: Tensor,
-        rope: &RopeSpec,
-    ) -> Result<Tensor, ModelsError> {
+    pub fn op_rope(&mut self, x: Value, pos: Value, rope: &RopeSpec) -> Result<Value, ModelsError> {
         let out_tensor = Tensor::new(
-            x.shape().to_vec(),
-            x.dtype(),
+            x.tensor().shape().to_vec(),
+            x.tensor().dtype(),
             QuantScheme::None,
             LayoutId::CONTIGUOUS,
             r9v_ir::Placement::Device { rank: 0 },
@@ -714,17 +830,131 @@ impl GraphBuilder {
             style: rope.style,
             scaling: rope.scaling,
             mrope_sections: rope.mrope_sections,
-            out_dtype: x.dtype(),
+            out_dtype: x.tensor().dtype(),
         });
         let res = self.op(op, &[x, pos], &[out_tensor])?;
         single_output(res, "op_rope")
     }
 
+    /// Emits a last-axis channel split (`SplitOp`): `x [T, H, D]` into
+    /// `[T, H, first]` and `[T, H, D - first]` (card A1.14, SI-20).
+    pub fn op_split(&mut self, x: Value, first: u32) -> Result<(Value, Value), ModelsError> {
+        const CTX: &str = "op_split";
+        let shape = x.tensor().shape().to_vec();
+        let (t, h, d) = match shape.as_slice() {
+            [t, h, d] => (*t, *h, *d),
+            _ => {
+                return Err(ModelsError::ShapeAccess {
+                    context: CTX.to_string(),
+                    reason: format!("split requires a rank-3 value, got rank {}", shape.len()),
+                });
+            }
+        };
+        let (da, db) = match (d, first) {
+            (Dim::Concrete(total), first) if first > 0 && first < total => {
+                (Dim::Concrete(first), Dim::Concrete(total - first))
+            }
+            _ => {
+                return Err(ModelsError::InvalidModelSpec {
+                    reason: format!(
+                        "split width {first} must satisfy 0 < first < {d:?} so both outputs are non-empty"
+                    ),
+                });
+            }
+        };
+        let dtype = x.tensor().dtype();
+        let mk = |dim: Dim| {
+            Tensor::new(
+                vec![t, h, dim],
+                dtype,
+                QuantScheme::None,
+                LayoutId::CONTIGUOUS,
+                r9v_ir::Placement::Device { rank: 0 },
+                ShardLayout::Replicated,
+                Class::Activation,
+            )
+        };
+        let res = self.op(Op::Split(SplitOp { first }), &[x], &[mk(da)?, mk(db)?])?;
+        let mut iter = res.into_iter();
+        match (iter.next(), iter.next()) {
+            (Some(a), Some(b)) => Ok((a, b)),
+            _ => Err(ModelsError::ShapeAccess {
+                context: CTX.to_string(),
+                reason: "split produced no output pair".to_string(),
+            }),
+        }
+    }
+
+    /// Emits a last-axis channel concatenation (`ConcatOp`):
+    /// `(a [T, H, Da], b [T, H, Db])` into `[T, H, Da + Db]`
+    /// (card A1.14, SI-20).
+    pub fn op_concat(&mut self, a: Value, b: Value) -> Result<Value, ModelsError> {
+        const CTX: &str = "op_concat";
+        for (name, value) in [("a", &a), ("b", &b)] {
+            if value.tensor().rank() != 3 {
+                return Err(ModelsError::ShapeAccess {
+                    context: CTX.to_string(),
+                    reason: format!(
+                        "concat requires rank-3 values, {name} has rank {}",
+                        value.tensor().shape().len()
+                    ),
+                });
+            }
+        }
+        let [t, h, da] = a.tensor().shape() else {
+            return Err(ModelsError::ShapeAccess {
+                context: CTX.to_string(),
+                reason: "concat requires rank-3 values".to_string(),
+            });
+        };
+        let (t, h, da) = (*t, *h, *da);
+        let db = shape_dim(&b, 2, CTX)?;
+        let dy = match (da, db) {
+            (Dim::Concrete(x), Dim::Concrete(y)) => Dim::Concrete(checked_add(x, y, CTX)?),
+            _ => {
+                return Err(ModelsError::InvalidModelSpec {
+                    reason: "concat requires concrete last-axis dims".to_string(),
+                });
+            }
+        };
+        let out_tensor = Tensor::new(
+            vec![t, h, dy],
+            a.tensor().dtype(),
+            QuantScheme::None,
+            LayoutId::CONTIGUOUS,
+            r9v_ir::Placement::Device { rank: 0 },
+            ShardLayout::Replicated,
+            Class::Activation,
+        )?;
+        let res = self.op(Op::Concat(ConcatOp), &[a, b], &[out_tensor])?;
+        single_output(res, CTX)
+    }
+
+    /// Emits a final-logit softcap (`LogitSoftcapOp`): `y = cap * tanh(x / cap)`
+    /// in f32 (Spec 8 §3; card A1.14, SI-19).
+    pub fn op_logit_softcap(&mut self, x: Value, cap: f32) -> Result<Value, ModelsError> {
+        let out_tensor = Tensor::new(
+            x.tensor().shape().to_vec(),
+            DType::F32,
+            QuantScheme::None,
+            LayoutId::CONTIGUOUS,
+            r9v_ir::Placement::Device { rank: 0 },
+            ShardLayout::Replicated,
+            Class::Activation,
+        )?;
+        let res = self.op(
+            Op::LogitSoftcap(LogitSoftcapOp { cap }),
+            &[x],
+            &[out_tensor],
+        )?;
+        single_output(res, "op_logit_softcap")
+    }
+
     /// Emits a KV cache state write op (`StateWriteKvOp`).
     pub fn op_state_write_kv(
         &mut self,
-        k: Tensor,
-        v: Tensor,
+        k: Value,
+        v: Value,
         handle: StateHandle,
         cache: CacheDtype,
         latent: Option<MlaLatent>,
@@ -752,7 +982,7 @@ impl GraphBuilder {
     #[allow(clippy::too_many_arguments)]
     pub fn op_attention(
         &mut self,
-        q: Tensor,
+        q: Value,
         handle: StateHandle,
         softmax_scale: f32,
         mask: AttentionMask,
@@ -760,14 +990,14 @@ impl GraphBuilder {
         logit_softcap: Option<f32>,
         mla: Option<MlaAttentionSpec>,
         out_dtype: DType,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let out_shape = match &mla {
             Some(spec) => vec![
                 shape_dim(&q, 0, "op_attention q")?,
                 shape_dim(&q, 1, "op_attention q")?,
                 Dim::Concrete(spec.v_dim),
             ],
-            None => q.shape().to_vec(),
+            None => q.tensor().shape().to_vec(),
         };
         let out_tensor = Tensor::new(
             out_shape,
@@ -795,14 +1025,14 @@ impl GraphBuilder {
     #[allow(clippy::too_many_arguments)]
     pub fn op_moe_route(
         &mut self,
-        logits: Tensor,
-        bias: Option<Tensor>,
+        logits: Value,
+        bias: Option<Value>,
         top_k: u32,
         scoring: MoeScoring,
         renormalize: bool,
         group: Option<MoeGroup>,
         scale: f32,
-    ) -> Result<(Tensor, Tensor), ModelsError> {
+    ) -> Result<(Value, Value), ModelsError> {
         let t = shape_dim(&logits, 0, "op_moe_route logits")?;
         let weights_tensor = Tensor::new(
             vec![t, Dim::Concrete(top_k)],
@@ -856,17 +1086,17 @@ impl GraphBuilder {
     #[allow(clippy::too_many_arguments)]
     pub fn op_moe_ffn(
         &mut self,
-        x: Tensor,
-        expert_ids: Tensor,
-        weights: Tensor,
-        w_gate_up: Tensor,
-        w_down: Tensor,
+        x: Value,
+        expert_ids: Value,
+        weights: Value,
+        w_gate_up: Value,
+        w_down: Value,
         act: ActivationKind,
         out_dtype: DType,
         shared_experts: u32,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let out_tensor = Tensor::new(
-            x.shape().to_vec(),
+            x.tensor().shape().to_vec(),
             out_dtype,
             QuantScheme::None,
             LayoutId::CONTIGUOUS,
@@ -890,16 +1120,16 @@ impl GraphBuilder {
     /// Emits a causal 1D convolution op (`CausalConv1dOp`).
     pub fn op_causal_conv1d(
         &mut self,
-        x: Tensor,
-        w: Tensor,
-        bias: Option<Tensor>,
+        x: Value,
+        w: Value,
+        bias: Option<Value>,
         kernel: u32,
         act: ConvActivation,
         handle: StateHandle,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let out_tensor = Tensor::new(
-            x.shape().to_vec(),
-            x.dtype(),
+            x.tensor().shape().to_vec(),
+            x.tensor().dtype(),
             QuantScheme::None,
             LayoutId::CONTIGUOUS,
             r9v_ir::Placement::Device { rank: 0 },
@@ -923,18 +1153,18 @@ impl GraphBuilder {
     #[allow(clippy::too_many_arguments)]
     pub fn op_linear_attn_scan(
         &mut self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        alpha: Tensor,
-        beta: Tensor,
+        q: Value,
+        k: Value,
+        v: Value,
+        alpha: Value,
+        beta: Value,
         kind: LinearAttnKind,
         chunk: u32,
         out_dtype: DType,
         handle: StateHandle,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let out_tensor = Tensor::new(
-            v.shape().to_vec(),
+            v.tensor().shape().to_vec(),
             out_dtype,
             QuantScheme::None,
             LayoutId::CONTIGUOUS,
@@ -957,7 +1187,7 @@ impl GraphBuilder {
     pub fn op_ngram_gather(
         &mut self,
         source: NgramSource,
-        inputs: &[Tensor],
+        inputs: &[Value],
         orders: &[u32],
         heads: u32,
         hash: HashId,
@@ -965,7 +1195,7 @@ impl GraphBuilder {
         combine: NgramCombine,
         out_dim: u32,
         out_dtype: DType,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let first = inputs.first().ok_or_else(|| ModelsError::ShapeAccess {
             context: "op_ngram_gather".to_string(),
             reason: "ngram_gather requires at least one input tensor".to_string(),
@@ -996,10 +1226,10 @@ impl GraphBuilder {
     /// Emits a token embedding lookup op (`EmbedGatherOp`).
     pub fn op_embed_gather(
         &mut self,
-        tokens: Tensor,
-        embed: Tensor,
+        tokens: Value,
+        embed: Value,
         scale: f32,
-    ) -> Result<Tensor, ModelsError> {
+    ) -> Result<Value, ModelsError> {
         let t = shape_dim(&tokens, 0, "op_embed_gather tokens")?;
         let dm = shape_dim(&embed, 1, "op_embed_gather embed")?;
         let out_tensor = Tensor::new(
@@ -1030,8 +1260,9 @@ pub struct ModelGraph {
     fusion_decls: Vec<FusionDecl>,
     tied_decls: Vec<TiedDecl>,
     state_specs: Vec<(u32, StateSpec, StateHandle)>,
-    exports: Vec<(String, Tensor)>,
+    exports: Vec<(String, Value)>,
     subgraphs: BTreeMap<String, ModelGraph>,
+    capture: Option<SubgraphCapture>,
 }
 
 impl ModelGraph {
@@ -1070,14 +1301,20 @@ impl ModelGraph {
         &self.state_specs
     }
 
-    /// Slices of all exported graph output tensors.
-    pub fn exports(&self) -> &[(String, Tensor)] {
+    /// Slices of all exported graph output values.
+    pub fn exports(&self) -> &[(String, Value)] {
         &self.exports
     }
 
     /// Registered nested subgraphs (e.g. MTP head, eagle head).
     pub fn subgraphs(&self) -> &BTreeMap<String, ModelGraph> {
         &self.subgraphs
+    }
+
+    /// Explicit parent-to-child hidden-state capture, if this graph was built
+    /// as a captured subgraph (Spec 8 §2, §5; card A1.14, SI-23).
+    pub fn capture(&self) -> Option<SubgraphCapture> {
+        self.capture
     }
 
     /// Computes the comprehensive [`ModelSummary`] for partitioner planning (Spec 8 §7; Spec 5 §5.1).

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Exhaustive acceptance and rejection validation tests for all 29 ops in Spec 1 §4 (card A1.2).
+//! Exhaustive acceptance and rejection validation tests for all 32 ops in Spec 1 §4 (card A1.2, extended by A1.14).
 //!
 //! Tests verify structural shape, dtype, class, placement, and attribute rules,
 //! checking that errors are strictly typed and that collect-all behavior surfaces
@@ -1366,6 +1366,7 @@ fn norm_exposes_collect_all_on_coexisting_violations() {
 fn residual_add_accepts_matching_activation_operands() {
     let op = ResidualAddOp {
         out_dtype: DType::F16,
+        scale: 1.0,
     };
     let a = act_tensor(vec![128, 4096], DType::F16);
     let b = act_tensor(vec![128, 4096], DType::F16);
@@ -1378,6 +1379,7 @@ fn residual_add_accepts_matching_activation_operands() {
 fn residual_add_rejects_shape_dtype_and_class_mismatches() {
     let op = ResidualAddOp {
         out_dtype: DType::F16,
+        scale: 1.0,
     };
     let a = act_tensor(vec![128, 4096], DType::F16);
     let b = act_tensor(vec![128, 4096], DType::F16);
@@ -1438,6 +1440,7 @@ fn residual_add_rejects_shape_dtype_and_class_mismatches() {
 fn residual_add_exposes_collect_all_on_coexisting_violations() {
     let op = ResidualAddOp {
         out_dtype: DType::F16,
+        scale: 1.0,
     };
     let bad_a = act_tensor(vec![128, 4096], DType::U32);
     let bad_b = weight_tensor(vec![128, 2048], DType::F32);

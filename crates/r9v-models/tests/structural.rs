@@ -64,6 +64,8 @@ struct LayerTallies {
     moe_ffn: usize,
     causal_conv1d: usize,
     linear_attn_scan: usize,
+    split: usize,
+    concat: usize,
     /// Bound weight edges by dtype (matmul weights F16, vectors/biases F32).
     w_f16: usize,
     w_f32: usize,
@@ -71,6 +73,8 @@ struct LayerTallies {
     o_f16: usize,
     o_f32: usize,
     o_u32: usize,
+    /// Bound `BatchMeta.positions` projection edges (one per rope model).
+    positions_u32: usize,
 }
 
 impl LayerTallies {
@@ -87,6 +91,8 @@ impl LayerTallies {
             + self.moe_ffn
             + self.causal_conv1d
             + self.linear_attn_scan
+            + self.split
+            + self.concat
     }
 }
 
@@ -114,11 +120,18 @@ fn mixer_tallies(m: &Mixer) -> LayerTallies {
             t.attention = 1;
             t.act_mul = gate;
             t.w_f16 = 4 + gate;
+            // Every attention mixer binds one BatchMeta.positions projection
+            // edge feeding both rope nodes (Spec 1 §2.5; card A1.14).
+            t.positions_u32 = 1;
             if mla.is_some() {
-                // The MLA path rejects qk_norm (see `LayerSpec::validate`);
-                // its biases cover the down/up projections (q_a, q_b, kv_a).
+                // MLA splits q into (nope, rope) and the KV rows into
+                // (latent, rope), rotates the rotary parts only, and
+                // reconstructs the query by concatenation (card A1.14); its
+                // biases cover the down/up projections (q_a, q_b, kv_a).
+                t.split = 2;
+                t.concat = 1;
                 t.w_f32 = 3 * qkv + ob;
-                t.o_f16 = 10 + 2 * gate;
+                t.o_f16 = 15 + 2 * gate;
             } else {
                 let qk = usize::from(qk_norm.is_some());
                 t.norm = 2 * qk;
@@ -233,11 +246,14 @@ fn expected_layer(norm: NormPlacement, mixer: &Mixer, ffn: &Ffn) -> LayerTallies
         moe_ffn: f.moe_ffn,
         causal_conv1d: m.causal_conv1d,
         linear_attn_scan: m.linear_attn_scan,
+        split: m.split,
+        concat: m.concat,
         w_f16: m.w_f16 + f.w_f16,
         w_f32: m.w_f32 + f.w_f32 + n_norms,
         o_f16: m.o_f16 + f.o_f16 + n_norms + n_res,
         o_f32: m.o_f32 + f.o_f32,
         o_u32: m.o_u32 + f.o_u32,
+        positions_u32: m.positions_u32,
     }
 }
 
@@ -260,6 +276,8 @@ fn actual_nodes(graph: &r9v_models::ModelGraph) -> (LayerTallies, usize) {
             Op::MoeFfn(_) => t.moe_ffn += 1,
             Op::CausalConv1d(_) => t.causal_conv1d += 1,
             Op::LinearAttnScan(_) => t.linear_attn_scan += 1,
+            Op::Split(_) => t.split += 1,
+            Op::Concat(_) => t.concat += 1,
             _ => other += 1,
         }
     }
@@ -316,6 +334,8 @@ fn assert_op_counts(actual: &LayerTallies, expected: &LayerTallies, tag: &str) {
         actual.linear_attn_scan, expected.linear_attn_scan,
         "linear_attn_scan nodes for {tag}"
     );
+    assert_eq!(actual.split, expected.split, "split nodes for {tag}");
+    assert_eq!(actual.concat, expected.concat, "concat nodes for {tag}");
     assert_eq!(
         actual.total_nodes(),
         expected.total_nodes(),
@@ -542,7 +562,8 @@ fn test_exhaustive_layer_combinations_matrix() {
                 assert_op_counts(&actual, &expected, &tag);
 
                 // Exact edge-dtype table: weights + op outputs + reshape views
-                // + the three external inputs (embed F16, mask Bool, tokens U32).
+                // + the three external inputs (embed F16, mask Bool, tokens U32)
+                // + the bound positions projection on rope models (U32).
                 let (f16, f32, u32, boolean, other_dt) = actual_dtypes(&model_graph);
                 assert_eq!(other_dt, 0, "unexpected edge dtype for {tag}");
                 assert_eq!(
@@ -555,7 +576,11 @@ fn test_exhaustive_layer_combinations_matrix() {
                     expected.o_f32 + expected.w_f32,
                     "F32 edge count for {tag}"
                 );
-                assert_eq!(u32, expected.o_u32 + 1, "U32 edge count for {tag}");
+                assert_eq!(
+                    u32,
+                    expected.o_u32 + 1 + expected.positions_u32,
+                    "U32 edge count for {tag}"
+                );
                 assert_eq!(boolean, 1, "Bool edge count for {tag}");
 
                 tested_combinations += 1;
