@@ -39,12 +39,14 @@ fn test_synthetic_model_byte_summary() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         ffn: Ffn::Dense {
             dff: 512,
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
         residual_scale: 1.0,
     };

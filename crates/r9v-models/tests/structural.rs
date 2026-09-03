@@ -232,6 +232,12 @@ fn expected_layer(norm: NormPlacement, mixer: &Mixer, ffn: &Ffn) -> LayerTallies
             usize::from(has_mixer) + usize::from(has_ffn),
         ),
         NormPlacement::Parallel => (1, usize::from(has_mixer) + usize::from(has_ffn)),
+        // Post-norm (OLMo 2 style): no pre-norms; one post norm plus one
+        // residual per present sublayer, same counts as Pre.
+        NormPlacement::Post => (
+            usize::from(has_mixer) + usize::from(has_ffn),
+            usize::from(has_mixer) + usize::from(has_ffn),
+        ),
     };
     LayerTallies {
         matmul: m.matmul + f.matmul,
@@ -349,6 +355,7 @@ fn test_exhaustive_layer_combinations_matrix() {
         NormPlacement::Pre,
         NormPlacement::Sandwich,
         NormPlacement::Parallel,
+        NormPlacement::Post,
     ];
 
     let mixers = [
@@ -368,6 +375,7 @@ fn test_exhaustive_layer_combinations_matrix() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         // 2. Attention with MLA
         Mixer::Attention {
@@ -391,6 +399,7 @@ fn test_exhaustive_layer_combinations_matrix() {
                 v_dim: 64,
             }),
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         // 3. Attention with output_gate
         Mixer::Attention {
@@ -408,6 +417,7 @@ fn test_exhaustive_layer_combinations_matrix() {
             output_gate: true,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         // 4. Attention with qk_norm
         Mixer::Attention {
@@ -425,6 +435,7 @@ fn test_exhaustive_layer_combinations_matrix() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         // 5. Attention with window + sinks + logit_softcap
         Mixer::Attention {
@@ -442,6 +453,7 @@ fn test_exhaustive_layer_combinations_matrix() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::F16,
+            pre_fused: false,
         },
         // 6. LinearAttention with Conv + output_norm + output_gate
         Mixer::LinearAttention {
@@ -476,6 +488,7 @@ fn test_exhaustive_layer_combinations_matrix() {
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
         // 2. Dense ungated with bias
         Ffn::Dense {
@@ -483,6 +496,7 @@ fn test_exhaustive_layer_combinations_matrix() {
             act: ActivationKind::Gelu,
             gated: false,
             bias: true,
+            pre_fused: false,
         },
         // 3. Moe with shared experts + shared gate + group
         Ffn::Moe {
@@ -588,8 +602,8 @@ fn test_exhaustive_layer_combinations_matrix() {
         }
     }
 
-    // 3 norm placements * (8 mixers * 5 ffns - 1 both none) = 3 * 39 = 117 combinations
-    assert_eq!(tested_combinations, 117);
+    // 4 norm placements * (8 mixers * 5 ffns - 1 both none) = 4 * 39 = 156 combinations
+    assert_eq!(tested_combinations, 156);
 }
 
 #[test]
@@ -612,12 +626,14 @@ fn test_ngram_speculative_injection() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         ffn: Ffn::Dense {
             dff: 512,
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
         residual_scale: 1.0,
     };
@@ -672,12 +688,14 @@ fn test_multi_token_prediction_subgraph() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         ffn: Ffn::Dense {
             dff: 512,
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
         residual_scale: 1.0,
     };
@@ -766,12 +784,14 @@ fn test_tied_embeddings_and_fusions() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         ffn: Ffn::Dense {
             dff: 512,
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
         residual_scale: 1.0,
     };
@@ -835,6 +855,7 @@ fn test_attention_bias_weights_and_epilogues() {
         output_gate: false,
         mla: None,
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     };
     let layer = LayerSpec {
         norm: NormPlacement::Pre,
@@ -845,6 +866,7 @@ fn test_attention_bias_weights_and_epilogues() {
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
         residual_scale: 1.0,
     };
@@ -863,6 +885,7 @@ fn test_attention_bias_weights_and_epilogues() {
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
     );
     expected.matmul += 1;
@@ -928,6 +951,7 @@ fn test_attention_bias_weights_and_epilogues() {
         output_gate: false,
         mla: None,
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     };
     let plain_layer = LayerSpec {
         norm: NormPlacement::Pre,
@@ -938,6 +962,7 @@ fn test_attention_bias_weights_and_epilogues() {
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
         residual_scale: 1.0,
     };
@@ -992,6 +1017,7 @@ fn test_mla_unequal_dims_and_bias() {
             v_dim: 48,
         }),
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     };
     let layer = LayerSpec {
         norm: NormPlacement::Pre,
@@ -1099,12 +1125,14 @@ fn test_mtp_heads_bind_disjoint_weights() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         ffn: Ffn::Dense {
             dff: 64,
             act: ActivationKind::Silu,
             gated: true,
             bias: false,
+            pre_fused: false,
         },
         residual_scale: 1.0,
     };

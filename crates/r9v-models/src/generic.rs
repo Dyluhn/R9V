@@ -262,7 +262,7 @@ fn build_layer_with_ns(
                 let mixer_out =
                     build_mixer_with_ns(builder, layer_idx, &spec.mixer, h, model, weight_ns)?;
                 let w_post = builder.weight(
-                    format!("blk.{layer_idx}.{weight_ns}post_attn_norm.weight"),
+                    format!("blk.{layer_idx}.{weight_ns}post_attention_norm.weight"),
                     WeightRole::Vector,
                     &[Dim::Concrete(model.dm)],
                     SchemeClass::Vector,
@@ -294,7 +294,50 @@ fn build_layer_with_ns(
                 let ffn_out =
                     build_ffn_with_ns(builder, layer_idx, &spec.ffn, h, model, weight_ns)?;
                 let w_post = builder.weight(
-                    format!("blk.{layer_idx}.{weight_ns}post_ffn_norm.weight"),
+                    format!("blk.{layer_idx}.{weight_ns}post_ffw_norm.weight"),
+                    WeightRole::Vector,
+                    &[Dim::Concrete(model.dm)],
+                    SchemeClass::Vector,
+                )?;
+                let post =
+                    builder.op_norm(ffn_out, w_post, spec.norm_kind, NormAxis::Last, DType::F16)?;
+                x = builder.op_residual_add_scaled(x, post, spec.residual_scale, DType::F16)?;
+            }
+        }
+        NormPlacement::Post => {
+            // Post-norm (OLMo 2 style): no input pre-norm; mixer and FFN receive raw residual stream;
+            // post_attention_norm and post_ffw_norm normalize branch outputs before residual addition.
+            // Never binds nonexistent attn_norm / ffn_norm.
+            if spec.mixer != Mixer::None {
+                let mixer_out = build_mixer_with_ns(
+                    builder,
+                    layer_idx,
+                    &spec.mixer,
+                    x.clone(),
+                    model,
+                    weight_ns,
+                )?;
+                let w_post = builder.weight(
+                    format!("blk.{layer_idx}.{weight_ns}post_attention_norm.weight"),
+                    WeightRole::Vector,
+                    &[Dim::Concrete(model.dm)],
+                    SchemeClass::Vector,
+                )?;
+                let post = builder.op_norm(
+                    mixer_out,
+                    w_post,
+                    spec.norm_kind,
+                    NormAxis::Last,
+                    DType::F16,
+                )?;
+                x = builder.op_residual_add_scaled(x, post, spec.residual_scale, DType::F16)?;
+            }
+
+            if spec.ffn != Ffn::None {
+                let ffn_out =
+                    build_ffn_with_ns(builder, layer_idx, &spec.ffn, x.clone(), model, weight_ns)?;
+                let w_post = builder.weight(
+                    format!("blk.{layer_idx}.{weight_ns}post_ffw_norm.weight"),
                     WeightRole::Vector,
                     &[Dim::Concrete(model.dm)],
                     SchemeClass::Vector,
@@ -391,7 +434,7 @@ fn build_mixer_with_ns(
             output_gate,
             mla,
             cache,
-            ..
+            pre_fused,
         } => {
             let h_heads = *heads;
             let hkv_heads = *hkv;
@@ -608,6 +651,189 @@ fn build_mixer_with_ns(
                     format!("blk.{layer_idx}.{weight_ns}attn_output.weight"),
                     WeightRole::Matmul,
                     &[Dim::Concrete(model.dm), Dim::Concrete(out_flat_dim)],
+                    SchemeClass::Matmul,
+                )?;
+                if *o_bias {
+                    let b_o = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}attn_output.bias"),
+                        WeightRole::Vector,
+                        &[Dim::Concrete(model.dm)],
+                        SchemeClass::Vector,
+                    )?;
+                    builder.op_matmul_bias(a, w_o, b_o, DType::F16)
+                } else {
+                    builder.op_matmul(a, w_o, DType::F16)
+                }
+            } else if *pre_fused {
+                // Pre-fused Attention (Phi-3 style): single fused QKV projection in checkpoint
+                let q_dim = checked_mul(h_heads, head_d, "pre-fused attention q projection")?;
+                let k_dim = checked_mul(hkv_heads, head_d, "pre-fused attention k projection")?;
+                let v_flat_dim =
+                    checked_mul(hkv_heads, head_dv, "pre-fused attention v projection")?;
+                let o_flat_dim = checked_mul(h_heads, head_dv, "pre-fused attention output")?;
+                let qkv_dim = checked_add(
+                    checked_add(q_dim, k_dim, "pre-fused attention qk projection")?,
+                    v_flat_dim,
+                    "pre-fused attention qkv projection",
+                )?;
+
+                let w_qkv = builder.weight(
+                    format!("blk.{layer_idx}.{weight_ns}attn_qkv.weight"),
+                    WeightRole::Matmul,
+                    &[Dim::Concrete(qkv_dim), Dim::Concrete(model.dm)],
+                    SchemeClass::Matmul,
+                )?;
+                let qkv_flat = if *qkv_bias {
+                    let b_qkv = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}attn_qkv.bias"),
+                        WeightRole::Vector,
+                        &[Dim::Concrete(qkv_dim)],
+                        SchemeClass::Vector,
+                    )?;
+                    builder.op_matmul_bias(h.clone(), w_qkv, b_qkv, DType::F16)?
+                } else {
+                    builder.op_matmul(h.clone(), w_qkv, DType::F16)?
+                };
+
+                let qkv_3d = builder.op_reshape(
+                    qkv_flat,
+                    vec![
+                        Dim::Symbolic(ShapeSymbol::T),
+                        Dim::Concrete(1),
+                        Dim::Concrete(qkv_dim),
+                    ],
+                )?;
+                let (q_3d_raw, kv_3d) = builder.op_split(qkv_3d, q_dim)?;
+                let (k_3d_raw, v_3d_raw) = builder.op_split(kv_3d, k_dim)?;
+
+                let mut q_flat = builder.op_reshape(
+                    q_3d_raw,
+                    vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(q_dim)],
+                )?;
+                let mut k_flat = builder.op_reshape(
+                    k_3d_raw,
+                    vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(k_dim)],
+                )?;
+                let v_flat = builder.op_reshape(
+                    v_3d_raw,
+                    vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(v_flat_dim)],
+                )?;
+
+                if let Some(norm) = qk_norm {
+                    let w_q_norm = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}attn_q_norm.weight"),
+                        WeightRole::Vector,
+                        &[Dim::Concrete(q_dim)],
+                        SchemeClass::Vector,
+                    )?;
+                    let w_k_norm = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}attn_k_norm.weight"),
+                        WeightRole::Vector,
+                        &[Dim::Concrete(k_dim)],
+                        SchemeClass::Vector,
+                    )?;
+                    q_flat = builder.op_norm(
+                        q_flat,
+                        w_q_norm,
+                        *norm,
+                        NormAxis::Head(head_d),
+                        DType::F16,
+                    )?;
+                    k_flat = builder.op_norm(
+                        k_flat,
+                        w_k_norm,
+                        *norm,
+                        NormAxis::Head(head_d),
+                        DType::F16,
+                    )?;
+                }
+
+                let mut q = builder.op_reshape(
+                    q_flat,
+                    vec![
+                        Dim::Symbolic(ShapeSymbol::T),
+                        Dim::Concrete(h_heads),
+                        Dim::Concrete(head_d),
+                    ],
+                )?;
+
+                let mut k = builder.op_reshape(
+                    k_flat,
+                    vec![
+                        Dim::Symbolic(ShapeSymbol::T),
+                        Dim::Concrete(hkv_heads),
+                        Dim::Concrete(head_d),
+                    ],
+                )?;
+
+                let v = builder.op_reshape(
+                    v_flat,
+                    vec![
+                        Dim::Symbolic(ShapeSymbol::T),
+                        Dim::Concrete(hkv_heads),
+                        Dim::Concrete(head_dv),
+                    ],
+                )?;
+
+                let pos = builder.positions(model.positions)?;
+                q = builder.op_rope(q, pos.clone(), rope)?;
+                k = builder.op_rope(k, pos, rope)?;
+
+                let retain = Retain::from_window_sinks(*window, *sinks).map_err(|e| {
+                    ModelsError::InvalidModelSpec {
+                        reason: e.to_string(),
+                    }
+                })?;
+                let handle = builder.state(
+                    layer_idx,
+                    StateSpec::KvPaged {
+                        hkv: hkv_heads,
+                        d: head_d,
+                        dv: head_dv,
+                        cache: *cache,
+                        retain,
+                    },
+                )?;
+
+                builder.op_state_write_kv(k, v, handle, *cache, None)?;
+
+                let mask = if let Some(w) = window {
+                    AttentionMask::CausalWindow(*w)
+                } else {
+                    AttentionMask::Causal
+                };
+                let softmax_scale = 1.0 / (head_d as f32).sqrt();
+                let a_3d = builder.op_attention(
+                    q,
+                    handle,
+                    softmax_scale,
+                    mask,
+                    *sinks,
+                    *logit_softcap,
+                    None,
+                    DType::F16,
+                )?;
+
+                let mut a = builder.op_reshape(
+                    a_3d,
+                    vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(o_flat_dim)],
+                )?;
+
+                if *output_gate {
+                    let w_g = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}attn_gate.weight"),
+                        WeightRole::Matmul,
+                        &[Dim::Concrete(o_flat_dim), Dim::Concrete(model.dm)],
+                        SchemeClass::Matmul,
+                    )?;
+                    let gate = builder.op_matmul(h, w_g, DType::F16)?;
+                    a = builder.op_act_mul(gate, a, ActivationKind::Silu)?;
+                }
+
+                let w_o = builder.weight(
+                    format!("blk.{layer_idx}.{weight_ns}attn_output.weight"),
+                    WeightRole::Matmul,
+                    &[Dim::Concrete(model.dm), Dim::Concrete(o_flat_dim)],
                     SchemeClass::Matmul,
                 )?;
                 if *o_bias {
@@ -1011,55 +1237,97 @@ fn build_ffn_with_ns(
             act,
             gated,
             bias,
+            pre_fused,
         } => {
             if *gated {
-                builder.declare_fusion(FusionDecl::GateUp {
-                    gate: format!("blk.{layer_idx}.{weight_ns}ffn_gate.weight"),
-                    up: format!("blk.{layer_idx}.{weight_ns}ffn_up.weight"),
-                })?;
-                let w_gate = builder.weight(
-                    format!("blk.{layer_idx}.{weight_ns}ffn_gate.weight"),
-                    WeightRole::Matmul,
-                    &[Dim::Concrete(*dff), Dim::Concrete(model.dm)],
-                    SchemeClass::Matmul,
-                )?;
-                // DECISION(A1.3): gated `bias` lowers as bias epilogues on the
-                // gate and up projections (`ffn_gate.bias`, `ffn_up.bias`),
-                // matching the ungated path where `bias` rides `ffn_up`;
-                // rejected dropping the flag (previous behavior, silently
-                // wrong) and a down-projection bias (no ungated precedent).
-                // Spec 8 §3 names `bias` on `Dense` without exempting gated.
-                let g = if *bias {
-                    let b_gate = builder.weight(
-                        format!("blk.{layer_idx}.{weight_ns}ffn_gate.bias"),
-                        WeightRole::Vector,
-                        &[Dim::Concrete(*dff)],
-                        SchemeClass::Vector,
+                let act_gu = if *pre_fused {
+                    let dff_2x = checked_mul(2, *dff, "pre-fused ffn up")?;
+                    let w_up = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}ffn_up.weight"),
+                        WeightRole::Matmul,
+                        &[Dim::Concrete(dff_2x), Dim::Concrete(model.dm)],
+                        SchemeClass::Matmul,
                     )?;
-                    builder.op_matmul_bias(h.clone(), w_gate, b_gate, DType::F16)?
+                    let gu_flat = if *bias {
+                        let b_up = builder.weight(
+                            format!("blk.{layer_idx}.{weight_ns}ffn_up.bias"),
+                            WeightRole::Vector,
+                            &[Dim::Concrete(dff_2x)],
+                            SchemeClass::Vector,
+                        )?;
+                        builder.op_matmul_bias(h, w_up, b_up, DType::F16)?
+                    } else {
+                        builder.op_matmul(h, w_up, DType::F16)?
+                    };
+
+                    let gu_3d = builder.op_reshape(
+                        gu_flat,
+                        vec![
+                            Dim::Symbolic(ShapeSymbol::T),
+                            Dim::Concrete(1),
+                            Dim::Concrete(dff_2x),
+                        ],
+                    )?;
+                    let (g_3d, u_3d) = builder.op_split(gu_3d, *dff)?;
+                    let g = builder.op_reshape(
+                        g_3d,
+                        vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(*dff)],
+                    )?;
+                    let u = builder.op_reshape(
+                        u_3d,
+                        vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(*dff)],
+                    )?;
+                    builder.op_act_mul(g, u, *act)?
                 } else {
-                    builder.op_matmul(h.clone(), w_gate, DType::F16)?
+                    builder.declare_fusion(FusionDecl::GateUp {
+                        gate: format!("blk.{layer_idx}.{weight_ns}ffn_gate.weight"),
+                        up: format!("blk.{layer_idx}.{weight_ns}ffn_up.weight"),
+                    })?;
+                    let w_gate = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}ffn_gate.weight"),
+                        WeightRole::Matmul,
+                        &[Dim::Concrete(*dff), Dim::Concrete(model.dm)],
+                        SchemeClass::Matmul,
+                    )?;
+                    // DECISION(A1.4): non-prefused gated `bias` continues to lower as bias epilogues on the
+                    // gate and up projections (`ffn_gate.bias`, `ffn_up.bias`),
+                    // matching the ungated path where `bias` rides `ffn_up`;
+                    // rejected dropping the flag (previous behavior, silently
+                    // wrong) and a down-projection bias (no ungated precedent).
+                    // Spec 8 §3 names `bias` on `Dense` without exempting gated.
+                    let g = if *bias {
+                        let b_gate = builder.weight(
+                            format!("blk.{layer_idx}.{weight_ns}ffn_gate.bias"),
+                            WeightRole::Vector,
+                            &[Dim::Concrete(*dff)],
+                            SchemeClass::Vector,
+                        )?;
+                        builder.op_matmul_bias(h.clone(), w_gate, b_gate, DType::F16)?
+                    } else {
+                        builder.op_matmul(h.clone(), w_gate, DType::F16)?
+                    };
+
+                    let w_up = builder.weight(
+                        format!("blk.{layer_idx}.{weight_ns}ffn_up.weight"),
+                        WeightRole::Matmul,
+                        &[Dim::Concrete(*dff), Dim::Concrete(model.dm)],
+                        SchemeClass::Matmul,
+                    )?;
+                    let u = if *bias {
+                        let b_up = builder.weight(
+                            format!("blk.{layer_idx}.{weight_ns}ffn_up.bias"),
+                            WeightRole::Vector,
+                            &[Dim::Concrete(*dff)],
+                            SchemeClass::Vector,
+                        )?;
+                        builder.op_matmul_bias(h, w_up, b_up, DType::F16)?
+                    } else {
+                        builder.op_matmul(h, w_up, DType::F16)?
+                    };
+
+                    builder.op_act_mul(g, u, *act)?
                 };
 
-                let w_up = builder.weight(
-                    format!("blk.{layer_idx}.{weight_ns}ffn_up.weight"),
-                    WeightRole::Matmul,
-                    &[Dim::Concrete(*dff), Dim::Concrete(model.dm)],
-                    SchemeClass::Matmul,
-                )?;
-                let u = if *bias {
-                    let b_up = builder.weight(
-                        format!("blk.{layer_idx}.{weight_ns}ffn_up.bias"),
-                        WeightRole::Vector,
-                        &[Dim::Concrete(*dff)],
-                        SchemeClass::Vector,
-                    )?;
-                    builder.op_matmul_bias(h, w_up, b_up, DType::F16)?
-                } else {
-                    builder.op_matmul(h, w_up, DType::F16)?
-                };
-
-                let act_gu = builder.op_act_mul(g, u, *act)?;
                 let w_down = builder.weight(
                     format!("blk.{layer_idx}.{weight_ns}ffn_down.weight"),
                     WeightRole::Matmul,

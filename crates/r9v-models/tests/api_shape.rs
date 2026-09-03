@@ -2,6 +2,7 @@
 //! API-shape and trait boundary tests for `r9v-models` (Spec 8; card A1.3; CONVENTIONS.md §4.1).
 
 use r9v_ir::version::IrVersion;
+use r9v_models::families::llama::AcceptedKeyDef;
 use r9v_models::{
     BoundWeight, CacheDtype, ExpertSummary, Ffn, FusionDecl, GgufMeta, Graph, GraphBuilder,
     LayerSpec, LayerSummary, MetaValue, Mixer, MixerKind, MlaSpec, ModelGraph, ModelSpec,
@@ -116,6 +117,27 @@ fn test_all_public_types_send_sync() {
 
     assert_send::<MetaValue>();
     assert_sync::<MetaValue>();
+
+    assert_send::<AcceptedKeyDef>();
+    assert_sync::<AcceptedKeyDef>();
+}
+
+#[test]
+fn test_family_registry_api() {
+    use r9v_models::families::{
+        find_family, is_supported_architecture, nearest_family, supported_architectures,
+    };
+
+    let archs = supported_architectures();
+    assert_eq!(archs.len(), 8);
+    for arch in archs {
+        assert!(is_supported_architecture(arch));
+        assert_eq!(find_family(arch), Some("llama"));
+    }
+
+    assert!(!is_supported_architecture("gpt2"));
+    assert_eq!(find_family("gpt2"), None);
+    assert_eq!(nearest_family("gpt2"), "llama");
 }
 
 #[test]
@@ -137,6 +159,7 @@ fn test_synthetic_gguf_meta_typed_access() {
         vec!["<s>".to_string(), "</s>".to_string()],
     );
     meta.insert_u32_array("tokenizer.ggml.merges", vec![10, 20, 30]);
+    meta.insert_bool_array("test.pattern", vec![true, false, true]);
 
     assert!(meta.has("general.architecture"));
     assert!(!meta.has("nonexistent"));
@@ -154,12 +177,21 @@ fn test_synthetic_gguf_meta_typed_access() {
         meta.u32_array("tokenizer.ggml.merges").unwrap(),
         vec![10, 20, 30]
     );
+    assert_eq!(
+        meta.bool_array("test.pattern").unwrap(),
+        vec![true, false, true]
+    );
 
     // Optional getters
     assert_eq!(meta.get_str("general.architecture").unwrap(), Some("llama"));
     assert_eq!(meta.get_str("nonexistent").unwrap(), None);
     assert_eq!(meta.get_u32("llama.context_length").unwrap(), Some(8192));
     assert_eq!(meta.get_u32("nonexistent").unwrap(), None);
+    assert_eq!(
+        meta.get_bool_array("test.pattern").unwrap(),
+        Some(vec![true, false, true])
+    );
+    assert_eq!(meta.get_bool_array("nonexistent").unwrap(), None);
 
     // Missing key error
     let err = meta.str("missing.key").unwrap_err();
@@ -167,6 +199,8 @@ fn test_synthetic_gguf_meta_typed_access() {
 
     // Type mismatch error
     let err = meta.u32("general.architecture").unwrap_err();
+    assert!(matches!(err, ModelsError::MetaTypeMismatch { .. }));
+    let err = meta.bool_array("general.architecture").unwrap_err();
     assert!(matches!(err, ModelsError::MetaTypeMismatch { .. }));
 }
 

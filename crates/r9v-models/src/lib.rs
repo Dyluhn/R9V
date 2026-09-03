@@ -10,6 +10,7 @@
 
 pub mod builder;
 pub mod error;
+pub mod families;
 pub mod generic;
 pub mod meta;
 pub mod spec;
@@ -21,6 +22,7 @@ pub use builder::{
     SubgraphCapture, TiedDecl, Value, WeightRole,
 };
 pub use error::ModelsError;
+pub use families::build as build_from_meta;
 pub use generic::{build_ffn, build_layer, build_mixer, build_model, build_mtp_subgraph};
 pub use meta::{GgufMeta, MetaValue, SyntheticGgufMeta};
 pub use spec::{

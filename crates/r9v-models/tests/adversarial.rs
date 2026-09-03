@@ -74,6 +74,7 @@ fn plain_attention() -> Mixer {
         output_gate: false,
         mla: None,
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     }
 }
 
@@ -397,6 +398,7 @@ fn huge_expert_count_rejected_before_allocation() {
             output_gate: false,
             mla: None,
             cache: CacheDtype::E4m3,
+            pre_fused: false,
         },
         ffn: Ffn::Moe {
             e: u32::MAX,
@@ -513,6 +515,7 @@ fn dense_gated_bias_lowers_through_bias_epilogue() {
         act: ActivationKind::Silu,
         gated: true,
         bias: true,
+        pre_fused: false,
     };
     let layer = LayerSpec {
         norm: NormPlacement::Pre,
@@ -596,6 +599,7 @@ fn mla_qk_norm_lowers_instead_of_rejecting() {
             v_dim: 32,
         }),
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     };
     let layer = LayerSpec {
         norm: NormPlacement::Pre,
@@ -646,12 +650,14 @@ fn public_build_apis_lower_without_namespace_arg() {
         output_gate: false,
         mla: None,
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     };
     let ffn = Ffn::Dense {
         dff: 64,
         act: ActivationKind::Silu,
         gated: true,
         bias: false,
+        pre_fused: false,
     };
 
     let mut builder = GraphBuilder::new(IrVersion::CURRENT, "adv-public-api");
@@ -731,6 +737,7 @@ fn attention_sinks_without_window_rejected() {
         output_gate: false,
         mla: None,
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     };
     let layer = LayerSpec {
         norm: NormPlacement::Pre,

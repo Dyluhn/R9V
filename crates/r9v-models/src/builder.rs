@@ -959,8 +959,9 @@ impl GraphBuilder {
         cache: CacheDtype,
         latent: Option<MlaLatent>,
     ) -> Result<(), ModelsError> {
+        // CacheDtype is a closed set owned by r9v-state (A1.15): E4M3, I8, F16.
         let cache_dtype = match cache {
-            CacheDtype::E4m3 => DType::E4m3,
+            CacheDtype::E4M3 => DType::E4m3,
             CacheDtype::I8 => DType::I8,
             CacheDtype::F16 => DType::F16,
         };

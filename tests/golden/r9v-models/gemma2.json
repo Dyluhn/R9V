@@ -1,0 +1,334 @@
+{
+  "architecture": "gemma2",
+  "model_spec": {
+    "dm": 128,
+    "vocab": 1000,
+    "embed_scale": 11.313708,
+    "tied_embeddings": true,
+    "final_norm": {
+      "kind": "rms",
+      "eps": 0.000001,
+      "weight_offset": 1.0
+    },
+    "final_logit_softcap": 30.0,
+    "positions": "scalar",
+    "eos_ids": [
+      1
+    ],
+    "bos_id": 2,
+    "layer_count": 4,
+    "layers": [
+      {
+        "layer_index": 0,
+        "norm_placement": "sandwich",
+        "norm_kind": {
+          "kind": "rms",
+          "eps": 0.000001,
+          "weight_offset": 1.0
+        },
+        "residual_scale": 1.0,
+        "mixer": {
+          "kind": "attention",
+          "h": 4,
+          "hkv": 2,
+          "d": 32,
+          "dv": 32,
+          "qkv_bias": false,
+          "o_bias": false,
+          "qk_norm": null,
+          "rope": {
+            "theta": 10000.0,
+            "rot_dim": 32,
+            "style": "neox",
+            "scaling": "none"
+          },
+          "window": 4096,
+          "sinks": 0,
+          "logit_softcap": 50.0,
+          "output_gate": false,
+          "cache_dtype": "e4m3",
+          "pre_fused": false
+        },
+        "ffn": {
+          "kind": "dense",
+          "dff": 256,
+          "act": "gelu_tanh",
+          "gated": true,
+          "bias": false,
+          "pre_fused": false
+        }
+      },
+      {
+        "layer_index": 1,
+        "norm_placement": "sandwich",
+        "norm_kind": {
+          "kind": "rms",
+          "eps": 0.000001,
+          "weight_offset": 1.0
+        },
+        "residual_scale": 1.0,
+        "mixer": {
+          "kind": "attention",
+          "h": 4,
+          "hkv": 2,
+          "d": 32,
+          "dv": 32,
+          "qkv_bias": false,
+          "o_bias": false,
+          "qk_norm": null,
+          "rope": {
+            "theta": 10000.0,
+            "rot_dim": 32,
+            "style": "neox",
+            "scaling": "none"
+          },
+          "window": null,
+          "sinks": 0,
+          "logit_softcap": 50.0,
+          "output_gate": false,
+          "cache_dtype": "e4m3",
+          "pre_fused": false
+        },
+        "ffn": {
+          "kind": "dense",
+          "dff": 256,
+          "act": "gelu_tanh",
+          "gated": true,
+          "bias": false,
+          "pre_fused": false
+        }
+      },
+      {
+        "layer_index": 2,
+        "norm_placement": "sandwich",
+        "norm_kind": {
+          "kind": "rms",
+          "eps": 0.000001,
+          "weight_offset": 1.0
+        },
+        "residual_scale": 1.0,
+        "mixer": {
+          "kind": "attention",
+          "h": 4,
+          "hkv": 2,
+          "d": 32,
+          "dv": 32,
+          "qkv_bias": false,
+          "o_bias": false,
+          "qk_norm": null,
+          "rope": {
+            "theta": 10000.0,
+            "rot_dim": 32,
+            "style": "neox",
+            "scaling": "none"
+          },
+          "window": 4096,
+          "sinks": 0,
+          "logit_softcap": 50.0,
+          "output_gate": false,
+          "cache_dtype": "e4m3",
+          "pre_fused": false
+        },
+        "ffn": {
+          "kind": "dense",
+          "dff": 256,
+          "act": "gelu_tanh",
+          "gated": true,
+          "bias": false,
+          "pre_fused": false
+        }
+      },
+      {
+        "layer_index": 3,
+        "norm_placement": "sandwich",
+        "norm_kind": {
+          "kind": "rms",
+          "eps": 0.000001,
+          "weight_offset": 1.0
+        },
+        "residual_scale": 1.0,
+        "mixer": {
+          "kind": "attention",
+          "h": 4,
+          "hkv": 2,
+          "d": 32,
+          "dv": 32,
+          "qkv_bias": false,
+          "o_bias": false,
+          "qk_norm": null,
+          "rope": {
+            "theta": 10000.0,
+            "rot_dim": 32,
+            "style": "neox",
+            "scaling": "none"
+          },
+          "window": null,
+          "sinks": 0,
+          "logit_softcap": 50.0,
+          "output_gate": false,
+          "cache_dtype": "e4m3",
+          "pre_fused": false
+        },
+        "ffn": {
+          "kind": "dense",
+          "dff": 256,
+          "act": "gelu_tanh",
+          "gated": true,
+          "bias": false,
+          "pre_fused": false
+        }
+      }
+    ]
+  },
+  "bound_weights": [
+    "token_embd.weight",
+    "blk.0.attn_norm.weight",
+    "blk.0.attn_q.weight",
+    "blk.0.attn_k.weight",
+    "blk.0.attn_v.weight",
+    "blk.0.attn_output.weight",
+    "blk.0.post_attention_norm.weight",
+    "blk.0.ffn_norm.weight",
+    "blk.0.ffn_gate.weight",
+    "blk.0.ffn_up.weight",
+    "blk.0.ffn_down.weight",
+    "blk.0.post_ffw_norm.weight",
+    "blk.1.attn_norm.weight",
+    "blk.1.attn_q.weight",
+    "blk.1.attn_k.weight",
+    "blk.1.attn_v.weight",
+    "blk.1.attn_output.weight",
+    "blk.1.post_attention_norm.weight",
+    "blk.1.ffn_norm.weight",
+    "blk.1.ffn_gate.weight",
+    "blk.1.ffn_up.weight",
+    "blk.1.ffn_down.weight",
+    "blk.1.post_ffw_norm.weight",
+    "blk.2.attn_norm.weight",
+    "blk.2.attn_q.weight",
+    "blk.2.attn_k.weight",
+    "blk.2.attn_v.weight",
+    "blk.2.attn_output.weight",
+    "blk.2.post_attention_norm.weight",
+    "blk.2.ffn_norm.weight",
+    "blk.2.ffn_gate.weight",
+    "blk.2.ffn_up.weight",
+    "blk.2.ffn_down.weight",
+    "blk.2.post_ffw_norm.weight",
+    "blk.3.attn_norm.weight",
+    "blk.3.attn_q.weight",
+    "blk.3.attn_k.weight",
+    "blk.3.attn_v.weight",
+    "blk.3.attn_output.weight",
+    "blk.3.post_attention_norm.weight",
+    "blk.3.ffn_norm.weight",
+    "blk.3.ffn_gate.weight",
+    "blk.3.ffn_up.weight",
+    "blk.3.ffn_down.weight",
+    "blk.3.post_ffw_norm.weight",
+    "output_norm.weight",
+    "output.weight"
+  ],
+  "state_declarations": [
+    {
+      "layer": 0,
+      "handle_layer": 0,
+      "state_kind": "KvPaged",
+      "dim": 32,
+      "cache": "E4M3",
+      "retain": "window(4096)"
+    },
+    {
+      "layer": 1,
+      "handle_layer": 1,
+      "state_kind": "KvPaged",
+      "dim": 32,
+      "cache": "E4M3",
+      "retain": "all"
+    },
+    {
+      "layer": 2,
+      "handle_layer": 2,
+      "state_kind": "KvPaged",
+      "dim": 32,
+      "cache": "E4M3",
+      "retain": "window(4096)"
+    },
+    {
+      "layer": 3,
+      "handle_layer": 3,
+      "state_kind": "KvPaged",
+      "dim": 32,
+      "cache": "E4M3",
+      "retain": "all"
+    }
+  ],
+  "fusion_declarations": [
+    {
+      "kind": "qkv",
+      "tensors": [
+        "blk.0.attn_q.weight",
+        "blk.0.attn_k.weight",
+        "blk.0.attn_v.weight"
+      ]
+    },
+    {
+      "kind": "gate_up",
+      "tensors": [
+        "blk.0.ffn_gate.weight",
+        "blk.0.ffn_up.weight"
+      ]
+    },
+    {
+      "kind": "qkv",
+      "tensors": [
+        "blk.1.attn_q.weight",
+        "blk.1.attn_k.weight",
+        "blk.1.attn_v.weight"
+      ]
+    },
+    {
+      "kind": "gate_up",
+      "tensors": [
+        "blk.1.ffn_gate.weight",
+        "blk.1.ffn_up.weight"
+      ]
+    },
+    {
+      "kind": "qkv",
+      "tensors": [
+        "blk.2.attn_q.weight",
+        "blk.2.attn_k.weight",
+        "blk.2.attn_v.weight"
+      ]
+    },
+    {
+      "kind": "gate_up",
+      "tensors": [
+        "blk.2.ffn_gate.weight",
+        "blk.2.ffn_up.weight"
+      ]
+    },
+    {
+      "kind": "qkv",
+      "tensors": [
+        "blk.3.attn_q.weight",
+        "blk.3.attn_k.weight",
+        "blk.3.attn_v.weight"
+      ]
+    },
+    {
+      "kind": "gate_up",
+      "tensors": [
+        "blk.3.ffn_gate.weight",
+        "blk.3.ffn_up.weight"
+      ]
+    }
+  ],
+  "tied_declarations": [
+    {
+      "source": "token_embd.weight",
+      "target": "output.weight"
+    }
+  ]
+}
