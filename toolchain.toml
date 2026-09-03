@@ -1,0 +1,33 @@
+# Toolchain definitions for R9V (Spec 14 §2, §3)
+
+[rocm]
+# Pinned ROCm release (Spec 14 §3)
+version = "7.14.0"
+# Compile-test matrix: pinned release plus previous minor (Spec 14 §3)
+matrix = ["7.14.0", "7.13.0"]
+# ROCm installation path prefix
+install_dir = "/opt/rocm"
+# Pinned compiler for kernels (Spec 4 §4.3, Spec 14 §3)
+compiler = "clang++"
+
+[rust]
+channel = "1.96.0"
+
+[arch]
+# Primary target architecture for T2 generated fast-paths (Spec 14 §2, §9)
+primary = "gfx1201"
+# Target architectures for T1 portable references (Spec 14 §2, §9)
+targets = [
+    "gfx1201",
+    "gfx1200",
+    "gfx1100",
+    "gfx1101",
+    "gfx1102",
+    "gfx1030",
+    "gfx942",
+    "gfx940",
+    "gfx90a",
+    "gfx908",
+    "gfx906",
+    "gfx900",
+]

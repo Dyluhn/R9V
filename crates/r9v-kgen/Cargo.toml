@@ -1,0 +1,10 @@
+[package]
+name = "r9v-kgen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "R9V kernel generator, cost model, search space, and leaf wrappers (Spec 4, Spec 14 §2)"
+
+[dependencies]

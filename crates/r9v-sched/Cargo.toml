@@ -1,0 +1,10 @@
+[package]
+name = "r9v-sched"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "R9V sequence scheduler, step graph execution, and budgeting (Spec 6, Spec 14 §2)"
+
+[dependencies]

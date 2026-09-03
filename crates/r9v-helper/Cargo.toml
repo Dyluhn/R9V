@@ -1,0 +1,10 @@
+[package]
+name = "r9v-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "R9V local CPU assistant model and helper daemon (Spec 12 §7, Spec 14 §2)"
+
+[dependencies]
