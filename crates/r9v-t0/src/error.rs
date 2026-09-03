@@ -304,3 +304,12 @@ impl T0Error {
         }
     }
 }
+
+/// Helper to convert a `u64` to `usize`, returning `T0Error::ArithmeticOverflow` if it overflows.
+#[inline(always)]
+pub fn u64_to_usize(val: u64, what: &'static str) -> Result<usize, T0Error> {
+    usize::try_from(val).map_err(|_| T0Error::ArithmeticOverflow {
+        op: "u64_to_usize",
+        detail: format!("{what} value {val} overflows usize"),
+    })
+}

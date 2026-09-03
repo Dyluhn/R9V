@@ -340,6 +340,7 @@ fn test_public_function_signatures() {
     assert!(u > 0.0 && u < 1.0);
 
     // Verify A1.6 op signatures
+    let x_mat = TypedBuffer::from_f16(&[2, 4], &[r9v_t0::dtype::f32_to_f16(1.0); 8]);
     let x = TypedBuffer::from_f32(&[2, 4], &[1.0; 8]);
     let w_bytes: Vec<u8> = vec![0u8; 4 * 4 * 2];
     let w = TypedBuffer::from_bytes(&[4, 4], DType::F16, &w_bytes);
@@ -351,7 +352,7 @@ fn test_public_function_signatures() {
     };
     assert!(matmul(
         &mat_op,
-        &x.as_view(),
+        &x_mat.as_view(),
         &w.as_view(),
         None,
         None,
@@ -399,6 +400,7 @@ fn test_public_function_signatures() {
 fn test_execute_matmul_and_lookup_op_dispatch() {
     use r9v_ir::{DType, EmbedGatherOp, Epilogue, GatherRowsOp, MatmulOp, Op, ScatterAddRowsOp};
 
+    let x_mat = TypedBuffer::from_f16(&[2, 4], &[r9v_t0::dtype::f32_to_f16(1.0); 8]);
     let x = TypedBuffer::from_f32(&[2, 4], &[1.0; 8]);
     let w_bytes: Vec<u8> = vec![0u8; 4 * 4 * 2];
     let w = TypedBuffer::from_bytes(&[4, 4], DType::F16, &w_bytes);
@@ -410,7 +412,7 @@ fn test_execute_matmul_and_lookup_op_dispatch() {
         epilogue: Epilogue::None,
         transpose_w: false,
     };
-    let inputs = [x.as_view(), w.as_view()];
+    let inputs = [x_mat.as_view(), w.as_view()];
     let mut outputs = [y.as_view_mut()];
     assert!(execute_matmul_op(&mat_op, &inputs, &mut outputs).is_ok());
 

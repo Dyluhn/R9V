@@ -369,7 +369,8 @@ fn test_matmul_epilogues_bias_residual_activation() {
     let k = 16;
     let n = 2;
 
-    let x_buf = TypedBuffer::from_f32(&[m, k], &vec![1.0f32; m * k]);
+    let x_f16: Vec<u16> = vec![f32_to_f16(1.0f32); m * k];
+    let x_buf = TypedBuffer::from_f16(&[m, k], &x_f16);
     let w_bytes: Vec<u8> = (0..(n * k))
         .flat_map(|_| f32_to_f16(0.5f32).to_le_bytes())
         .collect();
@@ -463,10 +464,10 @@ fn test_matmul_batch_invariance_and_sequence_t_invariance() {
         .collect();
     let w_buf = TypedBuffer::from_bytes(&[n, k], DType::F16, &w_bytes);
 
-    let row_data: Vec<f32> = (0..k).map(|i| (i as f32 * 0.1) - 1.5).collect();
+    let row_data: Vec<u16> = (0..k).map(|i| f32_to_f16((i as f32 * 0.1) - 1.5)).collect();
 
     // M=1 alone
-    let x_single = TypedBuffer::from_f32(&[1, k], &row_data);
+    let x_single = TypedBuffer::from_f16(&[1, k], &row_data);
     let mut y_single = TypedBuffer::zeros(&[1, n], DType::F32);
     let op = MatmulOp {
         out_dtype: DType::F32,
@@ -484,11 +485,11 @@ fn test_matmul_batch_invariance_and_sequence_t_invariance() {
     .unwrap();
 
     // M=5 batched with row_data at index 0, 2, 4
-    let mut batched_data = vec![0.0f32; 5 * k];
+    let mut batched_data = vec![0u16; 5 * k];
     batched_data[0..k].copy_from_slice(&row_data);
     batched_data[2 * k..3 * k].copy_from_slice(&row_data);
     batched_data[4 * k..5 * k].copy_from_slice(&row_data);
-    let x_batched = TypedBuffer::from_f32(&[5, k], &batched_data);
+    let x_batched = TypedBuffer::from_f16(&[5, k], &batched_data);
     let mut y_batched = TypedBuffer::zeros(&[5, n], DType::F32);
     matmul(
         &op,
@@ -515,10 +516,8 @@ fn test_matmul_l0_vs_l1_weight_equivalence() {
     let k = 32;
     let n = 16;
 
-    let x_buf = TypedBuffer::from_f32(
-        &[m, k],
-        &(0..(m * k)).map(|i| i as f32 * 0.1).collect::<Vec<_>>(),
-    );
+    let x_f16: Vec<u16> = (0..(m * k)).map(|i| f32_to_f16(i as f32 * 0.1)).collect();
+    let x_buf = TypedBuffer::from_f16(&[m, k], &x_f16);
 
     let row_scale_val = 0.25f32;
     let scale_bits = f32_to_f16(row_scale_val);
@@ -1029,5 +1028,601 @@ fn test_matmul_non_finite_scale_rejected() {
             attribute: "x_scale",
             ..
         }
+    ));
+}
+
+#[test]
+fn test_matmul_i8_per_block32_x_f16() {
+    let m = 2;
+    let k = 64; // 2 blocks of 32
+    let n = 2;
+
+    let x_vals = vec![1i8; m * k];
+    let x_buf = TypedBuffer::from_i8(&[m, k], &x_vals).with_quant(QuantScheme::PerBlock32);
+    let x_scales = vec![2.0f32, 0.5, 1.0, 3.0];
+    let x_scale_buf = TypedBuffer::from_f32(&[m, k / 32], &x_scales);
+
+    let mut w_bytes = vec![0u8; n * k * 2];
+    for i in 0..(n * k) {
+        let bits = f32_to_f16(0.25f32);
+        w_bytes[i * 2..i * 2 + 2].copy_from_slice(&bits.to_le_bytes());
+    }
+    let w_buf = TypedBuffer::from_bytes(&[n, k], DType::F16, &w_bytes);
+    let mut y_buf = TypedBuffer::zeros(&[m, n], DType::F32);
+
+    let op = MatmulOp {
+        out_dtype: DType::F32,
+        epilogue: Epilogue::None,
+        transpose_w: false,
+    };
+
+    matmul_with_scales(
+        &op,
+        &x_buf.as_view(),
+        Some(&x_scale_buf.as_view()),
+        &w_buf.as_view(),
+        None,
+        None,
+        None,
+        &mut y_buf.as_view_mut(),
+    )
+    .unwrap();
+
+    let out = y_buf.to_f32_vec();
+    // Row 0: block 0 is 32 * 1 * 2.0 * 0.25 = 16.0. Block 1 is 32 * 1 * 0.5 * 0.25 = 4.0. Total = 20.0.
+    // Row 1: block 0 is 32 * 1 * 1.0 * 0.25 = 8.0. Block 1 is 32 * 1 * 3.0 * 0.25 = 24.0. Total = 32.0.
+    assert_eq!(out[0], 20.0);
+    assert_eq!(out[1], 20.0);
+    assert_eq!(out[2], 32.0);
+    assert_eq!(out[3], 32.0);
+}
+
+#[test]
+fn test_matmul_inline_vs_separate_scale_equivalence_l0_and_l1() {
+    let m = 2;
+    let k = 256;
+    let n = 16;
+
+    let op = MatmulOp {
+        out_dtype: DType::F32,
+        epilogue: Epilogue::None,
+        transpose_w: false,
+    };
+
+    let x_vals = vec![1i8; m * k];
+    let x_buf = TypedBuffer::from_i8(&[m, k], &x_vals).with_quant(QuantScheme::PerToken);
+    let x_scale = TypedBuffer::from_f32(&[m], &[0.5f32, 1.5]);
+
+    // Raw quant weight values [N, K]
+    let mut raw_w = vec![0i8; n * k];
+    for r in 0..n {
+        for c in 0..k {
+            raw_w[r * k + c] = ((r as i32 * 5 + c as i32 * 11) % 120 - 60) as i8;
+        }
+    }
+
+    // 1. I8_R L0 inline vs L0 separate
+    let scale_f16_bits = f32_to_f16(0.25f32);
+    let mut l0_inline_bytes = vec![0u8; n * (k + 2)];
+    for r in 0..n {
+        for c in 0..k {
+            l0_inline_bytes[r * (k + 2) + c] = raw_w[r * k + c] as u8;
+        }
+        l0_inline_bytes[r * (k + 2) + k..r * (k + 2) + k + 2]
+            .copy_from_slice(&scale_f16_bits.to_le_bytes());
+    }
+    let w_l0_inline = TypedBuffer::from_bytes(&[n, k], DType::I8, &l0_inline_bytes)
+        .with_quant(QuantScheme::PerRow);
+    let raw_w_u8: Vec<u8> = raw_w.iter().map(|&x| x as u8).collect();
+    let w_l0_sep =
+        TypedBuffer::from_bytes(&[n, k], DType::I8, &raw_w_u8).with_quant(QuantScheme::PerRow);
+    let mut l0_scale_bytes = vec![0u8; n * 2];
+    for r in 0..n {
+        l0_scale_bytes[r * 2..r * 2 + 2].copy_from_slice(&scale_f16_bits.to_le_bytes());
+    }
+    let w_scale_l0 = TypedBuffer::from_bytes(&[n], DType::F16, &l0_scale_bytes);
+
+    let mut y_inline = TypedBuffer::zeros(&[m, n], DType::F32);
+    let mut y_sep = TypedBuffer::zeros(&[m, n], DType::F32);
+
+    matmul_with_scales(
+        &op,
+        &x_buf.as_view(),
+        Some(&x_scale.as_view()),
+        &w_l0_inline.as_view(),
+        None,
+        None,
+        None,
+        &mut y_inline.as_view_mut(),
+    )
+    .unwrap();
+    matmul_with_scales(
+        &op,
+        &x_buf.as_view(),
+        Some(&x_scale.as_view()),
+        &w_l0_sep.as_view(),
+        Some(&w_scale_l0.as_view()),
+        None,
+        None,
+        &mut y_sep.as_view_mut(),
+    )
+    .unwrap();
+
+    assert_eq!(y_inline.to_f32_vec(), y_sep.to_f32_vec());
+
+    // 2. I8_R L1 inline vs L1 separate
+    let dims = PaddedDims::new(n as u32, k as u32, Some(16)).unwrap();
+    let values_bytes = dims.n_padded() as usize * dims.k_padded() as usize;
+    let geom = scale_geometry(SchemeId::I8R, Layout::L1, &dims).unwrap();
+
+    let mut l1_val_bytes = vec![0u8; values_bytes];
+    for r in 0..n {
+        for c in 0..k {
+            let tile_idx = (r / 16) * dims.k_tiles() as usize + (c / 16);
+            let lane = ((c % 16) / 8) * 16 + (r % 16);
+            let j = c % 8;
+            let offset = tile_idx * 256 + lane * 8 + j;
+            l1_val_bytes[offset] = raw_w[r * k + c] as u8;
+        }
+    }
+
+    let mut l1_scale_bytes = vec![0u8; geom.region_bytes as usize];
+    for r in 0..n {
+        let scale_offset = geom
+            .record_offset((r / 16) as u64, 0, (r % 16) as u32)
+            .unwrap() as usize;
+        l1_scale_bytes[scale_offset..scale_offset + 2]
+            .copy_from_slice(&scale_f16_bits.to_le_bytes());
+    }
+
+    let mut l1_inline_bytes = l1_val_bytes.clone();
+    l1_inline_bytes.extend_from_slice(&l1_scale_bytes);
+
+    let w_l1_inline = TypedBuffer::from_bytes(&[n, k], DType::I8, &l1_inline_bytes)
+        .with_quant(QuantScheme::PerRow)
+        .with_layout(LayoutId::L1);
+    let w_l1_sep = TypedBuffer::from_bytes(&[n, k], DType::I8, &l1_val_bytes)
+        .with_quant(QuantScheme::PerRow)
+        .with_layout(LayoutId::L1);
+    let w_scale_l1 = TypedBuffer::from_bytes(
+        &[geom.n_blocks as usize, geom.k_blocks as usize, 16],
+        DType::F16,
+        &l1_scale_bytes,
+    );
+
+    let mut y_l1_inline = TypedBuffer::zeros(&[m, n], DType::F32);
+    let mut y_l1_sep = TypedBuffer::zeros(&[m, n], DType::F32);
+
+    matmul_with_scales(
+        &op,
+        &x_buf.as_view(),
+        Some(&x_scale.as_view()),
+        &w_l1_inline.as_view(),
+        None,
+        None,
+        None,
+        &mut y_l1_inline.as_view_mut(),
+    )
+    .unwrap();
+    matmul_with_scales(
+        &op,
+        &x_buf.as_view(),
+        Some(&x_scale.as_view()),
+        &w_l1_sep.as_view(),
+        Some(&w_scale_l1.as_view()),
+        None,
+        None,
+        &mut y_l1_sep.as_view_mut(),
+    )
+    .unwrap();
+
+    assert_eq!(y_l1_inline.to_f32_vec(), y_l1_sep.to_f32_vec());
+    assert_eq!(y_inline.to_f32_vec(), y_l1_inline.to_f32_vec());
+}
+
+#[test]
+fn test_matmul_adversarial_catch_unwind_suite() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let m = 2;
+    let k = 256;
+    let n = 16;
+
+    let op = MatmulOp {
+        out_dtype: DType::F32,
+        epilogue: Epilogue::None,
+        transpose_w: false,
+    };
+
+    let x_raw_f16 = vec![0u16; m * k];
+    let x_buf = TypedBuffer::from_f16(&[m, k], &x_raw_f16);
+    let mut y_buf = TypedBuffer::zeros(&[m, n], DType::F32);
+
+    // 1. Truncated logical values
+    let trunc_bytes = vec![0u8; 10];
+    let w_trunc = r9v_t0::buffer::TensorView::from_bytes(&[n, k], DType::F16, &trunc_bytes);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_buf.as_view(),
+            None,
+            &w_trunc,
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on truncated logical values");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::BufferLengthMismatch { .. })
+    ));
+
+    // 2. Truncated padded L1 values: logical size passed where padded L1 is larger
+    // n=17, k=17: logical size is 289*2 = 578 bytes. Padded L1 (32x32) requires 1024*2 = 2048 bytes.
+    let l1_logical_bytes = vec![0u8; 17 * 17 * 2];
+    let w_l1_undersized =
+        r9v_t0::buffer::TensorView::from_bytes(&[17, 17], DType::F16, &l1_logical_bytes)
+            .with_layout(LayoutId::L1);
+    let x_l1 = TypedBuffer::from_f16(&[2, 17], &[0u16; 34]);
+    let mut y_l1 = TypedBuffer::zeros(&[2, 17], DType::F32);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_l1.as_view(),
+            None,
+            &w_l1_undersized,
+            None,
+            None,
+            None,
+            &mut y_l1.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on undersized padded L1 buffer");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::BufferLengthMismatch { .. })
+    ));
+
+    // 3. Truncated inline scales
+    let w_trunc_inline_bytes = vec![0u8; n * k]; // missing trailing scale bytes
+    let w_trunc_inline =
+        r9v_t0::buffer::TensorView::from_bytes(&[n, k], DType::I8, &w_trunc_inline_bytes)
+            .with_quant(QuantScheme::PerRow);
+    let x_raw_i8 = vec![0i8; m * k];
+    let x_i8 = TypedBuffer::from_i8(&[m, k], &x_raw_i8).with_quant(QuantScheme::PerToken);
+    let x_scale = TypedBuffer::from_f32(&[m], &[1.0; 2]);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_i8.as_view(),
+            Some(&x_scale.as_view()),
+            &w_trunc_inline,
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on truncated inline scales");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::BufferLengthMismatch { .. })
+    ));
+
+    // 4. Truncated / shape-wrong separate scales (declared backing valid for shape [1])
+    let w_full_vals = vec![0u8; n * k];
+    let w_vals =
+        TypedBuffer::from_bytes(&[n, k], DType::I8, &w_full_vals).with_quant(QuantScheme::PerRow);
+    let w_trunc_scale_bytes = vec![0u8; 2]; // requires n * 2 = 32 bytes
+    let w_trunc_scale =
+        r9v_t0::buffer::TensorView::from_bytes(&[1], DType::F16, &w_trunc_scale_bytes);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_i8.as_view(),
+            Some(&x_scale.as_view()),
+            &w_vals.as_view(),
+            Some(&w_trunc_scale),
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on shape-wrong separate scales");
+    let err = res.unwrap().unwrap_err();
+    assert!(
+        matches!(err, T0Error::DimensionMismatch { tensor, dim_name, expected, got, .. }
+            if tensor == "w_scale" && dim_name == "N" && expected == n && got == 1),
+        "expected DimensionMismatch on w_scale with exact fields, got: {:?}",
+        err
+    );
+
+    // 4b. Separate scale buffer with valid shape [n] but extra bytes:
+    // declared backing is valid for [n] (32 bytes), but buffer has 36 bytes.
+    let w_extra_scale_bytes = vec![0u8; n * 2 + 4];
+    let w_extra_scale =
+        r9v_t0::buffer::TensorView::from_bytes(&[n], DType::F16, &w_extra_scale_bytes);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_i8.as_view(),
+            Some(&x_scale.as_view()),
+            &w_vals.as_view(),
+            Some(&w_extra_scale),
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on w_scale with extra bytes");
+    let err = res.unwrap().unwrap_err();
+    assert!(
+        matches!(err, T0Error::BufferLengthMismatch { tensor, buffer_len, expected_len, .. }
+            if tensor == "w_scale" && buffer_len == n * 2 + 4 && expected_len == n * 2),
+        "expected BufferLengthMismatch on w_scale with exact fields, got: {:?}",
+        err
+    );
+
+    // 4c. L1 separate scales: declared backing valid for its shape [1, 1, 16],
+    // but weight tensor requires [2, 1, 16] (32 records instead of 16).
+    let dims_l1 = PaddedDims::new(32, 256, Some(16)).unwrap();
+    let geom_l1 = scale_geometry(SchemeId::I8R, Layout::L1, &dims_l1).unwrap();
+    let w_l1_bytes = vec![0u8; (dims_l1.n_padded() * dims_l1.k_padded()) as usize];
+    let w_l1_vals = TypedBuffer::from_bytes(&[32, 256], DType::I8, &w_l1_bytes)
+        .with_quant(QuantScheme::PerRow)
+        .with_layout(LayoutId::L1);
+    let l1_scale_16_bytes = vec![0u8; 32]; // Valid for [1, 1, 16] (16 elements * 2 bytes)
+    let w_l1_bad_scale =
+        r9v_t0::buffer::TensorView::from_bytes(&[1, 1, 16], DType::F16, &l1_scale_16_bytes);
+    let mut y_32 = TypedBuffer::zeros(&[m, 32], DType::F32);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_i8.as_view(),
+            Some(&x_scale.as_view()),
+            &w_l1_vals.as_view(),
+            Some(&w_l1_bad_scale),
+            None,
+            None,
+            &mut y_32.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on L1 w_scale shape-wrong");
+    let err = res.unwrap().unwrap_err();
+    assert!(
+        matches!(err, T0Error::DimensionMismatch { tensor, dim_name, expected, got, .. }
+            if tensor == "w_scale" && dim_name == "scale_shape" && expected == geom_l1.records as usize && got == 16),
+        "expected DimensionMismatch on L1 w_scale, got: {:?}",
+        err
+    );
+
+    // 4d. Regression: forbidden alternate scale dtype (e.g. I8 for I8_R)
+    let w_scale_forbidden_dtype = TypedBuffer::from_bytes(&[n], DType::I8, &vec![0u8; n]);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_i8.as_view(),
+            Some(&x_scale.as_view()),
+            &w_vals.as_view(),
+            Some(&w_scale_forbidden_dtype.as_view()),
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on forbidden scale dtype");
+    let err = res.unwrap().unwrap_err();
+    assert!(
+        matches!(err, T0Error::DTypeMismatch { tensor, ref expected, got }
+            if tensor == "w_scale" && expected == &vec![DType::F16] && got == DType::I8),
+        "expected DTypeMismatch for forbidden scale dtype, got: {:?}",
+        err
+    );
+
+    // 4e. Regression: arbitrary exact-byte shape for I8_R L0 (shape [n/2, 2] has n elements and n*2 bytes)
+    let w_scale_exact_bytes_wrong_shape =
+        TypedBuffer::from_bytes(&[n / 2, 2], DType::F16, &vec![0u8; n * 2]);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_i8.as_view(),
+            Some(&x_scale.as_view()),
+            &w_vals.as_view(),
+            Some(&w_scale_exact_bytes_wrong_shape.as_view()),
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on arbitrary exact-byte shape");
+    let err = res.unwrap().unwrap_err();
+    assert!(
+        matches!(err, T0Error::DimensionMismatch { tensor, dim_name, expected, got, .. }
+            if tensor == "w_scale" && dim_name == "N" && expected == n && got == n / 2),
+        "expected DimensionMismatch for arbitrary exact-byte shape, got: {:?}",
+        err
+    );
+
+    // 5. Invalid layouts: L1S and unknown layout
+    let w_l1s = TypedBuffer::zeros(&[n, k], DType::F16).with_layout(LayoutId::L1S);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_buf.as_view(),
+            None,
+            &w_l1s.as_view(),
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on L1S layout");
+    assert!(matches!(res.unwrap(), Err(T0Error::LayoutMismatch { .. })));
+
+    let w_unknown = TypedBuffer::zeros(&[n, k], DType::F16).with_layout(LayoutId::new(99));
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_buf.as_view(),
+            None,
+            &w_unknown.as_view(),
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on unknown layout");
+    assert!(matches!(res.unwrap(), Err(T0Error::LayoutMismatch { .. })));
+
+    // 6. Scale dtype and shape mismatch
+    let x_scale_wrong_dtype = TypedBuffer::from_f16(&[m], &[0u16; 2]);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_i8.as_view(),
+            Some(&x_scale_wrong_dtype.as_view()),
+            &w_vals.as_view(),
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on x_scale wrong dtype");
+    assert!(matches!(res.unwrap(), Err(T0Error::DTypeMismatch { .. })));
+
+    let x_scale_wrong_shape = TypedBuffer::from_f32(&[m + 1], &[1.0; 3]);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_i8.as_view(),
+            Some(&x_scale_wrong_shape.as_view()),
+            &w_vals.as_view(),
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on x_scale wrong shape");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::DimensionMismatch { .. })
+    ));
+
+    // 7. Non-divisible superblocks
+    let w_i4k_bad_k = TypedBuffer::zeros(&[n, 128], DType::I4)
+        .with_quant(QuantScheme::Scheme(SchemeId::I4K.to_ir()));
+    let x_raw_128 = vec![0u16; m * 128];
+    let x_bad_k = TypedBuffer::from_f16(&[m, 128], &x_raw_128);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_bad_k.as_view(),
+            None,
+            &w_i4k_bad_k.as_view(),
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on non-divisible I4K K");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::DimensionMismatch { .. })
+    ));
+
+    let w_i8b128_bad_k = TypedBuffer::zeros(&[n, 64], DType::I8)
+        .with_quant(QuantScheme::Scheme(SchemeId::I8B128.to_ir()));
+    let x_raw_64 = vec![0u16; m * 64];
+    let x_bad_b128 = TypedBuffer::from_f16(&[m, 64], &x_raw_64);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op,
+            &x_bad_b128.as_view(),
+            None,
+            &w_i8b128_bad_k.as_view(),
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on non-divisible I8B128 K");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::DimensionMismatch { .. })
+    ));
+
+    // 8. Quantized transpose_w rejection on every quant scheme
+    let op_transposed = MatmulOp {
+        out_dtype: DType::F32,
+        epilogue: Epilogue::None,
+        transpose_w: true,
+    };
+
+    let quant_schemes = [
+        (QuantScheme::PerRow, DType::I8),
+        (QuantScheme::Scheme(SchemeId::I8B128.to_ir()), DType::I8),
+        (QuantScheme::Scheme(SchemeId::I4K.to_ir()), DType::I4),
+        (QuantScheme::Scheme(SchemeId::E4M3B128.to_ir()), DType::E4m3),
+    ];
+
+    for (scheme, dtype) in quant_schemes {
+        let w_q = TypedBuffer::zeros(&[k, n], dtype).with_quant(scheme);
+        let res = catch_unwind(AssertUnwindSafe(|| {
+            matmul_with_scales(
+                &op_transposed,
+                &x_buf.as_view(),
+                None,
+                &w_q.as_view(),
+                None,
+                None,
+                None,
+                &mut y_buf.as_view_mut(),
+            )
+        }));
+        assert!(
+            res.is_ok(),
+            "must not panic on transpose_w quantized rejection"
+        );
+        assert!(
+            matches!(
+                res.unwrap(),
+                Err(T0Error::InvalidAttribute {
+                    attribute: "transpose_w",
+                    ..
+                })
+            ),
+            "scheme {scheme:?} must reject transpose_w with InvalidAttribute"
+        );
+    }
+
+    // Also reject transpose_w on L1 layout
+    let w_l1 = TypedBuffer::zeros(&[k, n], DType::F16).with_layout(LayoutId::L1);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        matmul_with_scales(
+            &op_transposed,
+            &x_buf.as_view(),
+            None,
+            &w_l1.as_view(),
+            None,
+            None,
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on transpose_w L1 rejection");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::InvalidAttribute {
+            attribute: "transpose_w",
+            ..
+        })
     ));
 }

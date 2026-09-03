@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Scalar T0 implementation of `scatter_add_rows` op (Spec 1 §4.A, §6.1, Card A1.6).
 
-use r9v_ir::{DType, ScatterAddRowsOp};
+use r9v_ir::{DType, LayoutId, ScatterAddRowsOp};
 
 use crate::buffer::{TensorView, TensorViewMut};
 use crate::error::T0Error;
@@ -73,6 +73,41 @@ pub fn scatter_add_rows(
         }
     }
 
+    // Validate exact supported layouts
+    if x.layout() != LayoutId::CONTIGUOUS && x.layout() != LayoutId::L0 {
+        problems.push(T0Error::LayoutMismatch {
+            tensor: "x",
+            expected: vec![LayoutId::CONTIGUOUS, LayoutId::L0],
+            got: x.layout(),
+        });
+    }
+
+    if indices.layout() != LayoutId::CONTIGUOUS && indices.layout() != LayoutId::L0 {
+        problems.push(T0Error::LayoutMismatch {
+            tensor: "indices",
+            expected: vec![LayoutId::CONTIGUOUS, LayoutId::L0],
+            got: indices.layout(),
+        });
+    }
+
+    if let Some(d) = dest {
+        if d.layout() != LayoutId::CONTIGUOUS && d.layout() != LayoutId::L0 {
+            problems.push(T0Error::LayoutMismatch {
+                tensor: "dest",
+                expected: vec![LayoutId::CONTIGUOUS, LayoutId::L0],
+                got: d.layout(),
+            });
+        }
+    }
+
+    if y.layout() != LayoutId::CONTIGUOUS && y.layout() != LayoutId::L0 {
+        problems.push(T0Error::LayoutMismatch {
+            tensor: "y",
+            expected: vec![LayoutId::CONTIGUOUS, LayoutId::L0],
+            got: y.layout(),
+        });
+    }
+
     if !matches!(x.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
         problems.push(T0Error::DTypeMismatch {
             tensor: "x",
@@ -112,6 +147,32 @@ pub fn scatter_add_rows(
     let m = x.shape()[0];
     let d = x.shape()[1];
     let n = y.shape()[0];
+
+    if m == 0 {
+        return Err(T0Error::EmptyInput {
+            op: "scatter_add_rows",
+            tensor: "x",
+        });
+    }
+    if n == 0 || d == 0 {
+        return Err(T0Error::EmptyInput {
+            op: "scatter_add_rows",
+            tensor: "y",
+        });
+    }
+
+    let _m_u32 = u32::try_from(m).map_err(|_| T0Error::ArithmeticOverflow {
+        op: "scatter_add_rows",
+        detail: format!("dimension M exceeds u32: {m}"),
+    })?;
+    let _d_u32 = u32::try_from(d).map_err(|_| T0Error::ArithmeticOverflow {
+        op: "scatter_add_rows",
+        detail: format!("dimension D exceeds u32: {d}"),
+    })?;
+    let _n_u32 = u32::try_from(n).map_err(|_| T0Error::ArithmeticOverflow {
+        op: "scatter_add_rows",
+        detail: format!("dimension N exceeds u32: {n}"),
+    })?;
 
     let mut problems = Vec::new();
 
@@ -172,29 +233,44 @@ pub fn scatter_add_rows(
 
     T0Error::from_typed_problems(problems)?;
 
-    // Group source rows by destination index to enable sequential accumulate per destination
-    // in sorted destination index order and ascending source index order for ties.
-    let mut dest_sources: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for src_m in 0..m {
-        let dest_row = indices.read_u32(src_m) as usize;
-        dest_sources[dest_row].push(src_m);
+    // Initialize y with dest or zeros
+    if let Some(dest_view) = dest {
+        for row in 0..n {
+            for col in 0..d {
+                y.write_f32(row * d + col, dest_view.read_f32(row * d + col));
+            }
+        }
+    } else {
+        for row in 0..n {
+            for col in 0..d {
+                y.write_f32(row * d + col, 0.0f32);
+            }
+        }
     }
 
-    // Accumulate into each destination row sequentially in f32
-    for (dest_row, sources) in dest_sources.iter().enumerate().take(n) {
-        for col in 0..d {
-            let mut acc = if let Some(dest_view) = dest {
-                dest_view.read_f32(dest_row * d + col)
-            } else {
-                0.0f32
-            };
+    // Flat M-sized stable ordering (avoids allocating Vec<Vec<_>> proportional to N)
+    // Stable sort preserves ascending source index order for duplicate/tied indices.
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by_key(|&src_m| indices.read_u32(src_m));
 
+    let mut i = 0;
+    while i < m {
+        let dest_row = indices.read_u32(order[i]) as usize;
+        let mut j = i + 1;
+        while j < m && indices.read_u32(order[j]) as usize == dest_row {
+            j += 1;
+        }
+        let sources = &order[i..j];
+
+        for col in 0..d {
+            let mut acc = y.read_f32(dest_row * d + col);
             for &src_m in sources {
                 acc += x.read_f32(src_m * d + col);
             }
-
             y.write_f32(dest_row * d + col, acc);
         }
+
+        i = j;
     }
 
     Ok(())
@@ -221,14 +297,19 @@ pub fn scatter_add_rows_f64_reference(
         vec![0.0f64; n * d]
     };
 
-    let mut dest_sources: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (src_m, &idx) in indices.iter().enumerate() {
-        let r = idx as usize;
-        assert!(r < n, "index {r} out of bounds 0..{n}");
-        dest_sources[r].push(src_m);
-    }
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by_key(|&src_m| indices[src_m]);
 
-    for (dest_row, sources) in dest_sources.iter().enumerate().take(n) {
+    let mut i = 0;
+    while i < m {
+        let dest_row = indices[order[i]] as usize;
+        assert!(dest_row < n, "index {dest_row} out of bounds 0..{n}");
+        let mut j = i + 1;
+        while j < m && (indices[order[j]] as usize) == dest_row {
+            j += 1;
+        }
+
+        let sources = &order[i..j];
         for col in 0..d {
             let mut acc = y[dest_row * d + col];
             for &src_m in sources {
@@ -236,6 +317,8 @@ pub fn scatter_add_rows_f64_reference(
             }
             y[dest_row * d + col] = acc;
         }
+
+        i = j;
     }
 
     y

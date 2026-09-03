@@ -159,7 +159,7 @@ impl<'a> TensorView<'a> {
         self
     }
 
-    /// Borrows backing bytes if stored as raw bytes (Spec 1 §2.3, Spec 4 §2).
+    /// Borrows backing bytes (Spec 1 §2.3, Spec 4 §2).
     pub fn as_bytes(&self) -> Option<&'a [u8]> {
         match self.data {
             TensorData::Bytes(_, slice) => Some(slice),
@@ -235,6 +235,18 @@ impl<'a> TensorView<'a> {
             TensorData::I8(slice) => slice.len(),
             TensorData::U32(slice) => slice.len(),
             TensorData::Bytes(_, slice) => slice.len(),
+        }
+    }
+
+    /// Returns the length of the backing storage in bytes.
+    pub fn backing_bytes_len(&self) -> usize {
+        match self.data {
+            TensorData::Bytes(_, slice) => slice.len(),
+            TensorData::I8(slice) => slice.len(),
+            TensorData::F16(slice) => slice.len().saturating_mul(2),
+            TensorData::Bf16(slice) => slice.len().saturating_mul(2),
+            TensorData::U32(slice) => slice.len().saturating_mul(4),
+            TensorData::F32(slice) => slice.len().saturating_mul(4),
         }
     }
 
@@ -320,39 +332,56 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Reads one element as `u32` (Spec 1 §2.3, Spec 4 §2).
-    pub fn read_u32(&self, index: usize) -> u32 {
+    /// Reads one element as `u32` with boundary checking (Spec 1 §2.3, Spec 4 §2).
+    pub(crate) fn try_read_u32(&self, index: usize, tensor: &'static str) -> Result<u32, T0Error> {
         match self.data {
-            TensorData::U32(slice) => slice[index],
-            TensorData::Bytes(DType::U32, slice) => {
-                let offset = index * 4;
-                if let Some(chunk) = slice.get(offset..offset + 4) {
-                    u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                } else {
-                    0
-                }
+            TensorData::U32(slice) => {
+                slice
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| T0Error::BufferLengthMismatch {
+                        tensor,
+                        buffer_len: slice.len(),
+                        expected_len: index + 1,
+                        shape: self.shape.clone(),
+                    })
             }
-            _ => self.read_f32(index) as u32,
+            TensorData::Bytes(DType::U32, slice) => {
+                let offset = index
+                    .checked_mul(4)
+                    .ok_or_else(|| T0Error::ArithmeticOverflow {
+                        op: "read_u32",
+                        detail: format!("index {index} * 4 overflows usize"),
+                    })?;
+                let end = offset
+                    .checked_add(4)
+                    .ok_or_else(|| T0Error::ArithmeticOverflow {
+                        op: "read_u32",
+                        detail: format!("byte range end for index {index} overflows usize"),
+                    })?;
+                let chunk = slice
+                    .get(offset..end)
+                    .and_then(|s| s.try_into().ok())
+                    .ok_or_else(|| T0Error::BufferLengthMismatch {
+                        tensor,
+                        buffer_len: slice.len(),
+                        expected_len: end,
+                        shape: self.shape.clone(),
+                    })?;
+                Ok(u32::from_le_bytes(chunk))
+            }
+            _ => Ok(self.read_f32(index) as u32),
         }
     }
 
-    /// Reads one element as `i32` (Spec 1 §2.3, Spec 4 §2).
-    pub fn read_i32(&self, index: usize) -> i32 {
-        match self.data {
-            TensorData::Bytes(DType::I32, slice) => {
-                let offset = index * 4;
-                if let Some(chunk) = slice.get(offset..offset + 4) {
-                    i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                } else {
-                    0
-                }
-            }
-            _ => self.read_f32(index) as i32,
-        }
+    /// Reads one element as `u32` (Spec 1 §2.3, Spec 4 §2).
+    pub(crate) fn read_u32(&self, index: usize) -> u32 {
+        self.try_read_u32(index, "tensor")
+            .expect("read_u32 capacity preflight verified")
     }
 
     /// Reads raw byte at index for FP8/byte dtypes (Spec 1 §2.3, Spec 4 §2).
-    pub fn read_byte(&self, index: usize) -> u8 {
+    pub(crate) fn read_byte(&self, index: usize) -> u8 {
         match self.data {
             TensorData::Bytes(_, slice) => slice[index],
             TensorData::I8(slice) => slice[index] as u8,
@@ -361,9 +390,10 @@ impl<'a> TensorView<'a> {
     }
 
     /// Reads one element as `i8` (Spec 1 §2.3, Spec 4 §2).
-    pub fn read_i8(&self, index: usize) -> i8 {
+    pub(crate) fn read_i8(&self, index: usize) -> i8 {
         match self.data {
             TensorData::I8(slice) => slice[index],
+            TensorData::Bytes(DType::I8, slice) => slice[index] as i8,
             _ => self.read_f32(index) as i8,
         }
     }
@@ -500,6 +530,18 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
+    /// Returns the length of the backing storage in bytes.
+    pub fn backing_bytes_len(&self) -> usize {
+        match self.data {
+            TensorDataMut::Bytes(_, ref slice) => slice.len(),
+            TensorDataMut::I8(ref slice) => slice.len(),
+            TensorDataMut::F16(ref slice) => slice.len().saturating_mul(2),
+            TensorDataMut::Bf16(ref slice) => slice.len().saturating_mul(2),
+            TensorDataMut::U32(ref slice) => slice.len().saturating_mul(4),
+            TensorDataMut::F32(ref slice) => slice.len().saturating_mul(4),
+        }
+    }
+
     /// Validates backing buffer capacity against tensor shape and element data type (Spec 1 §2.3, Spec 4 §2).
     ///
     /// Refuses undersized buffers and shapes that overflow `usize::MAX`.
@@ -582,52 +624,18 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Reads one element as `u32` (Spec 1 §2.3, Spec 4 §2).
-    pub fn read_u32(&self, index: usize) -> u32 {
-        match self.data {
-            TensorDataMut::U32(ref slice) => slice[index],
-            TensorDataMut::Bytes(DType::U32, ref slice) => {
-                let offset = index * 4;
-                if let Some(chunk) = slice.get(offset..offset + 4) {
-                    u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                } else {
-                    0
-                }
-            }
-            _ => self.read_f32(index) as u32,
-        }
-    }
-
-    /// Reads one element as `i32` (Spec 1 §2.3, Spec 4 §2).
-    pub fn read_i32(&self, index: usize) -> i32 {
-        match self.data {
-            TensorDataMut::Bytes(DType::I32, ref slice) => {
-                let offset = index * 4;
-                if let Some(chunk) = slice.get(offset..offset + 4) {
-                    i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                } else {
-                    0
-                }
-            }
-            _ => self.read_f32(index) as i32,
-        }
-    }
-
-    /// Reads raw byte at index for FP8/byte dtypes (Spec 1 §2.3, Spec 4 §2).
-    pub fn read_byte(&self, index: usize) -> u8 {
-        match self.data {
-            TensorDataMut::Bytes(_, ref slice) => slice[index],
-            TensorDataMut::I8(ref slice) => slice[index] as u8,
-            _ => self.read_f32(index) as u8,
-        }
-    }
-
     /// Writes one `f32` value converted to the destination tensor data type (Spec 1 §2.3, Spec 4 §2).
     pub fn write_f32(&mut self, index: usize, val: f32) {
         match self.data {
-            TensorDataMut::F32(ref mut slice) => slice[index] = val,
-            TensorDataMut::F16(ref mut slice) => slice[index] = f32_to_f16(val),
-            TensorDataMut::Bf16(ref mut slice) => slice[index] = f32_to_bf16(val),
+            TensorDataMut::F32(ref mut slice) => {
+                slice[index] = val;
+            }
+            TensorDataMut::F16(ref mut slice) => {
+                slice[index] = f32_to_f16(val);
+            }
+            TensorDataMut::Bf16(ref mut slice) => {
+                slice[index] = f32_to_bf16(val);
+            }
             TensorDataMut::I8(ref mut slice) => {
                 slice[index] = val.round_ties_even().clamp(-128.0, 127.0) as i8;
             }
@@ -644,10 +652,14 @@ impl<'a> TensorViewMut<'a> {
     }
 
     /// Writes raw byte at index (useful for e4m3/e5m2 and custom byte encoding) (Spec 1 §2.3, Spec 4 §2).
-    pub fn write_byte(&mut self, index: usize, val: u8) {
+    pub(crate) fn write_byte(&mut self, index: usize, val: u8) {
         match self.data {
-            TensorDataMut::Bytes(_, ref mut slice) => slice[index] = val,
-            TensorDataMut::I8(ref mut slice) => slice[index] = val as i8,
+            TensorDataMut::Bytes(_, ref mut slice) => {
+                slice[index] = val;
+            }
+            TensorDataMut::I8(ref mut slice) => {
+                slice[index] = val as i8;
+            }
             _ => self.write_f32(index, val as f32),
         }
     }
@@ -819,7 +831,7 @@ impl TypedBuffer {
         assert_eq!(values.len(), expected);
         let mut byte_data = vec![0u8; expected * 4];
         for (i, &v) in values.iter().enumerate() {
-            byte_data[i * 4..(i + 1) * 4].copy_from_slice(&v.to_ne_bytes());
+            byte_data[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
         }
         Self {
             shape: shape.to_vec(),
@@ -1004,7 +1016,7 @@ impl TypedBuffer {
                         .map(|i| {
                             let offset = i * 4;
                             if let Some(chunk) = self.byte_data.get(offset..offset + 4) {
-                                u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
                             } else {
                                 0
                             }
@@ -1024,7 +1036,7 @@ impl TypedBuffer {
                 .map(|i| {
                     let offset = i * 4;
                     if let Some(chunk) = self.byte_data.get(offset..offset + 4) {
-                        i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                        i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
                     } else {
                         0
                     }

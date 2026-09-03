@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use r9v_ir::{DType, ScatterAddRowsOp};
+use r9v_ir::{DType, LayoutId, ScatterAddRowsOp};
 use r9v_t0::buffer::TypedBuffer;
 use r9v_t0::dtype::f32_to_f16;
 use r9v_t0::error::T0Error;
@@ -225,4 +225,61 @@ fn test_scatter_add_rows_rejects_out_of_bounds_index() {
         }
         other => panic!("expected RowIndexOutOfRange, got {other:?}"),
     }
+}
+
+#[test]
+fn test_scatter_add_rows_adversarial_catch_unwind() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let op = ScatterAddRowsOp;
+
+    // 1. Truncated x buffer
+    let trunc_bytes = vec![0u8; 10];
+    let x_trunc = r9v_t0::buffer::TensorView::from_bytes(&[3, 4], DType::F32, &trunc_bytes);
+    let idx_buf = TypedBuffer::from_u32(&[3], &[0u32, 1, 0]);
+    let mut y_buf = TypedBuffer::zeros(&[2, 4], DType::F32);
+
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        scatter_add_rows(
+            &op,
+            &x_trunc,
+            &idx_buf.as_view(),
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on truncated x");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::BufferLengthMismatch { .. })
+    ));
+
+    // 2. Invalid layout L1S
+    let x_l1s = TypedBuffer::zeros(&[3, 4], DType::F32).with_layout(LayoutId::L1S);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        scatter_add_rows(
+            &op,
+            &x_l1s.as_view(),
+            &idx_buf.as_view(),
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on L1S layout");
+    assert!(matches!(res.unwrap(), Err(T0Error::LayoutMismatch { .. })));
+
+    // 3. Empty input
+    let empty_x = TypedBuffer::from_f32(&[0, 4], &[]);
+    let empty_idx = TypedBuffer::from_u32(&[0], &[]);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        scatter_add_rows(
+            &op,
+            &empty_x.as_view(),
+            &empty_idx.as_view(),
+            None,
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on empty x");
+    assert!(matches!(res.unwrap(), Err(T0Error::EmptyInput { .. })));
 }

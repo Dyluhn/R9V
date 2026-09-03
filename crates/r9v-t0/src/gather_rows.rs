@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Scalar T0 implementation of `gather_rows` op (Spec 1 §4.A, §6.1, Card A1.6).
 
-use r9v_ir::{DType, GatherRowsOp};
+use r9v_ir::{DType, GatherRowsOp, LayoutId};
 
 use crate::buffer::{TensorData, TensorDataMut, TensorView, TensorViewMut};
 use crate::error::T0Error;
@@ -51,6 +51,31 @@ pub fn gather_rows(
         });
     }
 
+    // Validate exact supported layouts
+    if x.layout() != LayoutId::CONTIGUOUS && x.layout() != LayoutId::L0 {
+        problems.push(T0Error::LayoutMismatch {
+            tensor: "x",
+            expected: vec![LayoutId::CONTIGUOUS, LayoutId::L0],
+            got: x.layout(),
+        });
+    }
+
+    if indices.layout() != LayoutId::CONTIGUOUS && indices.layout() != LayoutId::L0 {
+        problems.push(T0Error::LayoutMismatch {
+            tensor: "indices",
+            expected: vec![LayoutId::CONTIGUOUS, LayoutId::L0],
+            got: indices.layout(),
+        });
+    }
+
+    if y.layout() != LayoutId::CONTIGUOUS && y.layout() != LayoutId::L0 {
+        problems.push(T0Error::LayoutMismatch {
+            tensor: "y",
+            expected: vec![LayoutId::CONTIGUOUS, LayoutId::L0],
+            got: y.layout(),
+        });
+    }
+
     if !matches!(x.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
         problems.push(T0Error::DTypeMismatch {
             tensor: "x",
@@ -80,6 +105,32 @@ pub fn gather_rows(
     let n = x.shape()[0];
     let d = x.shape()[1];
     let m = indices.shape()[0];
+
+    if m == 0 {
+        return Err(T0Error::EmptyInput {
+            op: "gather_rows",
+            tensor: "indices",
+        });
+    }
+    if n == 0 || d == 0 {
+        return Err(T0Error::EmptyInput {
+            op: "gather_rows",
+            tensor: "x",
+        });
+    }
+
+    let _m_u32 = u32::try_from(m).map_err(|_| T0Error::ArithmeticOverflow {
+        op: "gather_rows",
+        detail: format!("dimension M exceeds u32: {m}"),
+    })?;
+    let _n_u32 = u32::try_from(n).map_err(|_| T0Error::ArithmeticOverflow {
+        op: "gather_rows",
+        detail: format!("dimension N exceeds u32: {n}"),
+    })?;
+    let _d_u32 = u32::try_from(d).map_err(|_| T0Error::ArithmeticOverflow {
+        op: "gather_rows",
+        detail: format!("dimension D exceeds u32: {d}"),
+    })?;
 
     let mut problems = Vec::new();
 

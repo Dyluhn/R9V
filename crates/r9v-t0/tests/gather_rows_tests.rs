@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use r9v_ir::{DType, GatherRowsOp};
+use r9v_ir::{DType, GatherRowsOp, LayoutId};
 use r9v_t0::buffer::TypedBuffer;
 use r9v_t0::dtype::f32_to_f16;
 use r9v_t0::error::T0Error;
@@ -202,4 +202,52 @@ fn test_gather_rows_rejects_shape_and_dtype_mismatch() {
         &mut y_buf.as_view_mut()
     )
     .is_err());
+}
+
+#[test]
+fn test_gather_rows_adversarial_catch_unwind() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let op = GatherRowsOp;
+
+    // 1. Truncated buffer
+    let trunc_bytes = vec![0u8; 10];
+    let x_trunc = r9v_t0::buffer::TensorView::from_bytes(&[5, 8], DType::F32, &trunc_bytes);
+    let idx_buf = TypedBuffer::from_u32(&[2], &[0u32, 1]);
+    let mut y_buf = TypedBuffer::zeros(&[2, 8], DType::F32);
+
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        gather_rows(&op, &x_trunc, &idx_buf.as_view(), &mut y_buf.as_view_mut())
+    }));
+    assert!(res.is_ok(), "must not panic on truncated x");
+    assert!(matches!(
+        res.unwrap(),
+        Err(T0Error::BufferLengthMismatch { .. })
+    ));
+
+    // 2. Invalid layout L1S
+    let x_l1s = TypedBuffer::zeros(&[5, 8], DType::F32).with_layout(LayoutId::L1S);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        gather_rows(
+            &op,
+            &x_l1s.as_view(),
+            &idx_buf.as_view(),
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on L1S layout");
+    assert!(matches!(res.unwrap(), Err(T0Error::LayoutMismatch { .. })));
+
+    // 3. Empty input
+    let empty_x = TypedBuffer::from_f32(&[0, 8], &[]);
+    let res = catch_unwind(AssertUnwindSafe(|| {
+        gather_rows(
+            &op,
+            &empty_x.as_view(),
+            &idx_buf.as_view(),
+            &mut y_buf.as_view_mut(),
+        )
+    }));
+    assert!(res.is_ok(), "must not panic on empty x");
+    assert!(matches!(res.unwrap(), Err(T0Error::EmptyInput { .. })));
 }
