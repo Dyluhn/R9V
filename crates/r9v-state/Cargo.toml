@@ -1,0 +1,10 @@
+[package]
+name = "r9v-state"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "R9V KV cache sequence state, memory arenas, and block allocation (Spec 3, Spec 14 §2)"
+
+[dependencies]

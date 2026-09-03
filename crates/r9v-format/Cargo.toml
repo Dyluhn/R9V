@@ -1,0 +1,10 @@
+[package]
+name = "r9v-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "R9V tensor layouts, quantization schemes, container format, and repack rules (Spec 2, Spec 14 §2)"
+
+[dependencies]

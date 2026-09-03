@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/r9v-common",
+    "crates/r9v-ir",
+    "crates/r9v-format",
+    "crates/r9v-state",
+    "crates/r9v-kgen",
+    "crates/r9v-registry",
+    "crates/r9v-t0",
+    "crates/r9v-hip",
+    "crates/r9v-part",
+    "crates/r9v-sched",
+    "crates/r9v-spec",
+    "crates/r9v-models",
+    "crates/r9v-loader",
+    "crates/r9v-serve",
+    "crates/r9v-obs",
+    "crates/r9v-config",
+    "crates/r9v-helper",
+    "crates/r9v",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.96.0"
+repository = "https://github.com/Dyluhn/R9V"

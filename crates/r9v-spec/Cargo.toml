@@ -1,0 +1,10 @@
+[package]
+name = "r9v-spec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "R9V speculative decoding proposers and verification (Spec 7, Spec 14 §2)"
+
+[dependencies]

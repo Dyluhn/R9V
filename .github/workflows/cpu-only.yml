@@ -1,0 +1,102 @@
+name: ci/cpu-only
+
+on:
+  push:
+    branches: ["main", "engine/**"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cpu-only-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-only:
+    name: ci/cpu-only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: DCO check
+        run: |
+          echo "Verifying DCO sign-off on commits..."
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="HEAD~1"
+          fi
+          MISSING_DCO=0
+          for commit in $(git rev-list "$BASE..HEAD" 2>/dev/null || git rev-list -n 1 HEAD); do
+            if ! git log -n 1 --format="%B" "$commit" | grep -q "^Signed-off-by:"; then
+              echo "Commit $commit is missing Signed-off-by"
+              MISSING_DCO=1
+            fi
+          done
+          if [ "$MISSING_DCO" -ne 0 ]; then
+            echo "DCO check failed: Every commit must include a Signed-off-by trailer."
+            exit 1
+          fi
+          echo "DCO check passed."
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.96.0
+          components: rustfmt, clippy
+
+      - name: Install cargo-deny
+        run: |
+          curl -sL "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C ~/.cargo/bin --strip-components=1 "cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny"
+
+      - name: Check formatting (cargo fmt)
+        run: cargo fmt --check
+
+      - name: Clippy (cargo clippy)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Check licenses and dependencies (cargo deny)
+        run: cargo deny check
+
+      - name: Run workspace tests (cargo test)
+        run: cargo test --workspace --locked
+
+      - name: Verify xtask docs
+        run: cargo xtask docs
+
+      - name: Verify xtask gen
+        run: |
+          cargo xtask gen
+          if [ -d "kernels/gen" ]; then
+            git diff --exit-code kernels/gen/
+          fi
+
+      - name: Inline assembly check (Spec 4 §8, Spec 14 §5.1)
+        run: |
+          echo "Checking that inline asm appears only in crates/r9v-kgen/src/leaf/..."
+          ILLEGAL_ASM=$(git grep -En "asm!\s*\(|__asm__|\basm\s+volatile" -- ':!crates/r9v-kgen/src/leaf/*' ':!tests/*' 2>/dev/null || true)
+          if [ -n "$ILLEGAL_ASM" ]; then
+            echo "Found illegal inline assembly outside crates/r9v-kgen/src/leaf/:"
+            echo "$ILLEGAL_ASM"
+            exit 1
+          fi
+          echo "Inline assembly check passed."
+
+      - name: Unsafe code check (Spec 14 §2, r9v-card-work §2)
+        run: |
+          echo "Checking that unsafe appears only in crates/r9v-hip and crates/r9v-t0 SIMD modules..."
+          ILLEGAL_UNSAFE=$(git grep -En "\bunsafe\b" -- ':!crates/r9v-hip/*' ':!crates/r9v-t0/src/simd/*' ':!tests/*' ':!benches/*' 2>/dev/null || true)
+          if [ -n "$ILLEGAL_UNSAFE" ]; then
+            echo "Found illegal unsafe code:"
+            echo "$ILLEGAL_UNSAFE"
+            exit 1
+          fi
+          echo "Unsafe check passed."

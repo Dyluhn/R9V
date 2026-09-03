@@ -1,0 +1,10 @@
+[package]
+name = "r9v-t0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "R9V CPU reference scalar T0 and SIMD T0v implementations (Spec 4, Spec 14 §2)"
+
+[dependencies]
