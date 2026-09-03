@@ -101,3 +101,9 @@ What: Spec 2 §2.3 requires the `L1S` index region to store 2 bits per kept elem
 Why it blocks or misleads: The two rules imply different index-region lengths, tensor offsets, checksums, and whole-model size estimates. A 16×16 compressed-K value tile contains 256 kept values, so §2.3 requires 64 index bytes; the §8 shorthand would permit only 32 bytes and cannot encode a 2-bit position for every kept value.
 Option taken: Followed the byte-defining rule in §2.3: 256 kept values × 2 bits = 64 index bytes per compressed-K `L1` tile. Size accounting must therefore use `dense_bpw × 0.5 + 1.0 bpw indices` until the specification resolves the contradiction.
 Proposed resolution: Change the §8 shorthand to `×0.5 + 1.0 bpw indices`, or explicitly redefine the §2.3 index encoding to a 2-bit-per-four-dense-values scheme and provide its legal pattern table and SWMMAC operand mapping.
+
+## SI-16 — A1.3 — spec 8 §3
+What: Spec 8 §3 defines `NgramSpec { orders, heads, table_sizes, hash, combine, inject_at: layer }` with no row dimension, while Spec 1 §4.A `ngram_gather` requires `Dn` (`gather_staging [T, Np, Dn]` → `x [T, Np·Dn]`) to shape the device table and the projection.
+Why it blocks or misleads: Without `Dn` in the model definition, the builder cannot declare the `[TotalEntries, Dn]` table shape or the `heads·Dn`/`Dn` projection width from the spec; any value it picks (including the previously hardcoded 32) is unverifiable and silently fixes a model property the checkpoint family should own.
+Option taken: Added an explicit `dim: u32` (Dn) to `NgramSpec`, validated nonzero and bounded, with `orders.len` and `table_sizes.len` each required to equal `heads`; see DECISION(A1.3) at the struct.
+Proposed resolution: Add `dim: u32` (Dn) to the Spec 8 §3 `NgramSpec` surface and state that `orders.len == table_sizes.len == heads`.
