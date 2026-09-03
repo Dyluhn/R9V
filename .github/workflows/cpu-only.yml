@@ -33,24 +33,24 @@ jobs:
             BASE_SHA="${{ github.event.pull_request.base.sha }}"
             HEAD_SHA="${{ github.event.pull_request.head.sha }}"
             echo "Pull request check: $BASE_SHA..$HEAD_SHA"
-            COMMITS=$(git rev-list "$BASE_SHA..$HEAD_SHA")
+            COMMITS=$(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
           elif [ "${{ github.event_name }}" = "push" ]; then
             BEFORE="${{ github.event.before }}"
             if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify "$BEFORE" >/dev/null 2>&1; then
               echo "Push check: $BEFORE..HEAD"
-              COMMITS=$(git rev-list "$BEFORE..HEAD")
+              COMMITS=$(git rev-list --no-merges "$BEFORE..HEAD")
             elif git rev-parse --verify origin/main >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
               echo "Push check against origin/main: origin/main..HEAD"
-              COMMITS=$(git rev-list origin/main..HEAD)
+              COMMITS=$(git rev-list --no-merges origin/main..HEAD)
             else
               echo "Push check single commit: HEAD"
-              COMMITS=$(git rev-list -n 1 HEAD)
+              COMMITS=$(git rev-list --no-merges -n 1 HEAD)
             fi
           else
             if git rev-parse --verify origin/main >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-              COMMITS=$(git rev-list origin/main..HEAD)
+              COMMITS=$(git rev-list --no-merges origin/main..HEAD)
             else
-              COMMITS=$(git rev-list -n 1 HEAD)
+              COMMITS=$(git rev-list --no-merges -n 1 HEAD)
             fi
           fi
 
