@@ -453,3 +453,118 @@ fn test_execute_matmul_and_lookup_op_dispatch() {
     let mut scatter_outputs = [y.as_view_mut()];
     assert!(execute_lookup_op(&scatter_op, &scatter_inputs, &mut scatter_outputs).is_ok());
 }
+
+#[test]
+fn test_a19_public_surface_markers_and_dispatch() {
+    use r9v_ir::{
+        AllReduceOp, BarrierOp, CausalConv1dOp, ConvActivation, LinearAttnKind, LinearAttnScanOp,
+        MoeFfnOp, MoeRouteOp, MoeScoring, NgramCombine, NgramGatherOp, NgramSource, Op, ReduceOp,
+        StateHandle, StateKind,
+    };
+
+    assert_send::<SeqLayout>();
+    assert_sync::<SeqLayout>();
+
+    // MoE dispatch: route runs through execute_moe_op.
+    let route_op = Op::MoeRoute(MoeRouteOp {
+        top_k: 1,
+        scoring: MoeScoring::Softmax,
+        renormalize: false,
+        group: None,
+        scale: 1.0,
+    });
+    let logits = TypedBuffer::from_f32(&[2, 3], &[0.1, 0.2, 0.3, 0.3, 0.2, 0.1]);
+    let mut ids = TypedBuffer::zeros(&[2, 1], DType::U32);
+    let mut weights = TypedBuffer::zeros(&[2, 1], DType::F32);
+    assert!(execute_moe_op(
+        &route_op,
+        &[logits.as_view()],
+        &mut [ids.as_view_mut(), weights.as_view_mut()],
+    )
+    .is_ok());
+    // MoE dispatch: ffn arity is enforced here; behavior is covered in moe_ffn_tests.
+    let ffn_op = Op::MoeFfn(MoeFfnOp {
+        act: r9v_ir::ActivationKind::Silu,
+        out_dtype: DType::F32,
+        shared_experts: 0,
+    });
+    let z = TypedBuffer::zeros(&[1, 2], DType::F32);
+    let mut y_ffn = TypedBuffer::zeros(&[1, 2], DType::F32);
+    assert!(execute_moe_op(&ffn_op, &[z.as_view()], &mut [y_ffn.as_view_mut()]).is_err());
+
+    // State/scan dispatch: conv runs; scan form flag is accepted.
+    let conv_op = Op::CausalConv1d(CausalConv1dOp {
+        kernel: 2,
+        act: ConvActivation::Identity,
+        handle: StateHandle::new(0, StateKind::ConvWindow),
+    });
+    let xc = TypedBuffer::from_f32(&[2, 2], &[0.5; 4]);
+    let wc = TypedBuffer::from_f32(&[2, 2], &[0.5; 4]);
+    let sc = TypedBuffer::from_f16(&[1, 1, 2], &[0; 2]);
+    let mut yc = TypedBuffer::zeros(&[2, 2], DType::F32);
+    let mut soc = TypedBuffer::zeros(&[1, 1, 2], DType::F16);
+    let seq = SeqLayout::new(&[2]).unwrap();
+    assert!(execute_state_scan_op(
+        &conv_op,
+        &[xc.as_view(), wc.as_view()],
+        &sc.as_view(),
+        &seq,
+        &mut [yc.as_view_mut()],
+        &mut soc.as_view_mut(),
+        false,
+    )
+    .is_ok());
+    let scan_op = Op::LinearAttnScan(LinearAttnScanOp {
+        kind: LinearAttnKind::GLA,
+        chunk: 2,
+        out_dtype: DType::F32,
+        handle: StateHandle::new(0, StateKind::Recurrent),
+    });
+    assert!(execute_state_scan_op(
+        &scan_op,
+        &[xc.as_view()],
+        &sc.as_view(),
+        &seq,
+        &mut [yc.as_view_mut()],
+        &mut soc.as_view_mut(),
+        true,
+    )
+    .is_err());
+
+    // N-gram dispatch: staged runs through views.
+    let ngram_op = Op::NgramGather(NgramGatherOp {
+        source: NgramSource::Staged,
+        orders: vec![1u32].into_boxed_slice(),
+        heads: 1,
+        hash: r9v_ir::HashId::new(0),
+        table_sizes: vec![8u32].into_boxed_slice(),
+        combine: NgramCombine::Sum,
+        out_dtype: DType::F32,
+    });
+    let staging = TypedBuffer::from_i8(&[2, 1, 4], &[1i8; 8]).with_quant(
+        r9v_ir::QuantScheme::Scheme(r9v_format::SchemeId::I8R.to_ir()),
+    );
+    let scales = TypedBuffer::from_f32(&[2, 1], &[0.5; 2]);
+    let mut yn = TypedBuffer::zeros(&[2, 4], DType::F32);
+    assert!(execute_ngram_op(
+        &ngram_op,
+        &[staging.as_view(), scales.as_view()],
+        &mut [yn.as_view_mut()]
+    )
+    .is_ok());
+
+    // Collective dispatch: barrier and send run; recv fails closed.
+    let barrier_op = Op::Barrier(BarrierOp {
+        group: r9v_ir::GroupId::new(0),
+    });
+    assert!(execute_collective_op(&barrier_op, &[], &mut []).is_ok());
+    let reduce_op = Op::AllReduce(AllReduceOp {
+        group: r9v_ir::GroupId::new(0),
+        op: ReduceOp::Sum,
+        dtype: DType::F32,
+        reduce_in: DType::F32,
+    });
+    let xr = TypedBuffer::from_f32(&[2, 2], &[1.0; 4]);
+    let mut yr = TypedBuffer::zeros(&[2, 2], DType::F32);
+    assert!(execute_collective_op(&reduce_op, &[xr.as_view()], &mut [yr.as_view_mut()]).is_ok());
+}

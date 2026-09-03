@@ -226,3 +226,57 @@ What: `MlaAttentionSpec` admits `qk_nope_dim != kv_lora_rank` and `v_dim != kv_l
 Why it blocks or misleads: Any T0 lowering of a non-absorbed graph (truncate the latent, pad the query, invent a projection) invents numerics that the kernel cards would then have to match without a contract; a test that passes by such invention proves nothing about the real model path.
 Option taken: Implemented the absorbed MLA form (`qk_nope_dim == kv_lora_rank`, `qk_rope_dim == rope_dim`, `v_dim == kv_lora_rank`) and failed all other combinations closed with typed errors naming SI-46; see `validate_mla_dims` in `crates/r9v-t0/src/attention.rs`.
 Proposed resolution: State in Spec 1 §4.D whether the attention op consumes absorbed projections (and which graph ops produce the absorbed query) or add the missing projection operands to the op signature so non-absorbed dims have a defined lowering.
+
+## SI-47 — A1.9 — spec 1 §4.E (scan kind-specific equations absent)
+What: Spec 1 §4.E fixes the common `q/k/v/alpha/beta` signature and the `S_t` state for `linear_attn_scan` but states no per-kind equations for `GatedDeltaNet`, `GLA`, or `Mamba2` (gate application, normalization, decay placement, output projection order); `w_gate_up` normalization `NRMS` and the `LinearAttnKind` effects are unstated.
+Why it blocks or misleads: Without kind-specific equations, any per-kind T0 behavior would be invented; two implementations can both satisfy the signature while computing different recurrences.
+Option taken: Implemented one shared `alpha/beta/k/v` gated outer-product recurrence (`S = alpha*S + beta*(k⊗v)`, `o = q·S`, all `f32` ascending) for all three kinds — the narrowest contract consistent with the signature — in `crates/r9v-t0/src/linear_attn_scan.rs`; chunked and recurrent forms share it bit-exactly. No architecture-specific claim beyond that contract. Documented under DECISION(A1.9).
+Proposed resolution: State the kind-specific update equations in Spec 1 §4.E or confirm the three kinds share one recurrence.
+
+## SI-48 — A1.9 — spec 1 §4.E (sequence-boundary inputs missing from state/scan signatures)
+What: `causal_conv1d`/`linear_attn_scan` carry `[T, ...]` token-major tensors with no sequence-boundary input, yet require per-sequence state threading and reset; rows are not self-delimiting, `DType` is closed (SI-12), and IR arity cannot grow without touching every producer.
+Why it blocks or misleads: Without a boundary channel, multi-sequence batches cannot reset recurrences or address per-sequence slots; threading boundaries through fake tensor edges would corrupt the dtype system.
+Option taken: Added an explicit execution-only `SeqLayout` descriptor plus leading-`S` state slots (`[S, Wk-1, C]` conv, `[S, H, D, Dv]` scan) in `crates/r9v-t0/src/segments.rs`, consistent across conv/scan without changing IR arity. Documented under DECISION(A1.9).
+Proposed resolution: Confirm boundaries travel out-of-band and bless the `[S, ...]` state convention in Spec 1 §4.E / Spec 3 §4.
+
+## SI-49 — A1.9 — spec 1 §4.C (MoE top-K selection and routing-weight semantics)
+What: Spec 1 §4.C fixes MoE shapes (`[T, K]`) but not the selection contract: is `top_k = 0` legal, may one expert occupy several of a token's K slots, are routing `weights` probabilities or opaque multipliers, is `expert_ids` order significant, and which location scheme reports a bad routing value (`InvalidLogit` names sampling positions only)?
+Why it blocks or misleads: An empty routing (zero output) vs a refusal, duplicate-slot double counting vs dedup, and renormalized vs raw weights all change numerics silently.
+Option taken: In `crates/r9v-t0/src/moe_route.rs` / `moe_ffn.rs`: reject `top_k = 0`; allow duplicate expert slots (each slot combines independently from one shared expert row); treat `weights` as opaque multipliers combined in ascending `(expert, token, slot)` order with `y` zero-initialized first; report non-finite logits per `(t, e)` as `InvalidAttribute`. Documented under DECISION(A1.9).
+Proposed resolution: Fix the top-K selection contract, weight semantics, and routing error locations in Spec 1 §4.C.
+
+## SI-50 — A1.9 — spec 1 §4.C + spec 4 §5.6 (MoE gate/up row order unstated)
+What: Spec 1 §4.C fixes the `[E, 2·Dff, Dm]` gate/up shape but not the row order; Spec 4 §5.6 says "gate/up interleaved" about kernel access without fixing storage, and names a plain (fused) epilogue.
+Why it blocks or misleads: Gate-major halves vs interleaved rows select different weight rows for the same token — a silent numerics fork across implementations.
+Option taken: In `crates/r9v-t0/src/moe_ffn.rs`, read gate rows `[0, Dff)` and up rows `[Dff, 2·Dff)` (gate-major halves, contiguous per projection); L1 expert tiles are interpreted over the flattened `[E·R, K]` row space (no tiled rank-3 expert layout is specified). Documented under DECISION(A1.9).
+Proposed resolution: State the gate/up row order in Spec 1 §4.C.
+
+## SI-51 — A1.9 — spec 1 §4.C (router scoring, renormalization, scale, grouping gaps)
+What: Spec 1 §4.C names the router knobs but not their composition: softmax/sigmoid placement vs bias, what `renormalize` divides by, where `scale` multiplies, the grouped-selection algorithm for `group`, and whether output row order is observable.
+Why it blocks or misleads: Post-renorm scaling silently un-normalizes; full-row denominators contradict selected-weight renormalization; an unstated group algorithm cannot be implemented without invention.
+Option taken: In `crates/r9v-t0/src/moe_route.rs`: scores from `logits + bias`, stable softmax / sigmoid in `f32`, top-K by `(-score, index)` with lowest-index tie-break, `weights = score * scale` with renormalization dividing by the selected-K sum, rows in descending-score order (presentation only — the combine is order-insensitive); `group.is_some()` fails closed. Documented under DECISION(A1.9).
+Proposed resolution: Fix scoring/renormalize/scale composition and the grouped-selection algorithm (or remove `group`) in Spec 1 §4.C.
+
+## SI-52 — A1.9 — spec 1 §4.C/§4.E (MoE/scan scale carriers and the `x` Livness rule)
+What: Spec 1 §4.C/§4.E require scales without fixing their carrier: explicit parameters vs attached views, L0 inline-scale geometry for expert weights, and the meaning of the `x` Livness rule for A1.9 executors.
+Why it blocks or misleads: Divergent carriers across cards would fork every quantized A1.9 graph between A1.6 scale tooling and new code.
+Option taken: In `crates/r9v-t0/src/moe_ffn.rs` / `linear_attn_scan.rs`, mirrored the `matmul`/`matmul_with_scales` carrier contract exactly: explicit scale parameter else attached view (SI-18 pattern), L0 inline strides (`K+2`, `K+K_blocks·2`, `K/2+K_superblocks·16`) permitted for expert weights, and the `x` Livness rule (`Livness::L0` ⇒ inline scales mandatory, `L1` ⇒ explicit scales). Documented under DECISION(A1.9).
+Proposed resolution: Bless the shared out-of-band scale convention for A1.9 executors in Spec 1 §4.C/§4.E.
+
+## SI-53 — A1.9 — spec 1 §4.A (n-gram hash families, orders > 1, staged/device carriers)
+What: Spec 1 §4.A fixes n-gram shapes but (a) publishes no `HashId` enumeration, (b) leaves device-mode `orders > 1` undefined (order-n context rows are not in the signature — what feeds the hash?), and (c) fixes no staged/device scale carriers.
+Why it blocks or misleads: Any hard-coded hash family would be invented; order-n device gather without named hash inputs would fabricate addressing; a scalar cannot name a superblock record, so multi-block staged rows under one scalar have no specified scale application.
+Option taken: In `crates/r9v-t0/src/ngram_gather.rs`: never map a hash family — device mode takes `&dyn NgramHash` (scheduler/models scope supplies `NgramSpec.hash`), bounds-checks every hashed row, and rejects `orders != 1` in device mode; staged `I8R` rows take a scalar `row_scales` per `(t, h)`, staged `I8B128` requires `Dn == 128`, staged `I4K` and multi-block staged rows fail closed; quantized device tables require separate carriers (`[entries]`/`[entries, Dn/128]` F16 bytes, `[entries, Dn/256, 4]` U32 bytes); row-major tables only. Documented under DECISION(A1.9).
+Proposed resolution: Publish the `HashId` enumeration, define order-n device behavior, and bless the staged/device carriers in Spec 1 §4.A.
+
+## SI-54 — A1.9 — spec 1 §4.G (rank-1 collective semantics and the `recv` refusal)
+What: Spec 1 §4.G fixes collective arities but not the accumulation precision or the rank-1 data path: is `all_reduce` an identity at `ranks = 1`, does `all_to_all`'s single `counts[0]` cover all rows, are `send(0)`/`barrier` no-ops, and what sources `recv` data?
+Why it blocks or misleads: An `f32` round-trip identity would silently corrupt integer transfers; a `recv` that returns zeros would fabricate data.
+Option taken: In `crates/r9v-t0/src/collectives.rs`: `all_reduce(Sum)`/`all_gather`/`reduce_scatter`/`all_to_all` are bit-exact identity transfers through the `copy` core (proven with `u32` values above 2²⁴); `reduce_in` must still be `f32` per spec (accepted, unused at rank 1 — multi-rank ascending-rank `f32` reduction is executor scope); `send(peer = 0)` and `barrier` are no-ops; `recv` validates its descriptor then fails closed (no T0 transport). Documented under DECISION(A1.9).
+Proposed resolution: Confirm the rank-1 executor contract in Spec 1 §4.G.
+
+## SI-55 — A1.9 — spec 1 §4.E (causal-conv quantized weights, activations, bias, state dtype)
+What: Spec 1 §4.E permits `i8/i4` conv weights but provides no scale input in the signature; `ConvActivation` lists `Silu|Identity` without saying the set is exhaustive; `bias`/`state` width rules are implicit.
+Why it blocks or misleads: Scale-less quantized weights cannot be dequantized without invention; a third activation or a wider state type would silently change numerics.
+Option taken: In `crates/r9v-t0/src/causal_conv1d.rs`: reject quantized weights with `QuantMismatch`; match `ConvActivation` exhaustively; `bias [C]` optional; state slots `f16` exactly (`[S, Wk-1, C]`, zero rows at `Wk = 1`); every element decoded at use; `y`/state staged before commit. The `f16` carry rounding is the only split-vs-oneshot divergence and is pinned by test, not hidden in tolerance. Documented under DECISION(A1.9).
+Proposed resolution: State the conv weight-scale rule (or remove `i8/i4` from the dtype set) and close the activation/bias/state rules in Spec 1 §4.E.
