@@ -2,5 +2,16 @@
 name = "spike-direct-io"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.96.0"
+
+[workspace]
+
+[[bin]]
+name = "spike-direct-io"
+path = "../../tests/gpu/a0_s5_direct_io.rs"
 
 [dependencies]
+r9v-hip = { path = "../../crates/r9v-hip" }
+libc = "0.2"
+io-uring = "0.7"
