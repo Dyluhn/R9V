@@ -9,6 +9,17 @@ use r9v_format::{FormatError, L1Regions, L1sRegions, Layout, Packing, PaddedDims
 fn assert_send_sync<T: Send + Sync>() {}
 
 #[test]
+fn gguf_types_are_send_and_sync() {
+    assert_send_sync::<r9v_format::GgmlType>();
+    assert_send_sync::<r9v_format::RepackedTensor>();
+}
+
+#[test]
+fn gguf_type_is_plain_data() {
+    assert_plain_data::<r9v_format::GgmlType>();
+}
+
+#[test]
 fn public_types_are_send_and_sync() {
     assert_send_sync::<Layout>();
     assert_send_sync::<Packing>();

@@ -280,3 +280,21 @@ What: Spec 1 §4.E permits `i8/i4` conv weights but provides no scale input in t
 Why it blocks or misleads: Scale-less quantized weights cannot be dequantized without invention; a third activation or a wider state type would silently change numerics.
 Option taken: In `crates/r9v-t0/src/causal_conv1d.rs`: reject quantized weights with `QuantMismatch`; match `ConvActivation` exhaustively; `bias [C]` optional; state slots `f16` exactly (`[S, Wk-1, C]`, zero rows at `Wk = 1`); every element decoded at use; `y`/state staged before commit. The `f16` carry rounding is the only split-vs-oneshot divergence and is pinned by test, not hidden in tolerance. Documented under DECISION(A1.9).
 Proposed resolution: State the conv weight-scale rule (or remove `i8/i4` from the dtype set) and close the activation/bias/state rules in Spec 1 §4.E.
+
+## SI-56 — A2.3 — spec 2 §3.3
+What: The §3.3 table lists the `I5_B32F` / `I5_B32FM` scale record as "as Q4", but `Q4_0` stores one `f16` (`d`) while `Q4_1` stores two (`d`, `m`); the record size differs by 2 bytes and the SoA region stride depends on it.
+Why it blocks or misleads: A reader implementing "as Q4" literally cannot tell whether `I5_B32F` carries a min field; guessing wrong shifts every subsequent record in the SoA region by 2 bytes per block and silently corrupts all scales.
+Option taken: `I5_B32F` uses the `Q4_0` record (`d` only, 2 B) and `I5_B32FM` uses the `Q4_1` record (`d`, `m`, 4 B), matching the GGUF `Q5_0` / `Q5_1` wire blocks both repack.
+Proposed resolution: Replace "as Q4" with "as `I4_B32F` / as `I4_B32FM` respectively" in the §3.3 table.
+
+## SI-57 — A2.3 — spec 2 §3.3
+What: The §3.3 table lists the `I3_K` / `I2_K` scale record as "as GGUF" without fixing contents or order: `Q3_K` wire carries `[hmask][qs][scales12][d]` while `Q2_K` wire carries `[scales16][qs64][d][dmin]`, so "the scale bytes" are one contiguous slice in the first type and split around the value bytes in the second.
+Why it blocks or misleads: Two loaders that both "store as GGUF" can disagree on whether the SoA record is the verbatim wire span (which for `Q2_K` would embed 4 value bytes as `d` / `dmin`) or the gathered scale fields; their scale regions are mutually unreadable.
+Option taken: `I3_K` stores `[scales12][d]` in wire order (14 B, contiguous in the wire); `I2_K` stores `[scales16][d][dmin]` gathered across the split wire layout (20 B).
+Proposed resolution: State the exact SoA record contents and order for `I3_K` and `I2_K` in §3.3 (field names with wire offsets).
+
+## SI-58 — A2.3 — spec 2 §3.3, §7
+What: Neither §3.3 nor §7 pins which GGUF revision defines the wire-block layouts and dequant formulas the repack rules must reproduce bit-exactly ("repack never requantize", §10 round-trip); GGUF layouts are versioned upstream outside this spec.
+Why it blocks or misleads: Without a pinned reference, a future GGUF layout change (or a reader built against a different revision) passes the §7 shape checks yet fails the §10 bit-equality test with no way to tell which side moved.
+Option taken: Pinned gguf-py 0.19.0 `quants.py dequantize_blocks` as the wire authority (codes from its `GGMLQuantizationType`); fixtures record the version, and K-quant wire bytes that gguf-py cannot quantize are hand-built from that same layout with the provenance stated per case.
+Proposed resolution: Name the authoritative GGUF revision (or a vendored layout table) in §7 that repack implementations must reproduce.
