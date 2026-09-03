@@ -12,6 +12,7 @@ use r9v_ir::{
 fn fusion_ops() -> (Op, Op, Op, Op, Op, Op, Op, Op, Op, Op, Op) {
     let residual = Op::ResidualAdd(ResidualAddOp {
         out_dtype: DType::F16,
+        scale: 1.0,
     });
     let norm = Op::Norm(NormOp {
         kind: NormKind::Rms,

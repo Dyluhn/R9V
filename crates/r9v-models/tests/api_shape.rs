@@ -7,7 +7,7 @@ use r9v_models::{
     LayerSpec, LayerSummary, MetaValue, Mixer, MixerKind, MlaSpec, ModelGraph, ModelSpec,
     ModelSummary, ModelsError, MoeGroupSpec, MoeSharedSpec, MtpSource, MtpSpec, NgramSpec,
     NormPlacement, NormSpec, PositionEncoding, Retain, RopeSpec, SchemeClass, SchemeKey,
-    SealedGraphBuilder, StateSpec, SyntheticGgufMeta, TiedDecl, WeightRole,
+    SealedGraphBuilder, StateSpec, SubgraphCapture, SyntheticGgufMeta, TiedDecl, Value, WeightRole,
 };
 
 fn assert_send<T: Send>() {}
@@ -20,6 +20,12 @@ fn test_all_public_types_send_sync() {
 
     assert_send::<ModelGraph>();
     assert_sync::<ModelGraph>();
+
+    assert_send::<Value>();
+    assert_sync::<Value>();
+
+    assert_send::<SubgraphCapture>();
+    assert_sync::<SubgraphCapture>();
 
     assert_send::<BoundWeight>();
     assert_sync::<BoundWeight>();

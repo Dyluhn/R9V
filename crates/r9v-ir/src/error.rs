@@ -492,6 +492,39 @@ pub enum IrError {
         class: Class,
     },
 
+    /// A second `BatchMeta.positions` projection was bound when one already
+    /// exists (Spec 1 §2.5; card A1.14). A step graph carries exactly one
+    /// structured `BatchMeta`, so its positions projection is bound at most
+    /// once: the same kind twice is a duplicate, a different kind is a
+    /// conflict.
+    #[error("positions projection already bound as {existing:?}; cannot bind {requested:?} (Spec 1 §2.5: one BatchMeta per step graph)")]
+    PositionsConflict {
+        /// Kind of the already-bound projection.
+        existing: crate::graph::PositionsKind,
+        /// Kind the caller attempted to bind.
+        requested: crate::graph::PositionsKind,
+    },
+
+    /// A graph op reads `BatchMeta.positions` but no positions projection was
+    /// bound (Spec 1 §2.5, §4.B; card A1.14).
+    #[error("graph op `{required_by}` requires a bound BatchMeta.positions projection (Spec 1 §2.5, §4.B)")]
+    GraphPositionsMissing {
+        /// Op that requires the projection.
+        required_by: &'static str,
+    },
+
+    /// A `rope` node reads its positions from an edge that is not the bound
+    /// `BatchMeta.positions` projection (Spec 1 §2.5, §4.B; card A1.14).
+    #[error("rope node {node} reads positions from edge {edge}, expected positions projection edge {expected} (Spec 1 §2.5, §4.B)")]
+    GraphRopePositionsMismatch {
+        /// Rope node index.
+        node: usize,
+        /// Edge the node actually reads positions from.
+        edge: usize,
+        /// Bound positions projection edge.
+        expected: usize,
+    },
+
     /// A tensor edge is placed on a device other than the graph capture rank
     /// (Spec 1 §3.1).
     #[error("graph edge {edge} is on device rank {tensor_rank}, expected graph rank {graph_rank} (Spec 1 §3.1)")]

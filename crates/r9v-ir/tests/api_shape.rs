@@ -14,19 +14,19 @@ use r9v_ir::{
     match_gated_pair, matmul_numerics, moe_ffn_gemm_numerics, ActMulOp, ActivationKind,
     ActivationOp, AllGatherOp, AllReduceOp, AllToAllOp, ArchDescriptor, ArchFamily, AttentionMask,
     AttentionOp, BarrierOp, BatchMeta, BatchMetaBuilder, CacheScaleGranularity, CastOp,
-    CausalConv1dOp, Class, ConvActivation, CopyKind, CopyOp, DType, Dim, EdgeId, EmbedGatherOp,
-    Epilogue, ExpertCount, ExternalInput, ExternalInputKind, ExternalOutput, ExternalOutputKind,
-    FusionEntry, FusionPattern, GatherRowsOp, Graph, GraphCapture, GraphEdge, GraphNode,
-    GraphSummary, GroupId, HashId, HeadCount, InsertedCopy, IrError, IrVersion, LayoutId,
-    LinearAttnKind, LinearAttnScanOp, LogitsPostprocessOp, MatmulOp, MatrixOp, Measured,
-    MlaAttentionSpec, MlaLatent, MoeFfnOp, MoeGroup, MoeRouteOp, MoeScoring, NgramCombine,
-    NgramGatherOp, NgramSource, NodeId, NormAxis, NormKind, NormOp, Numerics, Op, P2pLink,
-    P2pTransport, Placement, PlanId, Positions, QuantActOp, QuantScheme, RecvOp, ReduceOp,
-    ReduceScatterOp, ReductionOrder, RelRate, ResidualAddOp, RngAlgorithm, RopeOp, RopeScaling,
-    RopeStyle, SampleOp, SamplingParams, ScatterAddRowsOp, SchemeId, SendOp, ShapeSymbol,
-    ShardLayout, ShardLayoutPattern, ShardingRule, Smoothing, StateHandle, StateKind,
-    StateWriteKvOp, StepGraphKey, StrideRequirement, Tensor, TreeMask, ValuDot, VerifyMethod,
-    VerifyOp, BLOCK_TABLE_SENTINEL, BUCKET_SIZES, FUSION_TABLE,
+    CausalConv1dOp, Class, ConcatOp, ConvActivation, CopyKind, CopyOp, DType, Dim, EdgeId,
+    EmbedGatherOp, Epilogue, ExpertCount, ExternalInput, ExternalInputKind, ExternalOutput,
+    ExternalOutputKind, FusionEntry, FusionPattern, GatherRowsOp, Graph, GraphCapture, GraphEdge,
+    GraphNode, GraphSummary, GroupId, HashId, HeadCount, InsertedCopy, IrError, IrVersion,
+    LayoutId, LinearAttnKind, LinearAttnScanOp, LogitSoftcapOp, LogitsPostprocessOp, MatmulOp,
+    MatrixOp, Measured, MlaAttentionSpec, MlaLatent, MoeFfnOp, MoeGroup, MoeRouteOp, MoeScoring,
+    NgramCombine, NgramGatherOp, NgramSource, NodeId, NormAxis, NormKind, NormOp, Numerics, Op,
+    P2pLink, P2pTransport, Placement, PlanId, Positions, PositionsKind, QuantActOp, QuantScheme,
+    RecvOp, ReduceOp, ReduceScatterOp, ReductionOrder, RelRate, ResidualAddOp, RngAlgorithm,
+    RopeOp, RopeScaling, RopeStyle, SampleOp, SamplingParams, ScatterAddRowsOp, SchemeId, SendOp,
+    ShapeSymbol, ShardLayout, ShardLayoutPattern, ShardingRule, Smoothing, SplitOp, StateHandle,
+    StateKind, StateWriteKvOp, StepGraphKey, StrideRequirement, Tensor, TreeMask, ValuDot,
+    VerifyMethod, VerifyOp, BLOCK_TABLE_SENTINEL, BUCKET_SIZES, FUSION_TABLE,
 };
 
 fn assert_send<T: Send>() {}
@@ -148,6 +148,7 @@ fn api_shape_markers_and_errors() {
     assert_copy::<ShardingRule>();
 
     assert_send_sync::<ExternalInputKind>();
+    assert_send_sync::<PositionsKind>();
     assert_copy::<ExternalInputKind>();
     assert_hash::<ExternalInputKind>();
 
@@ -212,10 +213,13 @@ fn api_shape_markers_and_errors() {
     assert_send_sync::<CopyOp>();
     assert_send_sync::<GatherRowsOp>();
     assert_send_sync::<ScatterAddRowsOp>();
+    assert_send_sync::<SplitOp>();
+    assert_send_sync::<ConcatOp>();
     assert_send_sync::<NormOp>();
     assert_send_sync::<ResidualAddOp>();
     assert_send_sync::<ActMulOp>();
     assert_send_sync::<ActivationOp>();
+    assert_send_sync::<LogitSoftcapOp>();
     assert_send_sync::<RopeOp>();
     assert_send_sync::<MatmulOp>();
     assert_send_sync::<MoeRouteOp>();
@@ -392,6 +396,7 @@ fn api_shape_closed_sets_match_exhaustively() {
         ExternalInputKind::SamplingParams => 5,
         ExternalInputKind::EmbedOverride => 6,
         ExternalInputKind::EmbedMask => 7,
+        ExternalInputKind::SubgraphHidden => 8,
     };
 
     let ext_out = ExternalOutputKind::Sampled;
@@ -578,10 +583,13 @@ fn api_shape_closed_sets_match_exhaustively() {
         Op::Copy(_) => 4,
         Op::GatherRows(_) => 5,
         Op::ScatterAddRows(_) => 6,
+        Op::Split(_) => 29,
+        Op::Concat(_) => 30,
         Op::Norm(_) => 7,
         Op::ResidualAdd(_) => 8,
         Op::ActMul(_) => 9,
         Op::Activation(_) => 10,
+        Op::LogitSoftcap(_) => 31,
         Op::Rope(_) => 11,
         Op::Matmul(_) => 12,
         Op::MoeRoute(_) => 13,
@@ -650,8 +658,8 @@ fn api_shape_constructors_are_reachable() {
     let cpu = ArchDescriptor::cpu();
     assert_eq!(cpu.family, ArchFamily::Cpu);
 
-    assert_eq!(IrVersion::CURRENT, IrVersion::new(0, 1, 0));
-    assert_eq!(IrVersion::CURRENT.to_string(), "0.1.0");
+    assert_eq!(IrVersion::CURRENT, IrVersion::new(0, 2, 0));
+    assert_eq!(IrVersion::CURRENT.to_string(), "0.2.0");
 
     let plan = PlanId::new(42);
     assert_eq!(plan.as_u64(), 42);
@@ -715,6 +723,7 @@ fn api_shape_constructors_are_reachable() {
     assert!(is_permitted_fusion(FusionPattern::ResidualAddNorm));
     let residual = Op::ResidualAdd(ResidualAddOp {
         out_dtype: DType::F16,
+        scale: 1.0,
     });
     let norm = Op::Norm(NormOp {
         kind: NormKind::Rms,

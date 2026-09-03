@@ -699,8 +699,8 @@ fn cpu_reports_reference_identity() {
 
 #[test]
 fn ir_version_orders_and_displays() {
-    assert_eq!(IrVersion::CURRENT.to_string(), "0.1.0");
-    assert!(IrVersion::new(0, 2, 0) > IrVersion::CURRENT);
+    assert_eq!(IrVersion::CURRENT.to_string(), "0.2.0");
+    assert!(IrVersion::new(0, 3, 0) > IrVersion::CURRENT);
     assert!(IrVersion::new(1, 0, 0) > IrVersion::new(0, 99, 99));
 }
 

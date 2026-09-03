@@ -22,11 +22,12 @@ pub struct IrVersion {
 
 impl IrVersion {
     /// Current IR version.
-    // DECISION(A1.1): 0.1.0, tracking the spec's draft 0.1; rejected 1.0.0
-    // (nothing is frozen pre-A6.7a interface freeze).
+    // DECISION(A1.14): 0.2.0, bumped from 0.1.0 because ResidualAddOp gained
+    // a scale attribute; Spec 1 §7 explicitly requires a minor version bump
+    // on op signature change. SI-27.
     pub const CURRENT: Self = Self {
         major: 0,
-        minor: 1,
+        minor: 2,
         patch: 0,
     };
 

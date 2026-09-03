@@ -104,7 +104,7 @@ pub fn is_permitted_fusion(pattern: FusionPattern) -> bool {
 
 /// Checks if a producer-consumer op pair matches a permitted fusion pattern (Spec 1 §3.4).
 ///
-/// Exhaustively matches all 29 closed `Op` variants without wildcards (CONVENTIONS.md §3.2).
+/// Exhaustively matches all 32 closed `Op` variants without wildcards (CONVENTIONS.md §3.2).
 // DECISION(A1.2): typed pair matching on &Op replaces stringly APIs per Spec 1 §3.4; pseudo-op bias is removed because bias is an epilogue attribute/operand on MatmulOp rather than an Op node.
 pub fn is_permitted_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
     match_pair(producer, consumer)
@@ -112,7 +112,7 @@ pub fn is_permitted_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> 
 
 /// Typed pair matching on `&Op` (Spec 1 §3.4).
 ///
-/// Exhaustively matches all 29 closed `Op` variants without wildcards (CONVENTIONS.md §3.2).
+/// Exhaustively matches all 32 closed `Op` variants without wildcards (CONVENTIONS.md §3.2).
 fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
     match producer {
         Op::ResidualAdd(_) => match consumer {
@@ -144,6 +144,9 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
             | Op::AllToAll(_)
             | Op::Send(_)
             | Op::Recv(_)
+            | Op::Split(_)
+            | Op::Concat(_)
+            | Op::LogitSoftcap(_)
             | Op::Barrier(_) => None,
         },
         Op::Norm(_) => match consumer {
@@ -175,6 +178,9 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
             | Op::AllToAll(_)
             | Op::Send(_)
             | Op::Recv(_)
+            | Op::Split(_)
+            | Op::Concat(_)
+            | Op::LogitSoftcap(_)
             | Op::Barrier(_) => None,
         },
         Op::Matmul(matmul) => match consumer {
@@ -208,6 +214,9 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
             | Op::AllToAll(_)
             | Op::Send(_)
             | Op::Recv(_)
+            | Op::Split(_)
+            | Op::Concat(_)
+            | Op::LogitSoftcap(_)
             | Op::Barrier(_) => None,
         },
         Op::Rope(_) => match consumer {
@@ -239,6 +248,9 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
             | Op::AllToAll(_)
             | Op::Send(_)
             | Op::Recv(_)
+            | Op::Split(_)
+            | Op::Concat(_)
+            | Op::LogitSoftcap(_)
             | Op::Barrier(_) => None,
         },
         Op::StateWriteKv(_) => match consumer {
@@ -270,6 +282,9 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
             | Op::AllToAll(_)
             | Op::Send(_)
             | Op::Recv(_)
+            | Op::Split(_)
+            | Op::Concat(_)
+            | Op::LogitSoftcap(_)
             | Op::Barrier(_) => None,
         },
         Op::LogitsPostprocess(_) => match consumer {
@@ -301,6 +316,9 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
             | Op::AllToAll(_)
             | Op::Send(_)
             | Op::Recv(_)
+            | Op::Split(_)
+            | Op::Concat(_)
+            | Op::LogitSoftcap(_)
             | Op::Barrier(_) => None,
         },
         Op::QuantAct(_) => match consumer {
@@ -332,8 +350,15 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
             | Op::ReduceScatter(_)
             | Op::Send(_)
             | Op::Recv(_)
+            | Op::Split(_)
+            | Op::Concat(_)
+            | Op::LogitSoftcap(_)
             | Op::Barrier(_) => None,
         },
+        // DECISION(A1.14): split, concat, and logit_softcap participate in no
+        // Spec 1 §3.4 fusion as producer or consumer; listed explicitly so the
+        // closed match stays exhaustive. SI-28, SI-29.
+        Op::Split(_) | Op::Concat(_) | Op::LogitSoftcap(_) => None,
         Op::EmbedGather(_)
         | Op::NgramGather(_)
         | Op::Cast(_)
@@ -361,7 +386,7 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
 
 /// Typed gated two-producer matcher for `matmul(gate) ∥ matmul(up) → act_mul` (Spec 1 §3.4).
 ///
-/// Exhaustively matches all 29 closed `Op` variants without wildcards (CONVENTIONS.md §3.2).
+/// Exhaustively matches all 32 closed `Op` variants without wildcards (CONVENTIONS.md §3.2).
 pub fn match_gated_pair(
     gate_producer: &Op,
     up_producer: &Op,
@@ -403,6 +428,9 @@ pub fn match_gated_pair(
                 | Op::AllToAll(_)
                 | Op::Send(_)
                 | Op::Recv(_)
+                | Op::Split(_)
+                | Op::Concat(_)
+                | Op::LogitSoftcap(_)
                 | Op::Barrier(_) => None,
             },
             Op::EmbedGather(_)
@@ -432,6 +460,9 @@ pub fn match_gated_pair(
             | Op::AllToAll(_)
             | Op::Send(_)
             | Op::Recv(_)
+            | Op::Split(_)
+            | Op::Concat(_)
+            | Op::LogitSoftcap(_)
             | Op::Barrier(_) => None,
         },
         Op::EmbedGather(_)
@@ -461,6 +492,9 @@ pub fn match_gated_pair(
         | Op::AllToAll(_)
         | Op::Send(_)
         | Op::Recv(_)
+        | Op::Split(_)
+        | Op::Concat(_)
+        | Op::LogitSoftcap(_)
         | Op::Barrier(_) => None,
     }
 }
@@ -490,6 +524,7 @@ mod tests {
     fn make_ops() -> (Op, Op, Op, Op, Op, Op, Op, Op, Op, Op, Op) {
         let res_add = Op::ResidualAdd(ResidualAddOp {
             out_dtype: DType::F16,
+            scale: 1.0,
         });
         let norm = Op::Norm(NormOp {
             kind: NormKind::Rms,

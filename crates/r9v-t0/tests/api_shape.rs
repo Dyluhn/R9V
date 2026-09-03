@@ -85,6 +85,7 @@ fn test_execute_elementwise_op_exact_arity_enforcement() {
     // ResidualAdd: requires 2 inputs and 1 output
     let res_op = Op::ResidualAdd(ResidualAddOp {
         out_dtype: DType::F32,
+        scale: 1.0,
     });
     assert!(execute_elementwise_op(&res_op, &[x.as_view()], &mut [y.as_view_mut()]).is_err());
     assert!(execute_elementwise_op(

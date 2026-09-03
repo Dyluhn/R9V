@@ -6,7 +6,7 @@ use r9v_ir::{DType, ResidualAddOp};
 use crate::buffer::{TensorView, TensorViewMut};
 use crate::error::T0Error;
 
-/// Executes scalar T0 residual addition: `a + b` in f32, cast to `out_dtype` (Spec 1 §4.B, Spec 1 §6.1, Spec 1 §6.4, Spec 4 §2).
+/// Executes scalar T0 residual addition: `a + scale * b` in f32, cast to `out_dtype` (Spec 1 §4.B, Spec 1 §6.1, Spec 1 §6.4, Spec 4 §2; card A1.14, SI-27).
 pub fn residual_add(
     op: &ResidualAddOp,
     a: &TensorView<'_>,
@@ -19,6 +19,12 @@ pub fn residual_add(
 
     let mut problems = Vec::new();
 
+    if !op.scale.is_finite() || op.scale == 0.0 {
+        problems.push(format!(
+            "attribute scale: must be finite and non-zero, got {}",
+            op.scale
+        ));
+    }
     if a.shape() != b.shape() {
         problems.push(format!(
             "operand b shape {:?} does not match operand a shape {:?}",
@@ -59,15 +65,18 @@ pub fn residual_add(
     for i in 0..num_elem {
         let val_a = a.read_f32(i);
         let val_b = b.read_f32(i);
-        let sum = val_a + val_b;
+        let sum = val_a + op.scale * val_b;
         y.write_f32(i, sum);
     }
 
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.B, Spec 4 §2).
-pub fn residual_add_f64_reference(a: &[f64], b: &[f64]) -> Vec<f64> {
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.B, Spec 4 §2; card A1.14, SI-27).
+pub fn residual_add_f64_reference(a: &[f64], b: &[f64], scale: f64) -> Vec<f64> {
     assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(&x, &y)| x + y).collect()
+    a.iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| x + scale * y)
+        .collect()
 }

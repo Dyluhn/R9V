@@ -249,6 +249,12 @@ pub enum ExternalInputKind {
     EmbedOverride,
     /// Multimodal embedding replacement mask `[T] bool`.
     EmbedMask,
+    /// Captured parent hidden state feeding a subgraph (`[T, Dm]` act).
+    ///
+    /// Bound only inside subgraph builders from an explicit
+    /// parent-to-child capture record (Spec 8 §2, §5; card A1.14, SI-32);
+    /// parent step graphs never bind it.
+    SubgraphHidden,
 }
 
 impl ExternalInputKind {
@@ -259,7 +265,8 @@ impl ExternalInputKind {
             | Self::GatherStaging
             | Self::GrammarMask
             | Self::EmbedOverride
-            | Self::EmbedMask => true,
+            | Self::EmbedMask
+            | Self::SubgraphHidden => true,
             Self::BatchMeta | Self::SamplingParams | Self::RngState => false,
         }
     }
@@ -360,6 +367,20 @@ impl ExternalOutput {
             Self::UpdatedRngState => None,
         }
     }
+}
+
+/// `BatchMeta.positions` projection kind bound as a typed graph edge
+/// (Spec 1 §2.5; card A1.14, SI-30).
+///
+/// One structured `BatchMeta` is the single external input; its `positions`
+/// field is additionally projected as a typed edge so `rope` consumes an
+/// explicit SSA value instead of aliasing token IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PositionsKind {
+    /// Scalar positions `[T] u32`.
+    Scalar,
+    /// Multimodal RoPE triplets `[T, 3] u32`.
+    Mrope,
 }
 
 fn bucket_dim_matches(dim: Dim, concrete: u32, symbolic: ShapeSymbol) -> bool {
@@ -468,6 +489,18 @@ fn validate_external_input_tensor(
             Class::Activation,
             Some((total_tokens, ShapeSymbol::T)),
         ),
+        // DECISION(A1.14): a subgraph's captured hidden state validates like
+        // any per-token activation row `[T, Dm]`; the model dim is symbolic at
+        // this layer and only the leading token axis is pinned. Rejected
+        // reusing EmbedOverride (that kind names the multimodal escape hatch,
+        // not an MTP capture). Spec 1 §3.2, Spec 8 §2, SI-32.
+        ExternalInputKind::SubgraphHidden => (
+            "subgraph_hidden",
+            2,
+            &[DType::F16, DType::Bf16, DType::F32],
+            Class::Activation,
+            Some((total_tokens, ShapeSymbol::T)),
+        ),
         ExternalInputKind::BatchMeta
         | ExternalInputKind::RngState
         | ExternalInputKind::SamplingParams => {
@@ -489,7 +522,8 @@ fn validate_external_input_tensor(
         ExternalInputKind::TokenIds
         | ExternalInputKind::GrammarMask
         | ExternalInputKind::EmbedOverride
-        | ExternalInputKind::EmbedMask => tensor.quant() == QuantScheme::None,
+        | ExternalInputKind::EmbedMask
+        | ExternalInputKind::SubgraphHidden => tensor.quant() == QuantScheme::None,
         ExternalInputKind::BatchMeta
         | ExternalInputKind::RngState
         | ExternalInputKind::SamplingParams => false,
@@ -730,6 +764,7 @@ pub struct Graph {
     external_inputs: Vec<ExternalInput>,
     external_outputs: Vec<ExternalOutput>,
     inserted_copies: Vec<InsertedCopy>,
+    positions: Option<(PositionsKind, EdgeId)>,
 }
 
 impl Graph {
@@ -742,6 +777,7 @@ impl Graph {
             external_inputs: Vec::new(),
             external_outputs: Vec::new(),
             inserted_copies: Vec::new(),
+            positions: None,
         }
     }
 
@@ -904,7 +940,8 @@ impl Graph {
             | ExternalInputKind::GatherStaging
             | ExternalInputKind::GrammarMask
             | ExternalInputKind::EmbedOverride
-            | ExternalInputKind::EmbedMask => Err(IrError::OpAttributeInvalid {
+            | ExternalInputKind::EmbedMask
+            | ExternalInputKind::SubgraphHidden => Err(IrError::OpAttributeInvalid {
                 op: "add_external_non_tensor",
                 attribute: "kind",
                 reason: format!(
@@ -1009,6 +1046,56 @@ impl Graph {
     /// Registers the non-tensor `UpdatedRngState` external output signature (Spec 1 §3.2).
     pub fn add_updated_rng_state_output(&mut self) -> Result<(), IrError> {
         self.add_external_non_tensor_output(ExternalOutputKind::UpdatedRngState)
+    }
+
+    /// Returns the bound `BatchMeta.positions` projection, if any (Spec 1 §2.5; card A1.14).
+    pub fn positions_binding(&self) -> Option<(PositionsKind, EdgeId)> {
+        self.positions
+    }
+
+    /// Projects `BatchMeta.positions` as a typed graph edge for `rope`
+    /// (Spec 1 §2.5, §4.B; card A1.14, SI-30).
+    ///
+    /// The structured `BatchMeta` external input must already be registered;
+    /// the projection is bound at most once per graph. Binding the same kind
+    /// twice is a duplicate; binding the other kind afterwards is a conflict.
+    /// Both report [`IrError::PositionsConflict`] with the existing and
+    /// requested kinds.
+    pub fn bind_positions(&mut self, kind: PositionsKind) -> Result<EdgeId, IrError> {
+        if let Some((existing, _)) = self.positions {
+            return Err(IrError::PositionsConflict {
+                existing,
+                requested: kind,
+            });
+        }
+        if !self
+            .external_inputs
+            .iter()
+            .any(|i| matches!(i, ExternalInput::BatchMeta))
+        {
+            return Err(IrError::GraphExternalInputMissing {
+                kind: ExternalInputKind::BatchMeta,
+                required_by: "positions",
+            });
+        }
+        let shape = match kind {
+            PositionsKind::Scalar => vec![Dim::Symbolic(ShapeSymbol::T)],
+            PositionsKind::Mrope => vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(3)],
+        };
+        let tensor = Tensor::new(
+            shape,
+            DType::U32,
+            QuantScheme::None,
+            LayoutId::CONTIGUOUS,
+            Placement::Device {
+                rank: self.key.rank,
+            },
+            ShardLayout::Replicated,
+            Class::Activation,
+        )?;
+        let edge_id = self.push_tensor_edge(tensor);
+        self.positions = Some((kind, edge_id));
+        Ok(edge_id)
     }
 
     /// Adds an operation node to the graph without imposing a stride requirement.
@@ -1626,6 +1713,9 @@ impl Graph {
                 | Op::MoeFfn(_)
                 | Op::CausalConv1d(_)
                 | Op::LinearAttnScan(_)
+                | Op::Split(_)
+                | Op::Concat(_)
+                | Op::LogitSoftcap(_)
                 | Op::AllReduce(_)
                 | Op::AllGather(_)
                 | Op::ReduceScatter(_)
@@ -1679,7 +1769,31 @@ impl Graph {
             });
         }
 
-        // 3. Validate every node's op constraints over typed tensor edges
+        // 3. Rope positions must resolve to the BatchMeta.positions projection
+        // (Spec 1 §2.5, §4.B; card A1.14, SI-30): token IDs or any other edge
+        // is never an acceptable positions source.
+        for node in &self.nodes {
+            if matches!(node.op, Op::Rope(_)) {
+                match self.positions {
+                    None => problems.push(IrError::GraphPositionsMissing {
+                        required_by: "rope",
+                    }),
+                    Some((_, expected)) => match node.inputs.get(1) {
+                        Some(&edge) if edge == expected => {}
+                        Some(&edge) => problems.push(IrError::GraphRopePositionsMismatch {
+                            node: node.id.0,
+                            edge: edge.0,
+                            expected: expected.0,
+                        }),
+                        None => problems.push(IrError::GraphPositionsMissing {
+                            required_by: "rope",
+                        }),
+                    },
+                }
+            }
+        }
+
+        // 4. Validate every node's op constraints over typed tensor edges
         for node in &self.nodes {
             let mut in_tensors = Vec::with_capacity(node.inputs.len());
             let mut edge_missing = false;
@@ -1712,7 +1826,7 @@ impl Graph {
             }
         }
 
-        // 4. Validate external outputs referencing DAG edges
+        // 5. Validate external outputs referencing DAG edges
         for out in &self.external_outputs {
             if let ExternalOutput::Tensor { edge, .. } = out {
                 if edge.0 >= self.edges.len() {

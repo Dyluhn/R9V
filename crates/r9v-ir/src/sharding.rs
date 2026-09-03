@@ -986,9 +986,35 @@ pub static RECV_RULES: &[ShardingRule] = &[
 
 pub static BARRIER_RULES: &[ShardingRule] = &[ShardingRule::new(&[], &[])];
 
+// DECISION(A1.14): split/concat/softcap ship a single Replicated rule each:
+// every A1.14 producer binds Replicated tensors, and head/expert sharding of
+// MLA channel ranges is a future partitioner card's table entry, not this
+// card's. Rejected inventing HeadShard channel-range rules the partitioner
+// has no lowering for. SI-29.
+pub static SPLIT_RULES: &[ShardingRule] = &[ShardingRule::new(
+    &[ShardLayoutPattern::Replicated],
+    &[
+        ShardLayoutPattern::Replicated,
+        ShardLayoutPattern::Replicated,
+    ],
+)];
+
+pub static CONCAT_RULES: &[ShardingRule] = &[ShardingRule::new(
+    &[
+        ShardLayoutPattern::Replicated,
+        ShardLayoutPattern::Replicated,
+    ],
+    &[ShardLayoutPattern::Replicated],
+)];
+
+pub static LOGIT_SOFTCAP_RULES: &[ShardingRule] = &[ShardingRule::new(
+    &[ShardLayoutPattern::Replicated],
+    &[ShardLayoutPattern::Replicated],
+)];
+
 /// Returns the legal input/output sharding layout rules for the given op (Spec 1 §5.2).
 ///
-/// Exhaustive matching over all 29 closed ops without wildcards (CONVENTIONS.md §3.2).
+/// Exhaustive matching over all 32 closed ops without wildcards (CONVENTIONS.md §3.2).
 pub fn legal_layouts(op: &Op) -> &'static [ShardingRule] {
     match op {
         Op::EmbedGather(_) => EMBED_GATHER_RULES,
@@ -998,10 +1024,13 @@ pub fn legal_layouts(op: &Op) -> &'static [ShardingRule] {
         Op::Copy(_) => PASSTHROUGH_RULES,
         Op::GatherRows(_) => GATHER_ROWS_RULES,
         Op::ScatterAddRows(_) => SCATTER_ADD_ROWS_RULES,
+        Op::Split(_) => SPLIT_RULES,
+        Op::Concat(_) => CONCAT_RULES,
         Op::Norm(_) => NORM_RULES,
         Op::ResidualAdd(_) => RESIDUAL_ADD_RULES,
         Op::ActMul(_) => ACT_MUL_RULES,
         Op::Activation(_) => ACTIVATION_RULES,
+        Op::LogitSoftcap(_) => LOGIT_SOFTCAP_RULES,
         Op::Rope(_) => ROPE_RULES,
         Op::Matmul(_) => MATMUL_RULES,
         Op::MoeRoute(_) => MOE_ROUTE_RULES,

@@ -38,20 +38,21 @@ pub use fusion::{
 pub use graph::{
     bucket_s, bucket_step, bucket_t_dec, bucket_t_pre, compute_contiguous_strides, EdgeId,
     ExternalInput, ExternalInputKind, ExternalOutput, ExternalOutputKind, Graph, GraphEdge,
-    GraphNode, GraphSummary, InsertedCopy, NodeId, PlanId, StepGraphKey, StrideRequirement,
-    BUCKET_SIZES,
+    GraphNode, GraphSummary, InsertedCopy, NodeId, PlanId, PositionsKind, StepGraphKey,
+    StrideRequirement, BUCKET_SIZES,
 };
 pub use layout::LayoutId;
 pub use numerics::{matmul_numerics, moe_ffn_gemm_numerics, Numerics, ReductionOrder};
 pub use op::{
     ActMulOp, ActivationKind, ActivationOp, AllGatherOp, AllReduceOp, AllToAllOp, AttentionMask,
-    AttentionOp, BarrierOp, CacheScaleGranularity, CastOp, CausalConv1dOp, ConvActivation,
-    CopyKind, CopyOp, EmbedGatherOp, Epilogue, GatherRowsOp, GroupId, HashId, LinearAttnKind,
-    LinearAttnScanOp, LogitsPostprocessOp, MatmulOp, MlaAttentionSpec, MlaLatent, MoeFfnOp,
-    MoeGroup, MoeRouteOp, MoeScoring, NgramCombine, NgramGatherOp, NgramSource, NormAxis, NormKind,
-    NormOp, Op, QuantActOp, RecvOp, ReduceOp, ReduceScatterOp, ResidualAddOp, RngAlgorithm, RopeOp,
-    RopeScaling, RopeStyle, SampleOp, SamplingParams, ScatterAddRowsOp, SendOp, Smoothing,
-    StateWriteKvOp, VerifyMethod, VerifyOp,
+    AttentionOp, BarrierOp, CacheScaleGranularity, CastOp, CausalConv1dOp, ConcatOp,
+    ConvActivation, CopyKind, CopyOp, EmbedGatherOp, Epilogue, GatherRowsOp, GroupId, HashId,
+    LinearAttnKind, LinearAttnScanOp, LogitSoftcapOp, LogitsPostprocessOp, MatmulOp,
+    MlaAttentionSpec, MlaLatent, MoeFfnOp, MoeGroup, MoeRouteOp, MoeScoring, NgramCombine,
+    NgramGatherOp, NgramSource, NormAxis, NormKind, NormOp, Op, QuantActOp, RecvOp, ReduceOp,
+    ReduceScatterOp, ResidualAddOp, RngAlgorithm, RopeOp, RopeScaling, RopeStyle, SampleOp,
+    SamplingParams, ScatterAddRowsOp, SendOp, Smoothing, SplitOp, StateWriteKvOp, VerifyMethod,
+    VerifyOp,
 };
 pub use quant::{QuantScheme, SchemeId};
 pub use sharding::{
