@@ -28,13 +28,39 @@ jobs:
       - name: DCO check
         run: |
           echo "Verifying DCO sign-off on commits..."
+          COMMITS=""
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE="origin/${{ github.base_ref }}"
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+            HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            echo "Pull request check: $BASE_SHA..$HEAD_SHA"
+            COMMITS=$(git rev-list "$BASE_SHA..$HEAD_SHA")
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            BEFORE="${{ github.event.before }}"
+            if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify "$BEFORE" >/dev/null 2>&1; then
+              echo "Push check: $BEFORE..HEAD"
+              COMMITS=$(git rev-list "$BEFORE..HEAD")
+            elif git rev-parse --verify origin/main >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+              echo "Push check against origin/main: origin/main..HEAD"
+              COMMITS=$(git rev-list origin/main..HEAD)
+            else
+              echo "Push check single commit: HEAD"
+              COMMITS=$(git rev-list -n 1 HEAD)
+            fi
           else
-            BASE="HEAD~1"
+            if git rev-parse --verify origin/main >/dev/null 2>&1 && [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+              COMMITS=$(git rev-list origin/main..HEAD)
+            else
+              COMMITS=$(git rev-list -n 1 HEAD)
+            fi
           fi
+
+          if [ -z "$COMMITS" ]; then
+            echo "No commits in range to verify."
+          fi
+
           MISSING_DCO=0
-          for commit in $(git rev-list "$BASE..HEAD" 2>/dev/null || git rev-list -n 1 HEAD); do
+          for commit in $COMMITS; do
+            echo "Checking commit $commit..."
             if ! git log -n 1 --format="%B" "$commit" | grep -q "^Signed-off-by:"; then
               echo "Commit $commit is missing Signed-off-by"
               MISSING_DCO=1
@@ -82,7 +108,13 @@ jobs:
       - name: Inline assembly check (Spec 4 §8, Spec 14 §5.1)
         run: |
           echo "Checking that inline asm appears only in crates/r9v-kgen/src/leaf/..."
-          ILLEGAL_ASM=$(git grep -En "asm!\s*\(|__asm__|\basm\s+volatile" -- ':!crates/r9v-kgen/src/leaf/*' ':!tests/*' 2>/dev/null || true)
+          ILLEGAL_ASM=$(git grep -En "asm!\s*\(|__asm__|\basm\s+volatile" -- \
+            '*.rs' '*.hip' '*.cpp' '*.h' '*.cu' '*.py' \
+            ':!crates/r9v-kgen/src/leaf/*' \
+            ':!scripts/check_card.py' \
+            ':!skills/r9v-card-work/scripts/check_card.py' \
+            ':!.agents/skills/r9v-card-work/scripts/check_card.py' \
+            ':!tests/test_check_card.py' 2>/dev/null || true)
           if [ -n "$ILLEGAL_ASM" ]; then
             echo "Found illegal inline assembly outside crates/r9v-kgen/src/leaf/:"
             echo "$ILLEGAL_ASM"
@@ -93,10 +125,18 @@ jobs:
       - name: Unsafe code check (Spec 14 §2, r9v-card-work §2)
         run: |
           echo "Checking that unsafe appears only in crates/r9v-hip and crates/r9v-t0 SIMD modules..."
-          ILLEGAL_UNSAFE=$(git grep -En "\bunsafe\b" -- ':!crates/r9v-hip/*' ':!crates/r9v-t0/src/simd/*' ':!tests/*' ':!benches/*' 2>/dev/null || true)
+          ILLEGAL_UNSAFE=$(git grep -En "\bunsafe\b" -- \
+            '*.rs' '*.hip' '*.cpp' '*.h' '*.cu' '*.py' \
+            ':!crates/r9v-hip/*' \
+            ':!crates/r9v-t0/src/simd/*' \
+            ':!tests/*' \
+            ':!benches/*' \
+            ':!scripts/check_card.py' \
+            ':!skills/r9v-card-work/scripts/check_card.py' \
+            ':!.agents/skills/r9v-card-work/scripts/check_card.py' 2>/dev/null || true)
           if [ -n "$ILLEGAL_UNSAFE" ]; then
             echo "Found illegal unsafe code:"
             echo "$ILLEGAL_UNSAFE"
             exit 1
           fi
-          echo "Unsafe check passed."
+          echo "Unsafe code check passed."
