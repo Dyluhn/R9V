@@ -88,10 +88,25 @@ pub fn logits_postprocess(
         });
     }
 
-    // Validate all sampling params first (collect all violations per CONVENTIONS.md §1.4)
+    // Validate all sampling params first (collect all violations per CONVENTIONS.md §1.4).
+    let mut parameter_problems = Vec::new();
     for p in params {
-        p.validate()?;
+        if let Err(error) = p.validate() {
+            parameter_problems.push(T0Error::Ir(error));
+        }
+        for (position, &(token, _)) in p.logit_bias.iter().enumerate() {
+            if token as usize >= v {
+                parameter_problems.push(T0Error::TokenOutOfRange {
+                    op: "logits_postprocess",
+                    tensor: "logit_bias",
+                    position,
+                    token,
+                    vocab_size: v,
+                });
+            }
+        }
     }
+    T0Error::from_typed_problems(parameter_problems)?;
 
     if let Some(history) = history_counts {
         let expected_hist = s * v;
@@ -137,9 +152,7 @@ pub fn logits_postprocess(
             // 1. Sparse logit bias added before temperature (Spec 1 §4.F)
             for &(token_id, bias) in &p.logit_bias {
                 let idx = token_id as usize;
-                if idx < v {
-                    work_logits[idx] += bias;
-                }
+                work_logits[idx] += bias;
             }
 
             // 2. Penalties applied to tokens with non-zero history counts (Spec 1 §4.F)
@@ -363,20 +376,14 @@ pub fn sample(
         });
     }
 
+    for s_idx in 0..s {
+        validate_distribution(&probs[s_idx * v..(s_idx + 1) * v], "sample", s_idx, 0)?;
+    }
+
     let mut tokens = Vec::with_capacity(s);
 
     for (s_idx, rng) in rng_states.iter_mut().enumerate().take(s) {
         let p_row = &probs[s_idx * v..(s_idx + 1) * v];
-
-        let sum: f32 = p_row.iter().sum();
-        if sum <= 0.0 || !sum.is_finite() {
-            return Err(T0Error::InvalidDistribution {
-                op: "sample",
-                seq: s_idx,
-                pos: 0,
-                sum,
-            });
-        }
 
         // Draw uniform random float u in (0, 1) and advance RNG state by 1
         let u = rng.draw_uniform_f32();
@@ -425,6 +432,30 @@ pub fn verify(
         });
     }
 
+    let k_plus_one = k.checked_add(1).ok_or_else(|| T0Error::ShapeLengthMismatch {
+        op: "verify",
+        tensor: "k",
+        expected: u32::MAX as usize,
+        got: k,
+        detail: "k + 1 overflows usize".to_string(),
+    })?;
+    let terminal_draw = u32::try_from(k).map_err(|_| T0Error::ShapeLengthMismatch {
+        op: "verify",
+        tensor: "k",
+        expected: u32::MAX as usize,
+        got: k,
+        detail: "k cannot be represented by the Philox draw index".to_string(),
+    })?;
+    let draw_advance = terminal_draw
+        .checked_add(1)
+        .ok_or_else(|| T0Error::ShapeLengthMismatch {
+            op: "verify",
+            tensor: "k",
+            expected: (u32::MAX - 1) as usize,
+            got: k,
+            detail: "k + 1 cannot be represented by the Philox draw index".to_string(),
+        })?;
+
     let expected_draft = s.checked_mul(k).ok_or_else(|| T0Error::ShapeLengthMismatch {
         op: "verify",
         tensor: "draft_tokens",
@@ -441,6 +472,18 @@ pub fn verify(
             got: draft_tokens.len(),
             detail: format!("draft_tokens length != S({s}) * k({k})"),
         });
+    }
+
+    for (position, &token) in draft_tokens.iter().enumerate() {
+        if token as usize >= v {
+            return Err(T0Error::TokenOutOfRange {
+                op: "verify",
+                tensor: "draft_tokens",
+                position,
+                token,
+                vocab_size: v,
+            });
+        }
     }
 
     if let Some(dp) = draft_probs {
@@ -466,7 +509,7 @@ pub fn verify(
     }
 
     let expected_target = s
-        .checked_mul(k + 1)
+        .checked_mul(k_plus_one)
         .and_then(|sk1| sk1.checked_mul(v))
         .ok_or_else(|| T0Error::ShapeLengthMismatch {
             op: "verify",
@@ -484,7 +527,7 @@ pub fn verify(
             got: target_probs.len(),
             detail: format!(
                 "target_probs length != S({s}) * (k+1)({sk1}) * V({v})",
-                sk1 = k + 1
+                sk1 = k_plus_one
             ),
         });
     }
@@ -508,6 +551,21 @@ pub fn verify(
                 got: tree_mask.t(),
                 detail: format!("TreeMask token count T({}) != k({k})", tree_mask.t()),
             });
+        }
+    }
+
+    if let Some(dp) = draft_probs {
+        for s_idx in 0..s {
+            for pos in 0..k {
+                let offset = (s_idx * k + pos) * v;
+                validate_distribution(&dp[offset..offset + v], "verify", s_idx, pos)?;
+            }
+        }
+    }
+    for s_idx in 0..s {
+        for pos in 0..k_plus_one {
+            let offset = (s_idx * k_plus_one + pos) * v;
+            validate_distribution(&target_probs[offset..offset + v], "verify", s_idx, pos)?;
         }
     }
 
@@ -552,21 +610,26 @@ pub fn verify(
         }
     };
 
-    let mut out_accepted = vec![0u32; s * (k + 1)];
+    let mut out_accepted = vec![0u32; s * k_plus_one];
     let mut out_accept_len = vec![0u32; s];
 
     for s_idx in 0..s {
         let d_tokens = &draft_tokens[s_idx * k..(s_idx + 1) * k];
         let d_probs_row = draft_probs.map(|dp| &dp[s_idx * k * v..(s_idx + 1) * k * v]);
-        let t_probs_row = &target_probs[s_idx * (k + 1) * v..(s_idx + 1) * (k + 1) * v];
+        let t_probs_row = &target_probs[s_idx * k_plus_one * v..(s_idx + 1) * k_plus_one * v];
         let rng = &mut rng_states[s_idx];
 
-        let out_acc_slice = &mut out_accepted[s_idx * (k + 1)..(s_idx + 1) * (k + 1)];
+        let out_acc_slice = &mut out_accepted[s_idx * k_plus_one..(s_idx + 1) * k_plus_one];
 
         if k == 0 || paths.is_empty() {
             // Degenerate k=0: sample single continuation token directly from root distribution
             let root_dist = &t_probs_row[..v];
-            let bonus_tok = sample_from_distribution(root_dist, rng.draw_at(0))?;
+            let bonus_tok = match method {
+                VerifyMethod::Greedy => argmax_stable(root_dist) as u32,
+                VerifyMethod::Rejection | VerifyMethod::TypicalAcceptance { .. } => {
+                    sample_from_distribution(root_dist, rng.draw_at(0))?
+                }
+            };
             out_acc_slice[0] = bonus_tok;
             out_accept_len[s_idx] = 0;
             rng.advance(1);
@@ -639,8 +702,10 @@ pub fn verify(
                                 for r in &mut residual {
                                     *r *= inv;
                                 }
-                                terminal_token =
-                                    sample_from_distribution(&residual, rng.draw_at(k as u32))?;
+                                terminal_token = sample_from_distribution(
+                                    &residual,
+                                    rng.draw_at(terminal_draw),
+                                )?;
                             } else {
                                 // Fallback to target argmax if residual is zeroed
                                 terminal_token = argmax_stable(target_dist) as u32;
@@ -671,7 +736,7 @@ pub fn verify(
                         } else {
                             // Typical replacement sampled from target_probs[pos]
                             terminal_token =
-                                sample_from_distribution(target_dist, rng.draw_at(k as u32))?;
+                                sample_from_distribution(target_dist, rng.draw_at(terminal_draw))?;
                             false
                         }
                     }
@@ -692,7 +757,7 @@ pub fn verify(
                 terminal_token = match method {
                     VerifyMethod::Greedy => argmax_stable(bonus_dist) as u32,
                     VerifyMethod::Rejection | VerifyMethod::TypicalAcceptance { .. } => {
-                        sample_from_distribution(bonus_dist, rng.draw_at(k as u32))?
+                        sample_from_distribution(bonus_dist, rng.draw_at(terminal_draw))?
                     }
                 };
             }
@@ -725,7 +790,7 @@ pub fn verify(
         out_acc_slice[best_path_len] = best_terminal_token;
 
         // Advance RNG state by k + 1 for clean non-overlapping step keying (Spec 1 §4.F, Spec 7 §4)
-        rng.advance((k + 1) as u32);
+        rng.advance(draw_advance);
     }
 
     Ok(VerifyOutput {
@@ -751,6 +816,32 @@ fn sample_from_distribution(probs: &[f32], u: f32) -> Result<u32, T0Error> {
         }
     }
     Ok(0)
+}
+
+/// Validates one normalized probability row before sampling or verification.
+fn validate_distribution(
+    probs: &[f32],
+    op: &'static str,
+    seq: usize,
+    pos: usize,
+) -> Result<(), T0Error> {
+    for (token, &value) in probs.iter().enumerate() {
+        if !value.is_finite() || value < 0.0 {
+            return Err(T0Error::InvalidProbability {
+                op,
+                seq,
+                pos,
+                token,
+                value,
+            });
+        }
+    }
+
+    let sum: f32 = probs.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 || (sum - 1.0).abs() > 1.0e-3 {
+        return Err(T0Error::InvalidDistribution { op, seq, pos, sum });
+    }
+    Ok(())
 }
 
 /// Helper: argmax with stable tie-break by lowest index (Spec 1 §4.F, §6.5).

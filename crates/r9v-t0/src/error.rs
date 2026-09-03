@@ -166,6 +166,40 @@ pub enum T0Error {
         sum: f32,
     },
 
+    /// A token id falls outside the vocabulary addressed by an operation.
+    #[error(
+        "token id {token} at {tensor}[{position}] is outside vocabulary 0..{vocab_size} in {op}"
+    )]
+    TokenOutOfRange {
+        /// Op name.
+        op: &'static str,
+        /// Tensor or parameter name.
+        tensor: &'static str,
+        /// Flat position of the invalid token id.
+        position: usize,
+        /// Invalid token id.
+        token: u32,
+        /// Vocabulary size.
+        vocab_size: usize,
+    },
+
+    /// A probability is negative or non-finite.
+    #[error(
+        "invalid probability {value} at token {token} in {op}, sequence {seq}, position {pos}"
+    )]
+    InvalidProbability {
+        /// Op name.
+        op: &'static str,
+        /// Sequence index.
+        seq: usize,
+        /// Position index.
+        pos: usize,
+        /// Token index.
+        token: usize,
+        /// Invalid probability.
+        value: f32,
+    },
+
     /// Invalid tree structure.
     #[error("invalid tree draft structure for sequence {seq}: {detail}")]
     InvalidTree {

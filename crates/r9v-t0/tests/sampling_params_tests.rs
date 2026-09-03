@@ -171,3 +171,19 @@ fn test_stable_sort_tie_breaking_by_lowest_index() {
     assert_eq!(out[2], 0.0);
     assert_eq!(out[3], 0.0);
 }
+
+#[test]
+fn out_of_range_logit_bias_is_rejected() {
+    let mut params = base_params();
+    params.logit_bias = vec![(3, 1.0)];
+    let mut out = vec![0.0; 3];
+    let err = logits_postprocess(&[0.0; 3], 1, 1, 3, &[params], None, None, &mut out).unwrap_err();
+    assert!(matches!(
+        err,
+        r9v_t0::T0Error::TokenOutOfRange {
+            token: 3,
+            vocab_size: 3,
+            ..
+        }
+    ));
+}

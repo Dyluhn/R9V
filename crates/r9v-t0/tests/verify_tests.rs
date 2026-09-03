@@ -156,6 +156,8 @@ fn test_verify_tree_walk_longest_path_and_tie_breaking() {
     target_probs[2 * v] = 1.0;
     // Node 2 output: bonus token 2
     target_probs[3 * v + 2] = 1.0;
+    // Node 3 output: valid bonus distribution for Path B
+    target_probs[4 * v] = 1.0;
 
     let mut rng = vec![RngState::new(42, 1, 0)];
     let out = verify(
@@ -182,11 +184,15 @@ fn test_verify_tree_walk_longest_path_and_tie_breaking() {
     // Path A starts with node 0; Path B starts with node 1.
     // Spec 7 §5: "ties go to the path with the lowest first-token index"
     // Node 0 < Node 1, so Path A must win on tie!
+    target_probs[1] = 1.0;
+    target_probs[2] = 0.0;
+    target_probs[2 * v] = 0.0;
     target_probs[2 * v + 4] = 1.0; // Now node 1 output also matches node 3!
+    let tie_draft_tokens = vec![1, 1, 3, 4];
 
     let mut rng_tie = vec![RngState::new(42, 1, 0)];
     let out_tie = verify(
-        &draft_tokens,
+        &tie_draft_tokens,
         None,
         &target_probs,
         1,
@@ -202,11 +208,12 @@ fn test_verify_tree_walk_longest_path_and_tie_breaking() {
     // Path A (starting with first-token index 0) wins tie over Path B (first-token index 1)
     assert_eq!(out_tie.accepted[0], 1);
     assert_eq!(out_tie.accepted[1], 3);
+    assert_eq!(out_tie.accepted[2], 2);
 }
 
 #[test]
 fn test_verify_degenerate_k_zero() {
-    let target_probs = vec![0.0, 1.0, 0.0];
+    let target_probs = vec![0.2, 0.6, 0.2];
     let mut rng = vec![RngState::new(1, 1, 0)];
     let out = verify(
         &[],
@@ -223,4 +230,46 @@ fn test_verify_degenerate_k_zero() {
 
     assert_eq!(out.accept_len, vec![0]);
     assert_eq!(out.accepted, vec![1]);
+}
+
+#[test]
+fn verify_rejects_out_of_range_tokens_and_dimension_overflow_without_panicking() {
+    let mut rng = vec![RngState::new(1, 1, 0)];
+    let err = verify(
+        &[3],
+        None,
+        &[0.5, 0.5, 0.5, 0.5],
+        1,
+        1,
+        2,
+        &VerifyMethod::Greedy,
+        &mut rng,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        r9v_t0::T0Error::TokenOutOfRange {
+            token: 3,
+            vocab_size: 2,
+            ..
+        }
+    ));
+
+    let err = verify(
+        &[],
+        None,
+        &[],
+        1,
+        usize::MAX,
+        2,
+        &VerifyMethod::Greedy,
+        &mut rng,
+        None,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        r9v_t0::T0Error::ShapeLengthMismatch { tensor: "k", .. }
+    ));
 }
