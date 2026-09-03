@@ -210,6 +210,55 @@ pub fn quant_act(
     Ok(())
 }
 
+/// Independent 64-bit oracle encoding of an `f64` value to an OCP FP8 E4M3 byte (Spec 1 §2.1, Spec 4 §2).
+///
+/// Implemented directly from the E4M3 grid definition in `f64` arithmetic without calling the
+/// production [`crate::dtype::fp8_e4m3_encode`] (or [`crate::dtype::fp8_e4m3_decode`]), so the
+/// [`quant_act_f64_reference`] E4M3 path stays an independent check on the production encoder:
+/// magnitudes above 448.0 saturate to ±448, NaN maps to `0x7F`, signed zero is preserved, and
+/// all other values round to the nearest grid value with ties to even.
+pub fn fp8_e4m3_encode_f64_oracle(v: f64) -> u8 {
+    if v.is_nan() {
+        return 0x7F;
+    }
+    if v.abs() > 448.0 {
+        return if v < 0.0 { 0xFE } else { 0x7E };
+    }
+    if v == 0.0 {
+        return if v.is_sign_negative() { 0x80 } else { 0x00 };
+    }
+    let mut best: u8 = 0x00;
+    let mut best_d = f64::INFINITY;
+    for code in 0u16..256u16 {
+        let b = code as u8;
+        if b == 0x7F || b == 0xFF {
+            continue;
+        }
+        let grid = fp8_e4m3_grid_value_f64(b);
+        let d = (grid - v).abs();
+        if d < best_d || (d == best_d && (b & 1) == 0 && (best & 1) == 1) {
+            best_d = d;
+            best = b;
+        }
+    }
+    best
+}
+
+/// Exact `f64` value of a finite OCP FP8 E4M3 code from the format definition (Spec 1 §2.1).
+///
+/// Callers skip the two NaN codes (`0x7F`, `0xFF`); exponent zero denotes subnormals at 2^-6.
+fn fp8_e4m3_grid_value_f64(b: u8) -> f64 {
+    let s = (b >> 7) & 1;
+    let e = (b >> 3) & 0x0F;
+    let m = b & 0x07;
+    let sign = if s == 1 { -1.0f64 } else { 1.0f64 };
+    if e == 0 {
+        sign * (f64::from(m) / 8.0) * 2.0f64.powi(-6)
+    } else {
+        sign * (1.0 + f64::from(m) / 8.0) * 2.0f64.powi(i32::from(e) - 7)
+    }
+}
+
 /// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.A, Spec 2 §3.4, Spec 4 §2).
 pub fn quant_act_f64_reference(
     op: &QuantActOp,
@@ -257,7 +306,7 @@ pub fn quant_act_f64_reference(
                                 xq[idx] = 0.0f64;
                             } else {
                                 let unquant = x[idx] / s;
-                                let code = fp8_e4m3_encode(unquant as f32);
+                                let code = fp8_e4m3_encode_f64_oracle(unquant);
                                 xq[idx] = code as f64;
                             }
                         }

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Scalar T0 implementation of precision cast op (Spec 1 §4.A, §6.4, Spec 4 §2).
 
-use r9v_ir::CastOp;
+use r9v_ir::{CastOp, DType};
 
-use crate::buffer::{TensorView, TensorViewMut};
+use crate::buffer::{TensorData, TensorDataMut, TensorView, TensorViewMut};
+use crate::dtype::dtype_element_size;
 use crate::error::T0Error;
 
 /// Executes scalar T0 precision cast: `x -> y` with `y.dtype == op.dtype` (Spec 1 §4.A, Spec 1 §6.4, Spec 4 §2).
@@ -30,6 +31,14 @@ pub fn cast(op: &CastOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resul
 
     T0Error::from_problems("cast", problems)?;
 
+    // Identity casts copy raw storage bit-exactly instead of round-tripping through `f32`,
+    // which cannot represent U32/I32 magnitudes beyond 2^24 and would normalize FP8 NaN
+    // payloads (Spec 1 §2.1, Spec 1 §6.4).
+    if x.dtype() == y.dtype() {
+        copy_identity(x, y);
+        return Ok(());
+    }
+
     let num_elem = x.num_elements();
     for i in 0..num_elem {
         let val = x.read_f32(i);
@@ -37,6 +46,95 @@ pub fn cast(op: &CastOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resul
     }
 
     Ok(())
+}
+
+/// Copies one tensor to another with the same dtype without value conversion (Spec 1 §2.1, Spec 4 §2).
+///
+/// Every storage representation pair for the shared dtype moves raw bits, so large integers,
+/// NaN payloads, and packed nibbles survive unchanged. Any unexpected representation pair
+/// falls back to the `f32` value path.
+fn copy_identity(x: &TensorView<'_>, y: &mut TensorViewMut<'_>) {
+    let num_elem = x.num_elements();
+    match (&x.data, &mut y.data) {
+        (TensorData::F32(src), TensorDataMut::F32(dst)) => {
+            dst[..num_elem].copy_from_slice(&src[..num_elem]);
+        }
+        (TensorData::F16(src), TensorDataMut::F16(dst)) => {
+            dst[..num_elem].copy_from_slice(&src[..num_elem]);
+        }
+        (TensorData::Bf16(src), TensorDataMut::Bf16(dst)) => {
+            dst[..num_elem].copy_from_slice(&src[..num_elem]);
+        }
+        (TensorData::I8(src), TensorDataMut::I8(dst)) => {
+            dst[..num_elem].copy_from_slice(&src[..num_elem]);
+        }
+        (TensorData::U32(src), TensorDataMut::U32(dst)) => {
+            dst[..num_elem].copy_from_slice(&src[..num_elem]);
+        }
+        (TensorData::Bytes(dtype_x, src), TensorDataMut::Bytes(_, dst)) => {
+            let byte_count = if *dtype_x == DType::I4 {
+                num_elem / 2 + (num_elem % 2)
+            } else {
+                num_elem * dtype_element_size(*dtype_x)
+            };
+            dst[..byte_count].copy_from_slice(&src[..byte_count]);
+        }
+        (TensorData::U32(src), TensorDataMut::Bytes(_, dst)) => {
+            for (i, &val) in src[..num_elem].iter().enumerate() {
+                dst[i * 4..(i + 1) * 4].copy_from_slice(&val.to_ne_bytes());
+            }
+        }
+        (TensorData::Bytes(_, src), TensorDataMut::U32(dst)) => {
+            for (i, item) in dst[..num_elem].iter_mut().enumerate() {
+                *item = u32::from_ne_bytes(src[i * 4..(i + 1) * 4].try_into().unwrap());
+            }
+        }
+        (TensorData::F32(src), TensorDataMut::Bytes(_, dst)) => {
+            for (i, &val) in src[..num_elem].iter().enumerate() {
+                dst[i * 4..(i + 1) * 4].copy_from_slice(&val.to_ne_bytes());
+            }
+        }
+        (TensorData::Bytes(_, src), TensorDataMut::F32(dst)) => {
+            for (i, item) in dst[..num_elem].iter_mut().enumerate() {
+                *item = f32::from_ne_bytes(src[i * 4..(i + 1) * 4].try_into().unwrap());
+            }
+        }
+        (TensorData::F16(src), TensorDataMut::Bytes(_, dst)) => {
+            for (i, &val) in src[..num_elem].iter().enumerate() {
+                dst[i * 2..(i + 1) * 2].copy_from_slice(&val.to_ne_bytes());
+            }
+        }
+        (TensorData::Bytes(_, src), TensorDataMut::F16(dst)) => {
+            for (i, item) in dst[..num_elem].iter_mut().enumerate() {
+                *item = u16::from_ne_bytes(src[i * 2..(i + 1) * 2].try_into().unwrap());
+            }
+        }
+        (TensorData::Bf16(src), TensorDataMut::Bytes(_, dst)) => {
+            for (i, &val) in src[..num_elem].iter().enumerate() {
+                dst[i * 2..(i + 1) * 2].copy_from_slice(&val.to_ne_bytes());
+            }
+        }
+        (TensorData::Bytes(_, src), TensorDataMut::Bf16(dst)) => {
+            for (i, item) in dst[..num_elem].iter_mut().enumerate() {
+                *item = u16::from_ne_bytes(src[i * 2..(i + 1) * 2].try_into().unwrap());
+            }
+        }
+        (TensorData::I8(src), TensorDataMut::Bytes(_, dst)) => {
+            for (i, &val) in src[..num_elem].iter().enumerate() {
+                dst[i] = val as u8;
+            }
+        }
+        (TensorData::Bytes(_, src), TensorDataMut::I8(dst)) => {
+            for (i, item) in dst[..num_elem].iter_mut().enumerate() {
+                *item = src[i] as i8;
+            }
+        }
+        _ => {
+            for i in 0..num_elem {
+                y.write_f32(i, x.read_f32(i));
+            }
+        }
+    }
 }
 
 /// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.A, Spec 4 §2).

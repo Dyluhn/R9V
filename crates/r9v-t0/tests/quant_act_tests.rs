@@ -4,7 +4,10 @@
 
 use r9v_common::rng::SeededRng;
 use r9v_ir::{DType, QuantActOp, QuantScheme, Smoothing};
-use r9v_t0::{quant_act, quant_act_f64_reference, Tolerance, TypedBuffer};
+use r9v_t0::{
+    fp8_e4m3_decode, fp8_e4m3_encode, fp8_e4m3_encode_f64_oracle, quant_act,
+    quant_act_f64_reference, Tolerance, TypedBuffer,
+};
 
 fn generate_f32_data(rng: &mut SeededRng, len: usize, scale: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(len);
@@ -346,4 +349,192 @@ fn quant_act_rejects_invalid_per_token_target_without_panicking() {
     let msg = err.to_string();
     assert!(msg.contains("validation error(s)"));
     assert!(msg.contains("target must be i8 or e4m3") || msg.contains("only supports i8 or e4m3"));
+}
+
+/// Authoritative E4M3 golden vectors for the independent `f64` oracle (Spec 1 §2.1).
+///
+/// Hand-derived from the OCP FP8 E4M3 grid definition, not from the production encoder:
+/// a regression in either implementation breaks this test from opposite sides.
+#[test]
+fn e4m3_f64_oracle_golden_vectors() {
+    let cases: &[(f64, u8)] = &[
+        (0.0, 0x00),
+        (-0.0, 0x80),
+        (1.0, 0x38),
+        (-1.0, 0xB8),
+        (2.0, 0x40),
+        (0.5, 0x30),
+        (0.015625, 0x08),
+        (0.001953125, 0x01),
+        (0.013671875, 0x07),
+        (1.125, 0x39),
+        (0.1, 0x1D),
+        (1.0625, 0x38),  // exact tie between 1.0 and 1.125 rounds to even
+        (-1.0625, 0xB8), // exact tie between -1.0 and -1.125 rounds to even
+        (1.1875, 0x3A),  // exact tie between 1.125 and 1.25 rounds to even
+        (448.0, 0x7E),
+        (-448.0, 0xFE),
+        (500.0, 0x7E),  // saturates to +448
+        (-500.0, 0xFE), // saturates to -448
+        (f64::INFINITY, 0x7E),
+        (f64::NEG_INFINITY, 0xFE),
+        (f64::NAN, 0x7F),
+        (-f64::NAN, 0x7F),
+    ];
+    for &(input, expected) in cases {
+        assert_eq!(
+            fp8_e4m3_encode_f64_oracle(input),
+            expected,
+            "oracle golden mismatch for input {input}"
+        );
+    }
+}
+
+/// The same goldens through the production encoder (Spec 1 §2.1).
+///
+/// Uses only hard-coded expectations, never the oracle, so a production regression fails here
+/// even if the oracle were wrong.
+#[test]
+fn e4m3_production_encoder_golden_vectors() {
+    let cases: &[(f32, u8)] = &[
+        (0.0, 0x00),
+        (-0.0, 0x80),
+        (1.0, 0x38),
+        (-1.0, 0xB8),
+        (2.0, 0x40),
+        (0.5, 0x30),
+        (0.015625, 0x08),
+        (0.001953125, 0x01),
+        (0.013671875, 0x07),
+        (1.125, 0x39),
+        (0.1, 0x1D),
+        (1.0625, 0x38),
+        (-1.0625, 0xB8),
+        (1.1875, 0x3A),
+        (448.0, 0x7E),
+        (-448.0, 0xFE),
+        (500.0, 0x7E),
+        (-500.0, 0xFE),
+        (f32::INFINITY, 0x7E),
+        (f32::NEG_INFINITY, 0xFE),
+        (f32::NAN, 0x7F),
+    ];
+    for &(input, expected) in cases {
+        assert_eq!(
+            fp8_e4m3_encode(input),
+            expected,
+            "production golden mismatch for input {input}"
+        );
+    }
+}
+
+/// Every finite E4M3 code round-trips through the production encoder (Spec 1 §2.1).
+///
+/// Encodes each exactly-representable grid value and requires the original byte back;
+/// a production regression in saturation, NaN skipping, or nearest selection breaks this.
+#[test]
+fn e4m3_grid_values_roundtrip_through_production_encoder() {
+    for code in 0u16..256u16 {
+        let b = code as u8;
+        if b == 0x7F || b == 0xFF {
+            continue;
+        }
+        let grid = fp8_e4m3_decode(b);
+        assert_eq!(
+            fp8_e4m3_encode(grid),
+            b,
+            "roundtrip mismatch for code {b:#04X} (grid value {grid})"
+        );
+    }
+}
+
+/// Exact midpoints between adjacent grid codes round to even in both implementations (Spec 1 §2.1).
+///
+/// A flipped tie-break in the production encoder fails this while the oracle still passes.
+#[test]
+fn e4m3_midpoint_ties_round_to_even() {
+    for code in 0u16..255u16 {
+        let lo = code as u8;
+        let hi = (code + 1) as u8;
+        if lo == 0x7F || lo == 0xFF || hi == 0x7F || hi == 0xFF {
+            continue;
+        }
+        if lo == 0x80 {
+            // Midpoint between -0.0 and the first negative subnormal is a three-way
+            // tie with +0.0; pinned separately below.
+            continue;
+        }
+        let mid = (f64::from(fp8_e4m3_decode(lo)) + f64::from(fp8_e4m3_decode(hi))) / 2.0;
+        let expected = if lo & 1 == 0 { lo } else { hi };
+        assert_eq!(
+            fp8_e4m3_encode(mid as f32),
+            expected,
+            "production tie mismatch between {lo:#04X} and {hi:#04X}"
+        );
+        assert_eq!(
+            fp8_e4m3_encode_f64_oracle(mid),
+            expected,
+            "oracle tie mismatch between {lo:#04X} and {hi:#04X}"
+        );
+    }
+}
+
+/// The midpoint between -0.0 (`0x80`) and the first negative subnormal (`0x81`) ties
+/// three ways with +0.0 (`0x00`); both implementations keep the first even code (Spec 1 §2.1).
+#[test]
+fn e4m3_negative_zero_midpoint_three_way_tie() {
+    let mid = (f64::from(fp8_e4m3_decode(0x80)) + f64::from(fp8_e4m3_decode(0x81))) / 2.0;
+    assert_eq!(fp8_e4m3_encode(mid as f32), 0x00);
+    assert_eq!(fp8_e4m3_encode_f64_oracle(mid), 0x00);
+}
+
+/// Seeded sweep requiring exact production/oracle agreement across the full range (Spec 1 §2.1).
+///
+/// Covers subnormals, normals, ties, and the saturation zone with a fixed seed, so the test
+/// is deterministic; any production regression shows up as a mismatch against the oracle.
+#[test]
+fn e4m3_production_matches_independent_oracle_on_seeded_sweep() {
+    let mut rng = SeededRng::new(0xA1_5075);
+    for _ in 0..4096 {
+        let raw = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+        let v = (f64::from(raw) / f64::from(u32::MAX)) * 1200.0 - 600.0;
+        let f = v as f32;
+        assert_eq!(
+            fp8_e4m3_encode(f),
+            fp8_e4m3_encode_f64_oracle(f64::from(f)),
+            "production/oracle mismatch at {f}"
+        );
+    }
+    for _ in 0..1024 {
+        let raw = (rng.next_u64() & 0xFFFF_FFFF) as u32;
+        let v = (f64::from(raw) / f64::from(u32::MAX)) * 0.03 - 0.015;
+        let f = v as f32;
+        assert_eq!(
+            fp8_e4m3_encode(f),
+            fp8_e4m3_encode_f64_oracle(f64::from(f)),
+            "production/oracle subnormal mismatch at {f}"
+        );
+    }
+}
+
+/// Pins the `quant_act_f64_reference` E4M3 path itself to golden bytes (Spec 1 §4.A).
+///
+/// With `absmax == 448.0` the scale is exactly 1.0, so each output byte is the oracle
+/// encoding of the input value; hard-coded expectations keep the reference honest
+/// without involving the production encoder at all.
+#[test]
+fn quant_act_f64_reference_e4m3_matches_golden_bytes() {
+    let op = QuantActOp {
+        scheme: QuantScheme::PerToken,
+        target: DType::E4m3,
+        smoothing: Smoothing::None,
+    };
+    let x = vec![0.0, 1.0, -1.0, 448.0, -448.0, f64::NAN, 0.5, -0.0];
+    let (ref_xq, ref_scale) = quant_act_f64_reference(&op, &x, [1, 8]);
+    assert_eq!(ref_scale[0], 1.0);
+    let expected: Vec<f64> = vec![0x00, 0x38, 0xB8, 0x7E, 0xFE, 0x7F, 0x30, 0x80]
+        .into_iter()
+        .map(f64::from)
+        .collect();
+    assert_eq!(ref_xq, expected);
 }

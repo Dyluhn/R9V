@@ -32,7 +32,7 @@ pub use dtype::{
 };
 pub use error::T0Error;
 pub use norm::{norm, norm_f64_reference};
-pub use quant_act::{quant_act, quant_act_f64_reference};
+pub use quant_act::{fp8_e4m3_encode_f64_oracle, quant_act, quant_act_f64_reference};
 pub use residual_add::{residual_add, residual_add_f64_reference};
 pub use rope::{rope, rope_f64_reference};
 pub use tolerance::Tolerance;
