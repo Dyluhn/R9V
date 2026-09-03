@@ -76,6 +76,13 @@ pub enum FormatError {
         /// The unrecognized code or name.
         value: String,
     },
+    /// An unknown GGUF `ggml_type` code was supplied (Spec 2 §7 step
+    /// 1: unknown type → hard error naming the type).
+    #[error("unknown ggml type {code} (Spec 2 §7)")]
+    UnknownGgmlType {
+        /// The unrecognized numeric `ggml_type` code.
+        code: u32,
+    },
     /// A repack-only scheme was used where only native behavior exists
     /// (Spec 2 §3.3: repack rules and reference dequant for these ids
     /// are owned by cards A2.3/A2.4, not A2.2).
