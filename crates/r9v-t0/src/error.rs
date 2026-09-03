@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Error types for the R9V T0 CPU reference implementation (Spec 4 §2, CONVENTIONS.md §1).
+//! Error types for the R9V T0 CPU reference implementation
+//! (Spec 1 §4.B, §4.F, Spec 4 §2, CONVENTIONS.md §1, Cards A1.5 and A1.8).
 
 use r9v_ir::DType;
 
@@ -112,6 +113,111 @@ pub enum T0Error {
         /// Vector of formatted problem descriptions.
         problems: Vec<String>,
     },
+
+    /// Flat-slice length mismatch for sampling ops (Spec 1 §4.F).
+    ///
+    /// Renamed from the A1.8 `DimensionMismatch` so it cannot collide with the
+    /// A1.5 symbolic-dimension `DimensionMismatch` above, which carries
+    /// `(dim_name, expected_from, ...)` instead of `(op, detail)`.
+    #[error("shape length mismatch in {op}: tensor {tensor} expected length {expected}, got {got}; detail: {detail}")]
+    ShapeLengthMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Tensor name.
+        tensor: &'static str,
+        /// Expected size/length.
+        expected: usize,
+        /// Actual size/length.
+        got: usize,
+        /// Extra detail.
+        detail: String,
+    },
+
+    /// Empty tensor or slice where non-empty was required.
+    #[error("empty tensor in {op}: {tensor} has length 0")]
+    EmptyInput {
+        /// Op name.
+        op: &'static str,
+        /// Tensor name.
+        tensor: &'static str,
+    },
+
+    /// All tokens masked out by grammar mask.
+    #[error("all tokens masked out by grammar mask in sequence {seq}, query {query}; vocabulary size was {vocab_size}")]
+    AllTokensMasked {
+        /// Sequence index.
+        seq: usize,
+        /// Query index.
+        query: usize,
+        /// Vocab size.
+        vocab_size: usize,
+    },
+
+    /// Invalid probability distribution.
+    #[error("invalid probability distribution in {op} for sequence {seq}, position {pos}: sum is {sum}, expected positive finite sum")]
+    InvalidDistribution {
+        /// Op name.
+        op: &'static str,
+        /// Sequence index.
+        seq: usize,
+        /// Position index.
+        pos: usize,
+        /// Observed sum.
+        sum: f32,
+    },
+
+    /// A token id falls outside the vocabulary addressed by an operation.
+    #[error(
+        "token id {token} at {tensor}[{position}] is outside vocabulary 0..{vocab_size} in {op}"
+    )]
+    TokenOutOfRange {
+        /// Op name.
+        op: &'static str,
+        /// Tensor or parameter name.
+        tensor: &'static str,
+        /// Flat position of the invalid token id.
+        position: usize,
+        /// Invalid token id.
+        token: u32,
+        /// Vocabulary size.
+        vocab_size: usize,
+    },
+
+    /// A probability is negative or non-finite.
+    #[error(
+        "invalid probability {value} at token {token} in {op}, sequence {seq}, position {pos}"
+    )]
+    InvalidProbability {
+        /// Op name.
+        op: &'static str,
+        /// Sequence index.
+        seq: usize,
+        /// Position index.
+        pos: usize,
+        /// Token index.
+        token: usize,
+        /// Invalid probability.
+        value: f32,
+    },
+
+    /// Invalid tree structure.
+    #[error("invalid tree draft structure for sequence {seq}: {detail}")]
+    InvalidTree {
+        /// Sequence index.
+        seq: usize,
+        /// Reason for failure.
+        detail: String,
+    },
+
+    /// Multiple coexisting typed validation problems (Spec 1 §4.F).
+    ///
+    /// Renamed from the A1.8 `Multiple` so it cannot collide with the A1.5
+    /// `Multiple` above, which carries `(op, count, problems: Vec<String>)`.
+    #[error("multiple T0 validation problems ({} failures): {problems:?}", problems.len())]
+    MultipleErrors {
+        /// Accumulated problems.
+        problems: Box<[T0Error]>,
+    },
 }
 
 impl T0Error {
@@ -124,6 +230,24 @@ impl T0Error {
                 op,
                 count: problems.len(),
                 problems,
+            })
+        }
+    }
+
+    /// Aggregates typed problems: `Ok(())` if empty, the single error if one,
+    /// or `MultipleErrors` otherwise (Spec 1 §4.F).
+    ///
+    /// Renamed from the A1.8 `from_problems` so it cannot collide with the
+    /// A1.5 `from_problems(op, problems: Vec<String>)` above.
+    pub fn from_typed_problems(mut problems: Vec<T0Error>) -> Result<(), Self> {
+        if problems.is_empty() {
+            Ok(())
+        } else if problems.len() == 1 {
+            // Invariant: length was just checked to be exactly 1, so pop cannot fail.
+            Err(problems.pop().expect("exactly one problem"))
+        } else {
+            Err(Self::MultipleErrors {
+                problems: problems.into_boxed_slice(),
             })
         }
     }

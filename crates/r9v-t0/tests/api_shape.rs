@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #![allow(clippy::needless_range_loop)]
-//! API shape verification for r9v-t0 crate (CONVENTIONS.md §3).
+//! API shape verification for r9v-t0 crate (CONVENTIONS.md §3, Cards A1.5 and A1.8).
 
+use r9v_ir::{SamplingParams, VerifyMethod};
 use r9v_t0::*;
 
 fn assert_send<T: Send>() {}
@@ -255,4 +256,85 @@ fn test_backing_length_validation_rejects_undersized_and_overflowed_storage() {
         }
         other => panic!("expected BufferLengthMismatch, got {other:?}"),
     }
+}
+
+#[test]
+fn test_type_markers_and_traits() {
+    assert_send::<RngState>();
+    assert_sync::<RngState>();
+
+    assert_send::<VerifyOutput>();
+    assert_sync::<VerifyOutput>();
+
+    assert_send::<T0Error>();
+    assert_sync::<T0Error>();
+
+    // Check trait implementations
+    let rng = RngState::new(42, 1, 0);
+    let rng_clone = rng.clone();
+    assert_eq!(rng, rng_clone);
+    assert_eq!(rng.seed(), 42);
+    assert_eq!(rng.seq_id(), 1);
+    assert_eq!(rng.step(), 0);
+    assert_eq!(rng.draw_index(), 0);
+
+    let output = VerifyOutput {
+        accepted: vec![1, 2, 3],
+        accept_len: vec![2],
+    };
+    let output_clone = output.clone();
+    assert_eq!(output, output_clone);
+
+    let err = T0Error::EmptyInput {
+        op: "sample",
+        tensor: "probs",
+    };
+    let display_str = format!("{err}");
+    assert!(display_str.contains("empty tensor in sample: probs"));
+}
+
+#[test]
+fn test_public_function_signatures() {
+    // Verify logits_postprocess signature compiles and is accessible
+    let logits = vec![1.0, 2.0];
+    let params = vec![SamplingParams {
+        temperature: 1.0,
+        top_k: 0,
+        top_p: 1.0,
+        min_p: 0.0,
+        repetition_penalty: 1.0,
+        presence_penalty: 0.0,
+        frequency_penalty: 0.0,
+        logit_bias: vec![],
+    }];
+    let mut probs = vec![0.0; 2];
+    let res = logits_postprocess(&logits, 1, 1, 2, &params, None, None, &mut probs);
+    assert!(res.is_ok());
+
+    // Verify sample signature
+    let mut rng_states = vec![RngState::new(1, 0, 0)];
+    let res_sample = sample(&probs, 1, 2, &mut rng_states);
+    assert!(res_sample.is_ok());
+
+    // Verify verify signature
+    let draft_tokens = vec![1];
+    let target_probs = vec![0.1, 0.9, 0.8, 0.2];
+    let res_verify = verify(
+        &draft_tokens,
+        None,
+        &target_probs,
+        1,
+        1,
+        2,
+        &VerifyMethod::Greedy,
+        &mut rng_states,
+        None,
+    );
+    assert!(res_verify.is_ok());
+
+    // Verify low-level Philox primitives
+    let words = philox4x32_10([0, 0, 0, 0], [0, 0]);
+    assert_eq!(words.len(), 4);
+    let u = u32_to_unit_f32(words[0]);
+    assert!(u > 0.0 && u < 1.0);
 }
