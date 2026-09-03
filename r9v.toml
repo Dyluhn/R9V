@@ -1,0 +1,180 @@
+# Generated from r9v-config schema (Spec 12 §2). Do not maintain a parallel setting list.
+config_version = 1
+
+[load]
+# Primary model artifact path.
+# type: path; default: (none); mutability: Load
+model = "(none)"
+
+# Draft model artifact path, if any.
+# type: path; default: none; mutability: Load
+draft_model = "none"
+
+# Eagle head artifact path, if any.
+# type: path; default: none; mutability: Load
+eagle_head = "none"
+
+# Cache directory. auto = beside the model.
+# type: Auto<path>; default: auto (beside model); mutability: Load
+cache_dir = "auto"
+
+# Require the fast execution path at load.
+# type: bool; default: false; mutability: Load
+require_fast_path = false
+
+[io]
+# IO mode for weight reads. auto = direct I/O when supported, otherwise mmap.
+# type: Auto<IoMode>; default: auto; mutability: Load; constraint: direct|mmap|auto
+mode = "auto"
+
+# Read chunk size.
+# type: u32; default: 16; mutability: Load; constraint: 1..=1024; unit: MB
+chunk_mb = 16
+
+# IO queue depth.
+# type: u32; default: 8; mutability: Load; constraint: 1..=128
+queue_depth = 8
+
+# Repack worker threads. auto = cores minus 2.
+# type: Auto<u32>; default: auto (cores-2); mutability: Load; constraint: 1..=256
+repack_threads = "auto"
+
+[host]
+# Pinned host-memory budget. auto = min(free minus 4 GB, need).
+# type: Auto<bytes>; default: auto (min(free-4GB, need)); mutability: Load; unit: bytes
+pinned_budget = "auto"
+
+[warmup]
+# Run warmup over the bucket set at load.
+# type: bool; default: true; mutability: Load
+enabled = true
+
+# Warmup buckets over S, T_dec and T_pre.
+# type: buckets; default: {S:[1,2,4], T_dec:[1,2,4,8,16,32], T_pre:[0,128,512,2048]}; mutability: Load
+buckets = { S = [1, 2, 4], T_dec = [1, 2, 4, 8, 16, 32], T_pre = [0, 128, 512, 2048] }
+
+[state]
+# Maximum context length; must be a multiple of 32.
+# type: u32; default: 32768; mutability: Reload; constraint: 32..=1048576
+max_ctx = 32768
+
+# Maximum concurrent sequences.
+# type: u32; default: 8; mutability: Reload; constraint: 1..=1024
+max_seqs = 8
+
+# KV cache dtype.
+# type: CacheDtype; default: e4m3; mutability: Reload; constraint: e4m3|i8|f16
+cache_dtype = "e4m3"
+
+# Bytes reserved outside the state pool.
+# type: bytes; default: 512 MB; mutability: Reload; unit: bytes
+reserve_bytes = "512 MB"
+
+# Host block spill budget; 0 disables spilling.
+# type: bytes; default: 0; mutability: Reload; unit: bytes
+host_block_budget = "0"
+
+# Retained sessions per GB of cache.
+# type: u32; default: 2; mutability: Runtime; constraint: 0..=64
+session_cache = 2
+
+[scheduler]
+# Target wall time per step in milliseconds. Prefill chunks and speculative depth are sized so the step fits. auto = 1.25 x measured single-sequence step time (latency) or 8 x (throughput), resolved at warmup on the loaded plan.
+# type: Auto<f32>; default: auto; mutability: Runtime; constraint: 1.0..=1000.0; unit: ms
+step_budget_ms = "auto"
+
+# Minimum prefill chunk.
+# type: u32; default: 128; mutability: Runtime; constraint: 1..=16384; unit: tokens
+prefill_min_chunk = 128
+
+# Maximum prefill chunk.
+# type: u32; default: 2048; mutability: Runtime; constraint: 1..=16384; unit: tokens
+prefill_max_chunk = 2048
+
+# Maximum time a request waits before a step starts.
+# type: u32; default: 500; mutability: Runtime; constraint: 0..=60000; unit: ms
+max_wait_ms = 500
+
+[graph]
+# Graph capture mode. auto = measured at warmup.
+# type: Auto<GraphMode>; default: auto (measured); mutability: Reload; constraint: auto|list|hipgraph
+mode = "auto"
+
+[spec]
+# Speculative proposer. auto = MTP, Eagle, draft, then n-gram according to loaded artifacts.
+# type: Auto<ProposerKind>; default: auto; mutability: Reload; constraint: auto|none|ngram|mtp|draft|eagle
+proposer = "auto"
+
+# Maximum speculative draft depth; k + 1 verified positions must fit the decode-class limit.
+# type: u32; default: 8; mutability: Runtime; constraint: 0..=15
+k_max = 8
+
+# Maximum speculative tree size.
+# type: u32; default: 16; mutability: Runtime; constraint: 1..=16
+tree_max = 16
+
+# Disable speculation temporarily when the recent acceptance EMA is below this value.
+# type: f32; default: 0.3; mutability: Runtime; constraint: 0.0..=1.0
+min_accept = 0.3
+
+# Permit opt-in lossy Typical acceptance.
+# type: bool; default: false; mutability: Runtime
+lossy = false
+
+[spec.ngram]
+# N-gram width.
+# type: u32; default: 3; mutability: Runtime; constraint: 1..=16
+n = 3
+
+# Minimum match length to propose.
+# type: u32; default: 2; mutability: Runtime; constraint: 1..=16
+min_match = 2
+
+[kernels]
+# Allow just-in-time kernel builds.
+# type: bool; default: true; mutability: Load
+allow_jit = true
+
+# Allow kernels that may be nondeterministic.
+# type: bool; default: false; mutability: Load
+allow_nondeterministic = false
+
+# Autotune time budget.
+# type: u64; default: 2000; mutability: Load; constraint: 0..=600000; unit: ms
+tune_budget_ms = 2000
+
+[profile]
+# Profiling mode.
+# type: ProfileMode; default: step; mutability: Runtime; constraint: step|kernel|off
+mode = "step"
+
+[log]
+# Log level.
+# type: LogLevel; default: info; mutability: Runtime; constraint: trace|debug|info|warn|error
+level = "info"
+
+# Log file path; none disables file logging.
+# type: path; default: none; mutability: Runtime
+file = "none"
+
+[doctor]
+# Include token text in the doctor bundle.
+# type: bool; default: false; mutability: Runtime
+include_tokens = false
+
+# Redact secrets in the doctor bundle.
+# type: bool; default: true; mutability: Runtime
+redact = true
+
+[bench]
+# Measured repeats per benchmark.
+# type: u32; default: 5; mutability: Runtime; constraint: 1..=100
+repeats = 5
+
+# Warmup runs before measurement.
+# type: u32; default: 2; mutability: Runtime; constraint: 0..=100
+warmup = 2
+
+# Benchmark suites to run.
+# type: [str]; default: [decode, decode-spec, prefill, multi]; mutability: Runtime
+suites = ["decode", "decode-spec", "prefill", "multi"]

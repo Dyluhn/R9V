@@ -1,0 +1,16 @@
+[package]
+name = "r9v-config-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Internal proc macros for r9v-config (section/setting)"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
