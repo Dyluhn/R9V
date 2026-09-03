@@ -24,7 +24,7 @@ use r9v_ir::version::IrVersion;
 use r9v_ir::{DType, LayoutId, QuantScheme};
 
 use crate::error::ModelsError;
-use crate::spec::{CacheDtype, NormSpec, PositionEncoding, RopeSpec, StateSpec};
+use crate::spec::{CacheDtype, NormSpec, PositionEncoding, RopeSpec, StateDecl, StateSpec};
 use crate::summary::{ExpertSummary, LayerSummary, MixerKind, ModelSummary, SchemeKey};
 
 mod sealed {
@@ -1299,6 +1299,14 @@ impl ModelGraph {
     /// Slices of all state specifications and handles.
     pub fn state_specs(&self) -> &[(u32, StateSpec, StateHandle)] {
         &self.state_specs
+    }
+
+    /// Emitted per-layer state declarations retaining declaring model layer indices (Spec 3 §2, Spec 8 §2).
+    pub fn state_declarations(&self) -> Vec<StateDecl> {
+        self.state_specs
+            .iter()
+            .map(|(l, s, _)| StateDecl::new(*l, *s))
+            .collect()
     }
 
     /// Slices of all exported graph output values.

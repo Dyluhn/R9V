@@ -21,8 +21,8 @@ use r9v_ir::{BatchMeta, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
 
 use crate::error::{InvalidItem, StateError, StateResult};
 use crate::spec::{
-    group_layers, LayerGroup, StateSpec, BLOCK_TOKENS, MAX_BATCH_TOKENS_HARD, MAX_CTX_HARD,
-    MAX_GROUPS_HARD, MAX_LAYERS_HARD, MAX_RESERVE_HARD, MAX_SEQS_HARD,
+    group_layer_specs, group_layers, LayerGroup, StateDecl, StateSpec, BLOCK_TOKENS,
+    MAX_BATCH_TOKENS_HARD, MAX_CTX_HARD, MAX_RESERVE_HARD, MAX_SEQS_HARD,
 };
 
 /// Slot value for layer-groups with no per-token slots (recurrent/conv).
@@ -349,32 +349,58 @@ impl StateManager {
         layer_specs: Vec<StateSpec>,
         pool_bytes: u64,
     ) -> StateResult<Self> {
-        config.validate()?;
-        let mut problems = Vec::new();
-        if layer_specs.len() > MAX_LAYERS_HARD as usize {
-            problems.push(InvalidItem {
-                index: u32::MAX,
-                reason: format!(
-                    "layers={} exceeds cap {}",
-                    layer_specs.len(),
-                    MAX_LAYERS_HARD
-                ),
-            });
-        }
-        for (i, spec) in layer_specs.iter().enumerate() {
-            spec.validate(i as u32, &mut problems);
-        }
-        let groups = group_layers(&layer_specs);
-        if groups.len() > MAX_GROUPS_HARD {
-            problems.push(InvalidItem {
-                index: u32::MAX,
-                reason: format!("groups={} exceeds cap {}", groups.len(), MAX_GROUPS_HARD),
-            });
-        }
-        if !problems.is_empty() {
-            return Err(StateError::invalid(problems));
-        }
+        let config_res = config.validate();
+        let groups_res = group_layers(&layer_specs);
 
+        let groups = match (config_res, groups_res) {
+            (
+                Err(StateError::InvalidConfig { problems: mut cp }),
+                Err(StateError::InvalidConfig { problems: mut gp }),
+            ) => {
+                cp.append(&mut gp);
+                return Err(StateError::InvalidConfig { problems: cp });
+            }
+            (Err(e), _) => return Err(e),
+            (_, Err(e)) => return Err(e),
+            (Ok(()), Ok(groups)) => groups,
+        };
+
+        Self::new_from_validated_groups(config, groups, pool_bytes)
+    }
+
+    /// Builds the manager from explicit state declarations retaining declaring model layer indices (Spec 3 §2, §6.3).
+    ///
+    /// Supports hybrid layers declaring multiple state specifications (e.g. ConvWindow and Recurrent)
+    /// with identical layer indices.
+    pub fn new_with_declarations(
+        config: StateConfig,
+        declarations: Vec<StateDecl>,
+        pool_bytes: u64,
+    ) -> StateResult<Self> {
+        let config_res = config.validate();
+        let groups_res = group_layer_specs(&declarations);
+
+        let groups = match (config_res, groups_res) {
+            (
+                Err(StateError::InvalidConfig { problems: mut cp }),
+                Err(StateError::InvalidConfig { problems: mut gp }),
+            ) => {
+                cp.append(&mut gp);
+                return Err(StateError::InvalidConfig { problems: cp });
+            }
+            (Err(e), _) => return Err(e),
+            (_, Err(e)) => return Err(e),
+            (Ok(()), Ok(groups)) => groups,
+        };
+
+        Self::new_from_validated_groups(config, groups, pool_bytes)
+    }
+
+    fn new_from_validated_groups(
+        config: StateConfig,
+        groups: Vec<LayerGroup>,
+        pool_bytes: u64,
+    ) -> StateResult<Self> {
         let max_blocks = config.max_blocks();
         let max_seqs = config.max_seqs;
         let overflow = |what: &str| StateError::Overflow {
@@ -411,40 +437,55 @@ impl StateManager {
         // DECISION(A1.11): after fixed pools, split the usable paged bytes in
         // proportion to group block costs so every paged group gets the same
         // aggregate block capacity, at least max_ctx/32 per group (Spec 3
-        // §6.3 aggregate sizing); rejected: per-sequence full-context pools
-        // (max_seqs times max_ctx contradicts the aggregate minimum) and
-        // shrinking groups unevenly (would make admission depend on group
-        // mix instead of failing loudly at construction).
-        let mut sum_block: u64 = 0;
-        let mut paged_count: u64 = 0;
-        for g in &groups {
-            if !g.spec.is_paged() {
-                continue;
-            }
-            sum_block = sum_block
-                .checked_add(g.block_bytes()?)
-                .ok_or_else(|| overflow("paged block cost total"))?;
-            paged_count = paged_count
-                .checked_add(1)
-                .ok_or_else(|| overflow("paged group count"))?;
+        // §6.3: the minimum pool size must guarantee full context for one
+        // sequence across all groups).
+        let paged_groups: Vec<&LayerGroup> = groups.iter().filter(|g| g.spec.is_paged()).collect();
+        let mut block_cost_sum: u64 = 0;
+        for g in &paged_groups {
+            let bb = g.block_bytes()?;
+            block_cost_sum = block_cost_sum
+                .checked_add(bb)
+                .ok_or_else(|| overflow("block cost sum"))?;
         }
-        let blocks_per_group: u32 = if paged_count == 0 {
-            0
+
+        let (blocks_per_group, assigned_paged) = if paged_groups.is_empty() {
+            // Purely recurrent / conv model: no paged pools.
+            (0u32, 0u64)
         } else {
-            let Some(capacity) = usable.checked_div(sum_block) else {
-                return Err(StateError::invalid(vec![InvalidItem {
+            let blocks_u64 = usable.checked_div(block_cost_sum).ok_or_else(|| {
+                StateError::invalid(vec![InvalidItem {
                     index: u32::MAX,
                     reason: "paged block cost is zero; cannot proportion the pool".to_owned(),
-                }]));
-            };
-            if capacity < u64::from(max_blocks) {
+                }])
+            })?;
+            let blocks_per_group =
+                u32::try_from(blocks_u64).map_err(|_| StateError::InvalidConfig {
+                    problems: vec![InvalidItem {
+                        index: u32::MAX,
+                        reason: format!(
+                            "assigned blocks_per_group={blocks_u64} exceeds u32 slot_map range {}",
+                            MAX_SLOT_BLOCKS
+                        ),
+                    }],
+                })?;
+            if blocks_per_group > MAX_SLOT_BLOCKS {
+                return Err(StateError::InvalidConfig {
+                    problems: vec![InvalidItem {
+                        index: u32::MAX,
+                        reason: format!(
+                            "assigned blocks_per_group={blocks_per_group} exceeds u32 slot_map range {}",
+                            MAX_SLOT_BLOCKS
+                        ),
+                    }],
+                });
+            }
+            if blocks_per_group < max_blocks {
                 let need_paged = u64::from(max_blocks)
-                    .checked_mul(sum_block)
+                    .checked_mul(block_cost_sum)
                     .ok_or_else(|| overflow("minimum paged pool"))?;
                 let required = fixed_total
                     .checked_add(need_paged)
                     .ok_or_else(|| overflow("minimum pool"))?;
-                // Safe: this branch runs only when `pool_bytes < required`.
                 let shortfall = required - pool_bytes;
                 return Err(StateError::invalid(vec![InvalidItem {
                     index: u32::MAX,
@@ -453,23 +494,12 @@ impl StateManager {
                     ),
                 }]));
             }
-            // Flattened slots are u32: refuse a capacity whose flattened
-            // slots could collide with `SLOT_NONE` (`u32::MAX`), before
-            // any pool is built.
-            if capacity > u64::from(MAX_SLOT_BLOCKS) {
-                return Err(StateError::invalid(vec![InvalidItem {
-                    index: u32::MAX,
-                    reason: format!(
-                        "pool capacity {capacity} blocks exceeds u32 slot_map range {MAX_SLOT_BLOCKS}; supply a smaller pool",
-                    ),
-                }]));
-            }
-            // Safe: `capacity <= MAX_SLOT_BLOCKS < u32::MAX`.
-            capacity as u32
+            let assigned = u64::from(blocks_per_group)
+                .checked_mul(block_cost_sum)
+                .ok_or_else(|| overflow("assigned paged bytes"))?;
+            (blocks_per_group, assigned)
         };
-        let assigned_paged = u64::from(blocks_per_group)
-            .checked_mul(sum_block)
-            .ok_or_else(|| overflow("assigned paged pool"))?;
+
         // Safe: `assigned_paged <= usable` by construction of the division.
         let unusable = usable - assigned_paged;
 
@@ -574,7 +604,7 @@ impl StateManager {
                 what: "live sequence count".to_owned(),
             })?;
         // DECISION(A1.15): sequence allocation checks that next_seq <= u32::MAX before mutating state; rejected lossy as-casts, rollover, batch-local indexing that breaks Philox batch invariance, and unbounded host-to-device ID maps. Spec 1 §2.5, §4.F, Spec 3 §5, SI-40.
-        if self.next_seq > u32::MAX as u64 {
+        if self.next_seq > u64::from(u32::MAX) {
             return Err(StateError::SeqIdOverflow {
                 seq: self.next_seq,
                 max: u32::MAX,
@@ -1511,14 +1541,14 @@ impl StateManager {
         let mut problems: Vec<String> = Vec::new();
         let mut seen: BTreeSet<u64> = BTreeSet::new();
         for (i, seq) in seqs.iter().enumerate() {
+            if seq.as_u64() > u64::from(u32::MAX) {
+                return Err(StateError::SeqIdOverflow {
+                    seq: seq.as_u64(),
+                    max: u32::MAX,
+                });
+            }
             if !seen.insert(seq.as_u64()) {
                 problems.push(format!("batch[{i}]: duplicate sequence {}", seq.as_u64()));
-            }
-            if seq.as_u64() > u32::MAX as u64 {
-                problems.push(format!(
-                    "batch[{i}]: sequence id {} exceeds device u32 width (SI-40)",
-                    seq.as_u64()
-                ));
             }
         }
         let mut total: u64 = 0;
@@ -1551,7 +1581,9 @@ impl StateManager {
                 "batch tokens={total} exceed cap {MAX_BATCH_TOKENS_HARD}"
             ));
         }
-        let total_tokens = total as usize;
+        let total_tokens = usize::try_from(total).map_err(|_| StateError::Overflow {
+            what: "total tokens conversion".to_owned(),
+        })?;
         if let Some(ref pos) = positions {
             if pos.len() != total_tokens {
                 problems.push(format!(
@@ -1609,8 +1641,14 @@ impl StateManager {
                 })?;
         let mut flat_slot_map = Vec::with_capacity(total_slots);
 
-        let total_blocks = (self.groups.len() * seqs.len())
-            .checked_mul(self.max_blocks as usize)
+        let max_b = usize::try_from(self.max_blocks).map_err(|_| StateError::Overflow {
+            what: "max blocks conversion".to_owned(),
+        })?;
+        let total_blocks = self
+            .groups
+            .len()
+            .checked_mul(seqs.len())
+            .and_then(|v| v.checked_mul(max_b))
             .ok_or_else(|| StateError::Overflow {
                 what: "flat block table size".to_owned(),
             })?;
@@ -1682,10 +1720,25 @@ impl StateManager {
                             usize::try_from(*idx).map_err(|_| StateError::Overflow {
                                 what: "block table index".to_owned(),
                             })?;
-                        if cell < self.max_blocks as usize {
-                            let offset = (gi * seqs.len() + si) * self.max_blocks as usize + cell;
-                            flat_block_table[offset] = id;
+                        if cell >= max_b {
+                            return Err(StateError::Overflow {
+                                what: "block table index".to_owned(),
+                            });
                         }
+                        let offset = gi
+                            .checked_mul(seqs.len())
+                            .and_then(|v| v.checked_add(si))
+                            .and_then(|v| v.checked_mul(max_b))
+                            .and_then(|v| v.checked_add(cell))
+                            .ok_or_else(|| StateError::Overflow {
+                                what: "block table offset".to_owned(),
+                            })?;
+                        let cell_ref = flat_block_table.get_mut(offset).ok_or_else(|| {
+                            StateError::Overflow {
+                                what: "block table index".to_owned(),
+                            }
+                        })?;
+                        *cell_ref = id;
                     }
                 }
                 let ws = match g.spec.retain() {
@@ -1699,22 +1752,27 @@ impl StateManager {
             }
         }
 
-        BatchMeta::builder(
-            self.groups.len() as u32,
-            seqs.len() as u32,
-            total_tokens as u32,
-            self.max_blocks,
-        )
-        .seq_ids(seq_ids)
-        .query_len(query_lens.to_vec())
-        .ctx_len(ctx_len)
-        .positions(final_positions)
-        .slot_map(flat_slot_map)
-        .block_table(flat_block_table)
-        .window_start(flat_window_start)
-        .tree(tree)
-        .build()
-        .map_err(StateError::Ir)
+        let num_groups = u32::try_from(self.groups.len()).map_err(|_| StateError::Overflow {
+            what: "batch meta group count".to_owned(),
+        })?;
+        let num_seqs = u32::try_from(seqs.len()).map_err(|_| StateError::Overflow {
+            what: "batch meta seq count".to_owned(),
+        })?;
+        let total_tokens_u32 = u32::try_from(total).map_err(|_| StateError::Overflow {
+            what: "batch meta total tokens".to_owned(),
+        })?;
+
+        BatchMeta::builder(num_groups, num_seqs, total_tokens_u32, self.max_blocks)
+            .seq_ids(seq_ids)
+            .query_len(query_lens.to_vec())
+            .ctx_len(ctx_len)
+            .positions(final_positions)
+            .slot_map(flat_slot_map)
+            .block_table(flat_block_table)
+            .window_start(flat_window_start)
+            .tree(tree)
+            .build()
+            .map_err(StateError::Ir)
     }
 
     /// Pool budget snapshot (Spec 3 §5 `budget`).
@@ -1804,16 +1862,6 @@ impl StateManager {
             },
         }
     }
-
-    /// Sets `next_seq` to support testing sequence ID overflow and boundary conditions (SI-40).
-    pub fn set_next_seq_for_test(&mut self, next: u64) {
-        self.next_seq = next;
-    }
-
-    /// Reports current `next_seq` counter to support boundary testing.
-    pub fn next_seq_for_test(&self) -> u64 {
-        self.next_seq
-    }
 }
 
 /// Mathematical `max(0, ctx - w)` via checked branching (Spec 3 §3.5).
@@ -1865,7 +1913,7 @@ fn flatten_slot(s: &SeqState, group: usize, pos: u32, end: u32) -> StateResult<u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{CacheDtype, Retain};
+    use crate::spec::{CacheDtype, Retain, StateSpec};
 
     fn test_kv_spec() -> StateSpec {
         StateSpec::KvPaged {
@@ -1891,7 +1939,7 @@ mod tests {
             max_seqs: 4,
         };
         let specs = vec![test_kv_spec(), test_rec_spec(), test_conv_spec()];
-        let groups = group_layers(&specs);
+        let groups = group_layers(&specs).unwrap();
         let req = required_pool_bytes(cfg, &groups).expect("valid required bytes");
         StateManager::new(cfg, specs, req * 2).expect("valid manager")
     }
@@ -1943,7 +1991,7 @@ mod tests {
             max_seqs: 1,
         };
         let spec = test_kv_spec();
-        let groups = group_layers(&[spec]);
+        let groups = group_layers(&[spec]).unwrap();
         let block_bytes = groups[0].block_bytes().expect("valid block bytes");
         let pool_bytes = (u64::from(MAX_SLOT_BLOCKS) + 1) * block_bytes;
         let err = StateManager::new(cfg, vec![spec], pool_bytes).unwrap_err();
@@ -2101,7 +2149,7 @@ mod tests {
             retain: Retain::All,
         };
         let specs = vec![spec0, spec1];
-        let groups = group_layers(&specs);
+        let groups = group_layers(&specs).unwrap();
         assert_eq!(groups.len(), 2);
         let req = required_pool_bytes(cfg, &groups).expect("valid required bytes");
         let mut m = StateManager::new(cfg, specs, req * 2).expect("valid manager");
@@ -2230,5 +2278,119 @@ mod tests {
         assert_eq!(m.next_seq, before_next_seq);
         assert_eq!(m.live_count, before_live);
         assert_eq!(m.seqs.len(), before_seqs_len);
+    }
+
+    #[test]
+    fn new_seq_atomic_next_seq_u32_boundary_and_overflow_fails_without_mutation() {
+        let mut m = test_hybrid_manager();
+        m.next_seq = u64::from(u32::MAX);
+
+        let (seq_max, _) = m.new_seq(&[]).expect("u32::MAX sequence ID must succeed");
+        assert_eq!(seq_max.as_u64(), u64::from(u32::MAX));
+
+        let before_next_seq = m.next_seq;
+        let before_live = m.live_count;
+        let before_seqs_len = m.seqs.len();
+
+        let err = m.new_seq(&[]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StateError::SeqIdOverflow { seq, max } if seq == u64::from(u32::MAX) + 1 && max == u32::MAX
+            ),
+            "got {err:?}"
+        );
+
+        assert_eq!(m.next_seq, before_next_seq);
+        assert_eq!(m.live_count, before_live);
+        assert_eq!(m.seqs.len(), before_seqs_len);
+    }
+
+    #[test]
+    fn batch_meta_out_of_range_block_table_cell_fails_before_mutation() {
+        let mut m = test_hybrid_manager();
+        let (seq, _) = m.new_seq(&[]).unwrap();
+        m.reserve(seq, 32).unwrap();
+
+        // Inject an additional block entry whose logical cell exceeds max_blocks
+        if let Some(s) = m.seqs.get_mut(&seq.as_u64()) {
+            s.indices[0].push(m.max_blocks + 10);
+            s.tables[0].push(0);
+        }
+
+        let err = m.batch_meta(&[seq], &[32]).unwrap_err();
+        assert!(
+            matches!(err, StateError::Overflow { ref what } if what == "block table index"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn batch_meta_seq_id_overflow_returns_exact_error_variant() {
+        let m = test_hybrid_manager();
+        let huge_seq = r9v_common::SeqId::new(u64::from(u32::MAX) + 42);
+        let err = m.batch_meta(&[huge_seq], &[1]).unwrap_err();
+        assert_eq!(
+            err,
+            StateError::SeqIdOverflow {
+                seq: u64::from(u32::MAX) + 42,
+                max: u32::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn new_with_declarations_boundary_and_hybrid_layers_test() {
+        let cfg = StateConfig {
+            max_ctx: 32,
+            max_seqs: 1,
+        };
+        let spec = StateSpec::Recurrent { h: 1, d: 8, dv: 8 };
+        let decl_valid = StateDecl::new(1023, spec);
+        let groups_valid = group_layer_specs(&[decl_valid]).unwrap();
+        let pool_valid = required_pool_bytes(cfg, &groups_valid).unwrap();
+
+        // 1. Layer 1023 accepted at boundary:
+        let mgr = StateManager::new_with_declarations(cfg, vec![decl_valid], pool_valid);
+        assert!(mgr.is_ok(), "layer 1023 must be accepted");
+
+        // 2. Layer 1024 rejected before allocation:
+        let decl_1024 = StateDecl::new(1024, spec);
+        let err_1024 =
+            StateManager::new_with_declarations(cfg, vec![decl_1024], pool_valid).unwrap_err();
+        match err_1024 {
+            StateError::InvalidConfig { problems } => {
+                assert!(problems
+                    .iter()
+                    .any(|p| p.index == 1024 && p.reason.contains("exceeds cap 1024")));
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+
+        // 3. Layer u32::MAX rejected before allocation:
+        let decl_max = StateDecl::new(u32::MAX, spec);
+        let err_max =
+            StateManager::new_with_declarations(cfg, vec![decl_max], pool_valid).unwrap_err();
+        match err_max {
+            StateError::InvalidConfig { problems } => {
+                assert!(problems
+                    .iter()
+                    .any(|p| p.index == u32::MAX && p.reason.contains("exceeds cap 1024")));
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+
+        // 4. Hybrid multi-spec layers: 2 specs per layer on 512 layers (1024 declarations total, unique layers 512)
+        // must NOT be falsely counted as > 1024 model layers:
+        let spec2 = StateSpec::ConvWindow { c: 8, w: 4 };
+        let mut hybrid_decls = Vec::with_capacity(1024);
+        for l in 0..512 {
+            hybrid_decls.push(StateDecl::new(l, spec));
+            hybrid_decls.push(StateDecl::new(l, spec2));
+        }
+        let hybrid_groups = group_layer_specs(&hybrid_decls).unwrap();
+        let hybrid_pool = required_pool_bytes(cfg, &hybrid_groups).unwrap();
+        let hybrid_mgr = StateManager::new_with_declarations(cfg, hybrid_decls, hybrid_pool);
+        assert!(hybrid_mgr.is_ok(), "512 hybrid layers must be accepted");
     }
 }

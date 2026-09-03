@@ -21,7 +21,7 @@ fn minimum_pool_gives_aggregate_max_ctx_per_paged_group() {
         max_seqs: 8,
     };
     let specs = vec![dense, windowed, recurrent];
-    let groups = group_layers(&specs);
+    let groups = group_layers(&specs).expect("group_layers must succeed");
     let pool = required_pool_bytes(config, &groups).expect("pool math is exact");
     let m = StateManager::new(config, specs, pool).expect("minimum pool fits");
 
@@ -57,7 +57,7 @@ fn oversized_pool_splits_proportionally_with_accounted_remainder() {
         max_seqs: 2,
     };
     let specs = vec![big, small];
-    let groups = group_layers(&specs);
+    let groups = group_layers(&specs).expect("group_layers must succeed");
     let required = required_pool_bytes(config, &groups).expect("pool math is exact");
     // One extra block per group plus 100 unusable remainder bytes.
     let big_block = groups[0].block_bytes().unwrap();
@@ -94,7 +94,7 @@ fn free_bytes_track_allocations_exactly() {
         max_seqs: 2,
     };
     let specs = vec![kv_all(), recurrent];
-    let groups = group_layers(&specs);
+    let groups = group_layers(&specs).expect("group_layers must succeed");
     let pool = required_pool_bytes(config, &groups).expect("pool math is exact");
     let mut m = StateManager::new(config, specs, pool).expect("minimum pool fits");
 

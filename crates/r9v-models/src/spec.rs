@@ -260,7 +260,9 @@ impl MlaSpec {
 }
 
 // DECISION(A1.15): r9v-state is sole owner of StateSpec, CacheDtype, Retain, and checked state byte accounting, with r9v-models re-exporting them; rejected maintaining duplicate parallel definitions in r9v-models. Spec 3 §2, Spec 8 §2, §7, card A1.15.
-pub use r9v_state::{group_layers, CacheDtype, LayerGroup, Retain, StateSpec};
+pub use r9v_state::{
+    group_layer_specs, group_layers, CacheDtype, LayerGroup, Retain, StateDecl, StateSpec,
+};
 
 /// Token mixing sublayer specification (Spec 8 §3).
 #[derive(Debug, Clone, PartialEq)]

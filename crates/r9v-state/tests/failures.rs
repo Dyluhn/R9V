@@ -379,7 +379,7 @@ fn batch_token_total_cap_is_checked() {
         max_ctx: 1 << 20,
         max_seqs: 4,
     };
-    let groups = group_layers(&[kv_all()]);
+    let groups = group_layers(&[kv_all()]).unwrap();
     let required = required_pool_bytes(config, &groups).expect("pool math is exact");
     let mut m = StateManager::new(config, vec![kv_all()], required * 2).expect("valid config");
 
@@ -455,7 +455,7 @@ fn max_slot_blocks_boundary_proves_no_slot_none_and_rejects_one_more_block() {
         max_seqs: 1,
     };
     let spec = kv_all();
-    let groups = group_layers(&[spec]);
+    let groups = group_layers(&[spec]).unwrap();
     let block_bytes = groups[0].block_bytes().expect("valid block bytes");
     let pool_bytes = (u64::from(MAX_SLOT_BLOCKS) + 1) * block_bytes;
     let err = StateManager::new(cfg, vec![spec], pool_bytes).unwrap_err();

@@ -24,10 +24,10 @@ pub use error::ModelsError;
 pub use generic::{build_ffn, build_layer, build_mixer, build_model, build_mtp_subgraph};
 pub use meta::{GgufMeta, MetaValue, SyntheticGgufMeta};
 pub use spec::{
-    CacheDtype, Ffn, LayerSpec, Mixer, MlaSpec, ModelSpec, MoeGroupSpec, MoeSharedSpec, MtpSource,
-    MtpSpec, NgramSpec, NormPlacement, NormSpec, PositionEncoding, Retain, RopeSpec, StateSpec,
-    MAX_ATTENTION_HEADS, MAX_EXPERTS, MAX_FEATURE_DIM, MAX_KV_HEADS, MAX_MODEL_LAYERS,
-    MAX_MTP_HEADS, MAX_MTP_LAYERS_PER_HEAD, MAX_NGRAM_HEADS, MAX_NGRAM_TABLE_ENTRIES,
-    MAX_VOCAB_SIZE, MAX_WINDOW,
+    group_layer_specs, group_layers, CacheDtype, Ffn, LayerSpec, Mixer, MlaSpec, ModelSpec,
+    MoeGroupSpec, MoeSharedSpec, MtpSource, MtpSpec, NgramSpec, NormPlacement, NormSpec,
+    PositionEncoding, Retain, RopeSpec, StateDecl, StateSpec, MAX_ATTENTION_HEADS, MAX_EXPERTS,
+    MAX_FEATURE_DIM, MAX_KV_HEADS, MAX_MODEL_LAYERS, MAX_MTP_HEADS, MAX_MTP_LAYERS_PER_HEAD,
+    MAX_NGRAM_HEADS, MAX_NGRAM_TABLE_ENTRIES, MAX_VOCAB_SIZE, MAX_WINDOW,
 };
 pub use summary::{ExpertSummary, LayerSummary, MixerKind, ModelSummary, SchemeKey};

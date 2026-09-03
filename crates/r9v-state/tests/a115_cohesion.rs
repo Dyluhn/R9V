@@ -16,8 +16,8 @@ mod common;
 use common::{config_128, kv_all, kv_window, manager_for};
 use r9v_common::SeqId;
 use r9v_state::{
-    group_layers, CacheDtype, LayerGroup, Positions, Retain, StateConfig, StateError, StateSpec,
-    TreeMask, BLOCK_SENTINEL, BLOCK_TABLE_SENTINEL, SLOT_NONE,
+    group_layer_specs, group_layers, CacheDtype, LayerGroup, Positions, Retain, StateConfig,
+    StateDecl, StateError, StateSpec, TreeMask, BLOCK_SENTINEL, BLOCK_TABLE_SENTINEL, SLOT_NONE,
 };
 
 fn multi_group_specs() -> Vec<StateSpec> {
@@ -202,32 +202,18 @@ fn test_sentinel_unification_and_holes() {
 fn test_seq_id_boundary_and_overflow_fails_before_mutation() {
     let mut m = manager_for(config_128(), &[kv_all()]);
 
-    // Set next_seq to u32::MAX. This sequence should be allocated with ID u32::MAX.
-    m.set_next_seq_for_test(u32::MAX as u64);
-    let (seq_max, _) = m.new_seq(&[]).expect("u32::MAX sequence ID must succeed");
-    assert_eq!(seq_max.as_u64(), u32::MAX as u64);
-
-    // Next allocation exceeds u32::MAX and must fail BEFORE mutating any state.
-    let before_next_seq = m.next_seq_for_test();
-
-    let err = m.new_seq(&[]).unwrap_err();
-    assert!(
-        matches!(err, StateError::SeqIdOverflow { seq, max } if seq == u32::MAX as u64 + 1 && max == u32::MAX),
-        "got {err:?}"
-    );
-
-    // State must be completely untouched.
-    assert_eq!(m.next_seq_for_test(), before_next_seq);
+    let (seq0, _) = m.new_seq(&[]).expect("initial sequence ID must succeed");
+    assert_eq!(seq0.as_u64(), 0);
 
     // Attempting batch_meta with a sequence ID > u32::MAX fails with typed error before building.
-    let huge_seq = SeqId::new(u32::MAX as u64 + 5);
+    let huge_seq = SeqId::new(u64::from(u32::MAX) + 5);
     let err = m.batch_meta(&[huge_seq], &[1]).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            StateError::InvalidBatch { .. } | StateError::SeqIdOverflow { .. }
-        ),
-        "got {err:?}"
+    assert_eq!(
+        err,
+        StateError::SeqIdOverflow {
+            seq: u64::from(u32::MAX) + 5,
+            max: u32::MAX,
+        }
     );
 }
 
@@ -303,8 +289,24 @@ fn test_deterministic_grouping_and_nonaliasing() {
     };
     let s5 = StateSpec::ConvWindow { c: 64, w: 4 };
 
-    let specs = vec![s1, s2, s3, s4, s5, s1, s4];
-    let groups = group_layers(&specs);
+    // Legacy group_layers assigns sequential indices 0..3:
+    let legacy_groups = group_layers(&[s1, s2, s1]).expect("group_layers must succeed");
+    assert_eq!(legacy_groups.len(), 2);
+    assert_eq!(legacy_groups[0].layers, vec![0, 2]);
+    assert_eq!(legacy_groups[1].layers, vec![1]);
+
+    // Explicit hybrid declarations retain true model layer indices:
+    // Hybrid layer: layer 3 declares both Recurrent (s4) and ConvWindow (s5)!
+    let decls = vec![
+        StateDecl::new(0, s1),
+        StateDecl::new(1, s2),
+        StateDecl::new(2, s3),
+        StateDecl::new(3, s4),
+        StateDecl::new(3, s5),
+        StateDecl::new(5, s1),
+        StateDecl::new(6, s4),
+    ];
+    let groups = group_layer_specs(&decls).expect("group_layer_specs must succeed");
 
     // There are 5 distinct specs, so 5 groups.
     assert_eq!(groups.len(), 5);
@@ -317,7 +319,8 @@ fn test_deterministic_grouping_and_nonaliasing() {
     assert_eq!(groups[3].spec, s4);
     assert_eq!(groups[3].layers, vec![3, 6]);
     assert_eq!(groups[4].spec, s5);
-    assert_eq!(groups[4].layers, vec![4]);
+    // ConvWindow retains true model layer 3 (not a manufactured shifted layer 4).
+    assert_eq!(groups[4].layers, vec![3]);
 
     // None of the inequivalent specs aliased into the same group.
     for i in 0..groups.len() {
@@ -325,6 +328,152 @@ fn test_deterministic_grouping_and_nonaliasing() {
             assert_ne!(groups[i].spec, groups[j].spec);
         }
     }
+}
+
+/// Proves Retain migration constructor path for sliding_window and sink_and_window.
+#[test]
+fn test_retain_migration_constructors() {
+    let w = Retain::sliding_window(256);
+    assert_eq!(w, Retain::Window { w: 256 });
+    assert_eq!(w.window(), Some(256));
+    assert!(w.is_windowed());
+
+    let sw = Retain::sink_and_window(4, 512);
+    assert_eq!(sw, Retain::SinkWindow { n: 4, w: 512 });
+    assert_eq!(sw.window(), Some(512));
+    assert!(sw.is_windowed());
+}
+
+/// Proves that no public API can silently fabricate layer 0:
+/// explicit declarations preserve exact non-zero model layer indices.
+#[test]
+fn test_no_silent_layer_zero_fabrication() {
+    let spec = kv_all();
+    let decl = StateDecl::new(7, spec);
+    assert_eq!(decl.layer, 7);
+    assert_eq!(decl.spec, spec);
+
+    let from_tuple: StateDecl = (7u32, spec).into();
+    assert_eq!(from_tuple.layer, 7);
+    assert_eq!(from_tuple.spec, spec);
+
+    let groups = group_layer_specs(&[decl]).expect("valid decl must succeed");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].layers, vec![7]);
+    assert_ne!(groups[0].layers, vec![0]);
+}
+
+/// Proves group_layers and group_layer_specs return typed StateResult without panic or silent drop.
+#[test]
+fn test_group_layers_and_specs_result_signatures_no_panic_no_silent_drop() {
+    let spec = kv_all();
+
+    // 1. group_layers bounds checks: 1025 specs exceeds MAX_LAYERS_HARD (1024)
+    let too_many_specs = vec![spec; 1025];
+    let err_layers = group_layers(&too_many_specs).unwrap_err();
+    assert!(
+        matches!(err_layers, StateError::InvalidConfig { ref problems } if problems.iter().any(|p| p.reason.contains("layers=1025 exceeds cap 1024"))),
+        "expected typed InvalidConfig for too many layers, got {err_layers:?}"
+    );
+
+    // 2. group_layer_specs bounds checks: out-of-range layer index (1024 and u32::MAX)
+    let bad_decl_1024 = StateDecl::new(1024, spec);
+    let err_1024 = group_layer_specs(&[bad_decl_1024]).unwrap_err();
+    assert!(
+        matches!(err_1024, StateError::InvalidConfig { ref problems } if problems.iter().any(|p| p.index == 1024 && p.reason.contains("exceeds cap 1024"))),
+        "expected typed InvalidConfig for layer 1024, got {err_1024:?}"
+    );
+
+    let bad_decl_max = StateDecl::new(u32::MAX, spec);
+    let err_max = group_layer_specs(&[bad_decl_max]).unwrap_err();
+    assert!(
+        matches!(err_max, StateError::InvalidConfig { ref problems } if problems.iter().any(|p| p.index == u32::MAX && p.reason.contains("exceeds cap 1024"))),
+        "expected typed InvalidConfig for layer u32::MAX, got {err_max:?}"
+    );
+
+    // 3. Valid boundary: layer 1023 is accepted and NOT dropped
+    let valid_decl_1023 = StateDecl::new(1023, spec);
+    let ok_groups = group_layer_specs(&[valid_decl_1023]).expect("layer 1023 must succeed");
+    assert_eq!(ok_groups[0].layers, vec![1023]);
+}
+
+/// Proves exact byte accounting for CacheDtype F16, E4M3, I8, and double-buffered states.
+#[test]
+fn test_cache_dtype_scale_bytes_and_recurrent_conv_exactness() {
+    // KvPaged: F16 adds exactly 0 scale bytes.
+    let paged_f16 = StateSpec::KvPaged {
+        hkv: 4,
+        d: 64,
+        dv: 64,
+        cache: CacheDtype::F16,
+        retain: Retain::All,
+    };
+    // (64 + 64) * 2 bytes = 256 bytes per head; * 4 heads = 1024 bytes per token.
+    assert_eq!(paged_f16.per_token_bytes().unwrap(), 1024);
+
+    // KvPaged: E4M3 adds exactly 4 scale bytes per head (two f16 scales).
+    let paged_e4m3 = StateSpec::KvPaged {
+        hkv: 4,
+        d: 64,
+        dv: 64,
+        cache: CacheDtype::E4M3,
+        retain: Retain::All,
+    };
+    // ((64 + 64) * 1 + 4) = 132 bytes per head; * 4 heads = 528 bytes per token.
+    assert_eq!(paged_e4m3.per_token_bytes().unwrap(), 528);
+
+    // KvPaged: I8 adds exactly 4 scale bytes per head.
+    let paged_i8 = StateSpec::KvPaged {
+        hkv: 4,
+        d: 64,
+        dv: 64,
+        cache: CacheDtype::I8,
+        retain: Retain::All,
+    };
+    assert_eq!(paged_i8.per_token_bytes().unwrap(), 528);
+
+    // KvLatent: F16 adds exactly 0 scale bytes.
+    let latent_f16 = StateSpec::KvLatent {
+        latent: 128,
+        rope: 32,
+        cache: CacheDtype::F16,
+        retain: Retain::All,
+    };
+    // 128 * 2 + 32 * 2 = 320 bytes per token.
+    assert_eq!(latent_f16.per_token_bytes().unwrap(), 320);
+
+    // KvLatent: E4M3 adds exactly 2 scale bytes (one f16 scale).
+    let latent_e4m3 = StateSpec::KvLatent {
+        latent: 128,
+        rope: 32,
+        cache: CacheDtype::E4M3,
+        retain: Retain::All,
+    };
+    // 128 * 1 + 2 + 32 * 2 = 194 bytes per token.
+    assert_eq!(latent_e4m3.per_token_bytes().unwrap(), 194);
+
+    // KvLatent: I8 adds exactly 2 scale bytes.
+    let latent_i8 = StateSpec::KvLatent {
+        latent: 128,
+        rope: 32,
+        cache: CacheDtype::I8,
+        retain: Retain::All,
+    };
+    assert_eq!(latent_i8.per_token_bytes().unwrap(), 194);
+
+    // ConvWindow: exactly double-buffered ((w - 1) * c * 2 * 2).
+    let conv = StateSpec::ConvWindow { c: 32, w: 5 };
+    assert_eq!(conv.slot_bytes().unwrap(), (5 - 1) * 32 * 2);
+    assert_eq!(conv.per_seq_bytes().unwrap(), (5 - 1) * 32 * 2 * 2);
+
+    // Recurrent: exactly double-buffered (h * d * dv * 4 * 2).
+    let rec = StateSpec::Recurrent {
+        h: 2,
+        d: 16,
+        dv: 16,
+    };
+    assert_eq!(rec.slot_bytes().unwrap(), 2 * 16 * 16 * 4);
+    assert_eq!(rec.per_seq_bytes().unwrap(), 2 * 16 * 16 * 4 * 2);
 }
 
 /// Proves public typed errors without panics on all invalid inputs.

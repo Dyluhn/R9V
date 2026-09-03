@@ -33,7 +33,7 @@ pub fn kv_window(w: u32) -> StateSpec {
 
 /// Builds a manager with exactly enough pool for full context (Spec 3 §6.3).
 pub fn manager_for(config: StateConfig, specs: &[StateSpec]) -> StateManager {
-    let groups = group_layers(specs);
+    let groups = group_layers(specs).expect("valid fixture specs");
     let pool = required_pool_bytes(config, &groups).expect("pool math is exact");
     StateManager::new(config, specs.to_vec(), pool).expect("valid fixture config")
 }

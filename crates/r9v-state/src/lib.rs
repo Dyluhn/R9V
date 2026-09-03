@@ -24,7 +24,7 @@ pub use manager::{
 };
 pub use r9v_ir::{BatchMeta, BatchMetaBuilder, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
 pub use spec::{
-    group_layers, CacheDtype, LayerGroup, Retain, StateSpec, BLOCK_SENTINEL, BLOCK_TOKENS,
-    MAX_BATCH_TOKENS_HARD, MAX_CTX_HARD, MAX_GROUPS_HARD, MAX_LAYERS_HARD, MAX_RESERVE_HARD,
-    MAX_SEQS_HARD,
+    group_layer_specs, group_layers, CacheDtype, LayerGroup, Retain, StateDecl, StateSpec,
+    BLOCK_SENTINEL, BLOCK_TOKENS, MAX_BATCH_TOKENS_HARD, MAX_CTX_HARD, MAX_DECLS_HARD,
+    MAX_GROUPS_HARD, MAX_LAYERS_HARD, MAX_RESERVE_HARD, MAX_SEQS_HARD,
 };
