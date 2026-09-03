@@ -2,15 +2,18 @@
 //! GGUF source types and source-side reference dequantization
 //! (Spec 2 §3.3, §7 steps 1–2, §10; card A2.3).
 //!
-//! [`GgmlType`] is the closed set of GGUF source types this card owns:
-//! the ten quantized `Q*_0/1/K` types plus unquantized `F16`/`BF16`.
+//! [`GgmlType`] is the closed set of GGUF source types this crate owns:
+//! the ten quantized `Q*_0/1/K` types of card A2.3 plus unquantized
+//! `F16`/`BF16` and the nine IQ codebook types of card A2.4.
 //! Numeric codes and names match `GGMLQuantizationType` in gguf-py
 //! 0.19.0 (`constants.py`); wire-block layouts and dequant formulas
 //! match its `quants.py` `dequantize_blocks` bit-exact, verified by the
-//! `gguf_a23_reference.txt` fixtures. [`ggml_dequantize`] decodes GGUF
-//! wire bytes in row-major block order to `f32`; the repacked-side
-//! decode lives in [`mod@crate::repack`] and reads `L1`+SoA instead, so the
-//! §10 round-trip compares two independent byte paths.
+//! `gguf_a23_reference.txt` (card A2.3) and `iq_a24_reference.txt`
+//! (card A2.4) fixtures. [`ggml_dequantize`] decodes GGUF wire bytes in
+//! row-major block order to `f32`; the repacked-side decode lives in
+//! [`mod@crate::repack`] (and [`mod@crate::iq`] for IQ types) and reads
+//! `L1`+SoA instead, so the §10 round-trip compares two independent
+//! byte paths.
 //!
 //! `F16`/`BF16` map to no [`SchemeId`]: they are unquantized dtypes
 //! (`QuantScheme::None` per Spec 1 §2.2; SI-26), repacked by pure `L1`
@@ -62,6 +65,37 @@ pub enum GgmlType {
     /// 256 values in 210 bytes: 128 low-nibble bytes, 64 2-bit bytes,
     /// 16 `i8` scales, `d: f16` (GGUF id 14).
     Q6_K,
+    /// 256 values in 66 bytes: `d: f16`, 64 packed qs bytes holding
+    /// 32 grid indices, per-32 extra scales and sign fields (GGUF
+    /// id 16; card A2.4).
+    IQ2_XXS,
+    /// 256 values in 74 bytes: `d: f16`, 64 qs bytes (32 `u16`
+    /// entries: 9-bit grid index plus 7-bit sign field), 8 scale
+    /// bytes (GGUF id 17; card A2.4).
+    IQ2_XS,
+    /// 256 values in 98 bytes: `d: f16`, 64 qs bytes (64 grid
+    /// indices), 32 scale bytes (GGUF id 18; card A2.4).
+    IQ3_XXS,
+    /// 256 values in 50 bytes: `d: f16`, 32 qs bytes, 16 qh bytes
+    /// (GGUF id 19; card A2.4).
+    IQ1_S,
+    /// 32 values in 18 bytes: `d: f16`, 16 bytes of split nibbles
+    /// (GGUF id 20; card A2.4).
+    IQ4_NL,
+    /// 256 values in 110 bytes: `d: f16`, 64 qs bytes, 8 qh bytes,
+    /// 32 sign bytes, 4 scale bytes (GGUF id 21; card A2.4).
+    IQ3_S,
+    /// 256 values in 82 bytes: `d: f16`, 32 qs bytes, 32 sign bytes,
+    /// 8 qh bytes, 8 scale bytes (GGUF id 22; card A2.4).
+    IQ2_S,
+    /// 256 values in 136 bytes: `d: f16`, 2 scale-high bytes, 4
+    /// scale-low bytes, 128 bytes of group-paired nibbles (GGUF id
+    /// 23; card A2.4).
+    IQ4_XS,
+    /// 256 values in 56 bytes: 32 qs bytes, 16 qh bytes, 8 scale
+    /// bytes with the `f16` scale packed across nibbles (GGUF id 29;
+    /// card A2.4).
+    IQ1_M,
     /// Brain float, 2 bytes per element, no blocking (GGUF id 30).
     BF16,
 }
@@ -72,7 +106,7 @@ pub enum GgmlType {
 // space and the two tables have different owners and widths.
 impl GgmlType {
     /// All source types in ggml-code order.
-    pub const ALL: [GgmlType; 12] = [
+    pub const ALL: [GgmlType; 21] = [
         GgmlType::F16,
         GgmlType::Q4_0,
         GgmlType::Q4_1,
@@ -84,6 +118,15 @@ impl GgmlType {
         GgmlType::Q4_K,
         GgmlType::Q5_K,
         GgmlType::Q6_K,
+        GgmlType::IQ2_XXS,
+        GgmlType::IQ2_XS,
+        GgmlType::IQ3_XXS,
+        GgmlType::IQ1_S,
+        GgmlType::IQ4_NL,
+        GgmlType::IQ3_S,
+        GgmlType::IQ2_S,
+        GgmlType::IQ4_XS,
+        GgmlType::IQ1_M,
         GgmlType::BF16,
     ];
 
@@ -101,6 +144,15 @@ impl GgmlType {
             GgmlType::Q4_K => 12,
             GgmlType::Q5_K => 13,
             GgmlType::Q6_K => 14,
+            GgmlType::IQ2_XXS => 16,
+            GgmlType::IQ2_XS => 17,
+            GgmlType::IQ3_XXS => 18,
+            GgmlType::IQ1_S => 19,
+            GgmlType::IQ4_NL => 20,
+            GgmlType::IQ3_S => 21,
+            GgmlType::IQ2_S => 22,
+            GgmlType::IQ4_XS => 23,
+            GgmlType::IQ1_M => 29,
             GgmlType::BF16 => 30,
         }
     }
@@ -120,6 +172,15 @@ impl GgmlType {
             12 => Ok(GgmlType::Q4_K),
             13 => Ok(GgmlType::Q5_K),
             14 => Ok(GgmlType::Q6_K),
+            16 => Ok(GgmlType::IQ2_XXS),
+            17 => Ok(GgmlType::IQ2_XS),
+            18 => Ok(GgmlType::IQ3_XXS),
+            19 => Ok(GgmlType::IQ1_S),
+            20 => Ok(GgmlType::IQ4_NL),
+            21 => Ok(GgmlType::IQ3_S),
+            22 => Ok(GgmlType::IQ2_S),
+            23 => Ok(GgmlType::IQ4_XS),
+            29 => Ok(GgmlType::IQ1_M),
             30 => Ok(GgmlType::BF16),
             _ => Err(FormatError::UnknownGgmlType { code }),
         }
@@ -139,6 +200,15 @@ impl GgmlType {
             GgmlType::Q4_K => "Q4_K",
             GgmlType::Q5_K => "Q5_K",
             GgmlType::Q6_K => "Q6_K",
+            GgmlType::IQ2_XXS => "IQ2_XXS",
+            GgmlType::IQ2_XS => "IQ2_XS",
+            GgmlType::IQ3_XXS => "IQ3_XXS",
+            GgmlType::IQ1_S => "IQ1_S",
+            GgmlType::IQ4_NL => "IQ4_NL",
+            GgmlType::IQ3_S => "IQ3_S",
+            GgmlType::IQ2_S => "IQ2_S",
+            GgmlType::IQ4_XS => "IQ4_XS",
+            GgmlType::IQ1_M => "IQ1_M",
             GgmlType::BF16 => "BF16",
         }
     }
@@ -158,6 +228,15 @@ impl GgmlType {
             "Q4_K" => Ok(GgmlType::Q4_K),
             "Q5_K" => Ok(GgmlType::Q5_K),
             "Q6_K" => Ok(GgmlType::Q6_K),
+            "IQ2_XXS" => Ok(GgmlType::IQ2_XXS),
+            "IQ2_XS" => Ok(GgmlType::IQ2_XS),
+            "IQ3_XXS" => Ok(GgmlType::IQ3_XXS),
+            "IQ1_S" => Ok(GgmlType::IQ1_S),
+            "IQ4_NL" => Ok(GgmlType::IQ4_NL),
+            "IQ3_S" => Ok(GgmlType::IQ3_S),
+            "IQ2_S" => Ok(GgmlType::IQ2_S),
+            "IQ4_XS" => Ok(GgmlType::IQ4_XS),
+            "IQ1_M" => Ok(GgmlType::IQ1_M),
             "BF16" => Ok(GgmlType::BF16),
             _ => Err(FormatError::UnknownScheme {
                 value: name.to_owned(),
@@ -184,6 +263,15 @@ impl GgmlType {
             GgmlType::Q6_K => Some(SchemeId::I6K),
             GgmlType::Q3_K => Some(SchemeId::I3K),
             GgmlType::Q2_K => Some(SchemeId::I2K),
+            GgmlType::IQ4_NL => Some(SchemeId::I4Nl),
+            GgmlType::IQ4_XS => Some(SchemeId::I4Xs),
+            GgmlType::IQ3_XXS => Some(SchemeId::Iq3Xxs),
+            GgmlType::IQ3_S => Some(SchemeId::Iq3S),
+            GgmlType::IQ2_XXS => Some(SchemeId::Iq2Xxs),
+            GgmlType::IQ2_XS => Some(SchemeId::Iq2Xs),
+            GgmlType::IQ2_S => Some(SchemeId::Iq2S),
+            GgmlType::IQ1_S => Some(SchemeId::Iq1S),
+            GgmlType::IQ1_M => Some(SchemeId::Iq1M),
             GgmlType::F16 | GgmlType::BF16 => None,
         }
     }
@@ -202,21 +290,44 @@ impl GgmlType {
             | GgmlType::Q3_K
             | GgmlType::Q4_K
             | GgmlType::Q5_K
-            | GgmlType::Q6_K => true,
+            | GgmlType::Q6_K
+            | GgmlType::IQ4_NL
+            | GgmlType::IQ4_XS
+            | GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
+            | GgmlType::IQ2_XXS
+            | GgmlType::IQ2_XS
+            | GgmlType::IQ2_S
+            | GgmlType::IQ1_S
+            | GgmlType::IQ1_M => true,
         }
     }
 
-    /// Values per wire block: 32 for `_0`/`_1` types, 256 (`QK_K`)
-    /// for K types, 1 for unblocked halves (gguf-py `GGML_QUANT_SIZES`).
+    /// Values per wire block: 32 for `_0`/`_1`/`IQ4_NL` types, 256
+    /// (`QK_K`) for K and IQ-256 types, 1 for unblocked halves
+    /// (gguf-py `GGML_QUANT_SIZES`).
     pub const fn block_len(self) -> u32 {
         match self {
             GgmlType::F16 | GgmlType::BF16 => 1,
-            GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 => {
-                32
-            }
-            GgmlType::Q2_K | GgmlType::Q3_K | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K => {
-                256
-            }
+            GgmlType::Q4_0
+            | GgmlType::Q4_1
+            | GgmlType::Q5_0
+            | GgmlType::Q5_1
+            | GgmlType::Q8_0
+            | GgmlType::IQ4_NL => 32,
+            GgmlType::Q2_K
+            | GgmlType::Q3_K
+            | GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::IQ4_XS
+            | GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
+            | GgmlType::IQ2_XXS
+            | GgmlType::IQ2_XS
+            | GgmlType::IQ2_S
+            | GgmlType::IQ1_S
+            | GgmlType::IQ1_M => 256,
         }
     }
 
@@ -234,6 +345,15 @@ impl GgmlType {
             GgmlType::Q4_K => 144,
             GgmlType::Q5_K => 176,
             GgmlType::Q6_K => 210,
+            GgmlType::IQ2_XXS => 66,
+            GgmlType::IQ2_XS => 74,
+            GgmlType::IQ3_XXS => 98,
+            GgmlType::IQ1_S => 50,
+            GgmlType::IQ4_NL => 18,
+            GgmlType::IQ3_S => 110,
+            GgmlType::IQ2_S => 82,
+            GgmlType::IQ4_XS => 136,
+            GgmlType::IQ1_M => 56,
         }
     }
 
@@ -243,12 +363,25 @@ impl GgmlType {
     pub const fn superblock_k(self) -> Option<u32> {
         match self {
             GgmlType::F16 | GgmlType::BF16 => None,
-            GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1 | GgmlType::Q8_0 => {
-                Some(32)
-            }
-            GgmlType::Q2_K | GgmlType::Q3_K | GgmlType::Q4_K | GgmlType::Q5_K | GgmlType::Q6_K => {
-                Some(256)
-            }
+            GgmlType::Q4_0
+            | GgmlType::Q4_1
+            | GgmlType::Q5_0
+            | GgmlType::Q5_1
+            | GgmlType::Q8_0
+            | GgmlType::IQ4_NL => Some(32),
+            GgmlType::Q2_K
+            | GgmlType::Q3_K
+            | GgmlType::Q4_K
+            | GgmlType::Q5_K
+            | GgmlType::Q6_K
+            | GgmlType::IQ4_XS
+            | GgmlType::IQ3_XXS
+            | GgmlType::IQ3_S
+            | GgmlType::IQ2_XXS
+            | GgmlType::IQ2_XS
+            | GgmlType::IQ2_S
+            | GgmlType::IQ1_S
+            | GgmlType::IQ1_M => Some(256),
         }
     }
 }
@@ -523,6 +656,15 @@ pub(crate) fn block_values(
                 | GgmlType::Q4_K
                 | GgmlType::Q5_K
                 | GgmlType::Q6_K
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ1_S
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ3_S
+                | GgmlType::IQ2_S
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ1_M
                 | GgmlType::BF16 => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: ggml.name(),
@@ -564,6 +706,15 @@ pub(crate) fn block_values(
                 | GgmlType::Q4_K
                 | GgmlType::Q5_K
                 | GgmlType::Q6_K
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ1_S
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ3_S
+                | GgmlType::IQ2_S
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ1_M
                 | GgmlType::BF16 => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: ggml.name(),
@@ -611,6 +762,15 @@ pub(crate) fn block_values(
                 | GgmlType::Q2_K
                 | GgmlType::Q3_K
                 | GgmlType::Q6_K
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ1_S
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ3_S
+                | GgmlType::IQ2_S
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ1_M
                 | GgmlType::BF16 => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: ggml.name(),
@@ -712,6 +872,15 @@ pub(crate) fn block_values(
                 | GgmlType::Q4_K
                 | GgmlType::Q5_K
                 | GgmlType::Q6_K
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ1_S
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ3_S
+                | GgmlType::IQ2_S
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ1_M
                 | GgmlType::BF16 => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: ggml.name(),
@@ -764,6 +933,35 @@ pub(crate) fn block_values(
                 }
             }
         }
+        GgmlType::IQ4_NL | GgmlType::IQ4_XS => {
+            // Per-weight 4-bit codebook indices via the card-A2.4
+            // nibble orders (split for `IQ4_NL`, group-paired for
+            // `IQ4_XS`; see `crate::iq`). The grid families pack 4–8
+            // weights per index byte and have no per-weight logical,
+            // so they fail closed below.
+            let kind = match crate::iq::iq_kind(ggml) {
+                Some(kind) => kind,
+                None => {
+                    return Err(FormatError::SchemeMismatch {
+                        scheme: ggml.name(),
+                        expected: "iq4 ggml type",
+                        got: ggml.name(),
+                    });
+                }
+            };
+            crate::iq::nibble_logical(kind, ggml, block, out)?;
+        }
+        GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ1_S
+        | GgmlType::IQ3_S
+        | GgmlType::IQ2_S
+        | GgmlType::IQ1_M => Err(FormatError::SchemeMismatch {
+            scheme: ggml.name(),
+            expected: "per-weight logical values",
+            got: ggml.name(),
+        })?,
     }
     Ok(())
 }
@@ -830,6 +1028,11 @@ pub fn ggml_dequantize(
     n_rows: u32,
     k: u32,
 ) -> Result<Vec<f32>, FormatError> {
+    // Card-A2.4 IQ types decode through the codebook readers in
+    // `crate::iq` (packed indices plus LUTs, not per-weight logicals).
+    if crate::iq::is_iq(ggml) {
+        return crate::iq::source_dequantize(ggml, wire, n_rows, k);
+    }
     let geo = wire_geometry(ggml, wire, n_rows, k)?;
     let block_len = ggml.block_len() as usize;
     let block_bytes = ggml.block_bytes() as usize;
@@ -1016,6 +1219,25 @@ fn dequant_block(
                 }
             }
             Ok(())
+        }
+        GgmlType::IQ4_NL
+        | GgmlType::IQ4_XS
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_S
+        | GgmlType::IQ1_S
+        | GgmlType::IQ1_M => {
+            // Unreachable: ggml_dequantize routes IQ types to
+            // crate::iq before calling dequant_block. Fails closed
+            // rather than guessing a per-weight formula for packed
+            // codebook indices.
+            Err(FormatError::SchemeMismatch {
+                scheme: ggml.name(),
+                expected: "card-A2.3 source decode (iq decodes via crate::iq)",
+                got: ggml.name(),
+            })
         }
     }
 }

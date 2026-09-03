@@ -298,3 +298,15 @@ What: Neither §3.3 nor §7 pins which GGUF revision defines the wire-block layo
 Why it blocks or misleads: Without a pinned reference, a future GGUF layout change (or a reader built against a different revision) passes the §7 shape checks yet fails the §10 bit-equality test with no way to tell which side moved.
 Option taken: Pinned gguf-py 0.19.0 `quants.py dequantize_blocks` as the wire authority (codes from its `GGMLQuantizationType`); fixtures record the version, and K-quant wire bytes that gguf-py cannot quantize are hand-built from that same layout with the provenance stated per case.
 Proposed resolution: Name the authoritative GGUF revision (or a vendored layout table) in §7 that repack implementations must reproduce.
+
+## SI-70 — A2.4 — spec 2 §3.3
+What: The §3.3 table lists the IQ rows' values as "u4 index into 16-entry i8 LUT" / "codebook indices" and their scale records as "as GGUF", which fixes neither the SoA record contents and order (IQ wire blocks split scales, high-bit planes, sign bytes and indices across non-contiguous spans, and `IQ1_M` packs `d` across scale nibbles) nor the repack granularity (one packed index covers 1, 4 or 8 weights depending on the family).
+Why it blocks or misleads: Two loaders that both "store as GGUF" can place different bytes in the SoA region (a verbatim wire prefix vs gathered scale fields for `IQ2_S`/`IQ3_S`, per-weight grid expansion vs packed index bytes for the value region) and stay mutually unreadable while both passing the §7 shape checks.
+Option taken: Records follow the gguf-py wire order with the index payload removed (`I4_NL [d]`; `I4_XS [d][scales_h][scales_l]`; `IQ3_XXS [d][scales]`; `IQ3_S [d][qh][signs][scales]`; `IQ2_XXS [d]`; `IQ2_XS [d][scales]`; `IQ2_S [d][signs][qh][scales]`; `IQ1_S [d][qh]`; `IQ1_M [qh][scales]`); value regions hold per-weight nibbles for the IQ4 types and packed index bytes over `[N, K/g]` otherwise; see `crates/r9v-format/src/iq.rs`.
+Proposed resolution: State the exact SoA record contents, order and repack granularity per IQ family in §3.3 (field names with wire offsets, as SI-57 did for `I3_K`/`I2_K`).
+
+## SI-71 — A2.4 — spec 2 §8
+What: The §8 bits-per-weight table lists no per-type IQ row except `I4_XS` (4.25); the §3.3 table gives only the family range 1.5–3.5 for `IQ2`/`IQ3`/`IQ1` and nothing for `IQ4_NL`.
+Why it blocks or misleads: Without exact per-type ratios, two implementations can report different model sizes for the same file and both claim §8 compliance; the load report (spec 2 §10) and budget math depend on these numbers.
+Option taken: Exact wire-size ratios for all nine families (`I4_NL` 144/32 = 4.5; `I4_XS` 1088/256 = 4.25; `IQ3_XXS` 784/256 = 3.0625; `IQ3_S` 880/256 = 3.4375; `IQ2_XXS` 528/256 = 2.0625; `IQ2_XS` 592/256 = 2.3125; `IQ2_S` 656/256 = 2.5625; `IQ1_S` 400/256 = 1.5625; `IQ1_M` 448/256 = 1.75), all inside the §3.3 family range where one is stated; see `repack_bits_per_weight`.
+Proposed resolution: Add one §8 row per IQ family with the exact wire-size ratio.
