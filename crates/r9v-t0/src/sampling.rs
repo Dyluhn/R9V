@@ -348,13 +348,15 @@ pub fn sample(
         });
     }
 
-    let expected_len = s.checked_mul(v).ok_or_else(|| T0Error::ShapeLengthMismatch {
-        op: "sample",
-        tensor: "probs",
-        expected: usize::MAX,
-        got: probs.len(),
-        detail: "overflow computing S * V".to_string(),
-    })?;
+    let expected_len = s
+        .checked_mul(v)
+        .ok_or_else(|| T0Error::ShapeLengthMismatch {
+            op: "sample",
+            tensor: "probs",
+            expected: usize::MAX,
+            got: probs.len(),
+            detail: "overflow computing S * V".to_string(),
+        })?;
 
     if probs.len() != expected_len {
         return Err(T0Error::ShapeLengthMismatch {
@@ -432,13 +434,15 @@ pub fn verify(
         });
     }
 
-    let k_plus_one = k.checked_add(1).ok_or_else(|| T0Error::ShapeLengthMismatch {
-        op: "verify",
-        tensor: "k",
-        expected: u32::MAX as usize,
-        got: k,
-        detail: "k + 1 overflows usize".to_string(),
-    })?;
+    let k_plus_one = k
+        .checked_add(1)
+        .ok_or_else(|| T0Error::ShapeLengthMismatch {
+            op: "verify",
+            tensor: "k",
+            expected: u32::MAX as usize,
+            got: k,
+            detail: "k + 1 overflows usize".to_string(),
+        })?;
     let terminal_draw = u32::try_from(k).map_err(|_| T0Error::ShapeLengthMismatch {
         op: "verify",
         tensor: "k",
@@ -446,23 +450,26 @@ pub fn verify(
         got: k,
         detail: "k cannot be represented by the Philox draw index".to_string(),
     })?;
-    let draw_advance = terminal_draw
-        .checked_add(1)
+    let draw_advance =
+        terminal_draw
+            .checked_add(1)
+            .ok_or_else(|| T0Error::ShapeLengthMismatch {
+                op: "verify",
+                tensor: "k",
+                expected: (u32::MAX - 1) as usize,
+                got: k,
+                detail: "k + 1 cannot be represented by the Philox draw index".to_string(),
+            })?;
+
+    let expected_draft = s
+        .checked_mul(k)
         .ok_or_else(|| T0Error::ShapeLengthMismatch {
             op: "verify",
-            tensor: "k",
-            expected: (u32::MAX - 1) as usize,
-            got: k,
-            detail: "k + 1 cannot be represented by the Philox draw index".to_string(),
+            tensor: "draft_tokens",
+            expected: usize::MAX,
+            got: draft_tokens.len(),
+            detail: "overflow computing S * k".to_string(),
         })?;
-
-    let expected_draft = s.checked_mul(k).ok_or_else(|| T0Error::ShapeLengthMismatch {
-        op: "verify",
-        tensor: "draft_tokens",
-        expected: usize::MAX,
-        got: draft_tokens.len(),
-        detail: "overflow computing S * k".to_string(),
-    })?;
 
     if draft_tokens.len() != expected_draft {
         return Err(T0Error::ShapeLengthMismatch {

@@ -2,8 +2,8 @@
 #![allow(clippy::needless_range_loop)]
 //! API shape verification for r9v-t0 crate (CONVENTIONS.md §3, Cards A1.5 and A1.8).
 
-use r9v_t0::*;
 use r9v_ir::{SamplingParams, VerifyMethod};
+use r9v_t0::*;
 
 fn assert_send<T: Send>() {}
 fn assert_sync<T: Sync>() {}
