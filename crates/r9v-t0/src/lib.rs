@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! R9V CPU reference scalar T0 implementations (Spec 1 §4.B, §6.4, Spec 4 §2, Card A1.5).
+//! R9V CPU reference scalar T0 implementations
+//! (Spec 1 §4.B, §4.F, §6.4, §6.5, Spec 4 §2, Spec 7 §4, Cards A1.5 and A1.8).
 //!
 //! T0 serves as the primary ground-truth oracle for all engine operations.
 //! Implementations are scalar, strictly deterministic, accumulate in f32 (or i32),
@@ -13,9 +14,11 @@ pub mod copy;
 pub mod dtype;
 pub mod error;
 pub mod norm;
+pub mod philox;
 pub mod quant_act;
 pub mod residual_add;
 pub mod rope;
+pub mod sampling;
 pub mod tolerance;
 
 pub use act_mul::{act_mul, act_mul_f64_reference};
@@ -32,9 +35,11 @@ pub use dtype::{
 };
 pub use error::T0Error;
 pub use norm::{norm, norm_f64_reference};
+pub use philox::{philox4x32_10, u32_to_unit_f32, RngState};
 pub use quant_act::{fp8_e4m3_encode_f64_oracle, quant_act, quant_act_f64_reference};
 pub use residual_add::{residual_add, residual_add_f64_reference};
 pub use rope::{rope, rope_f64_reference};
+pub use sampling::{logits_postprocess, sample, verify, VerifyOutput};
 pub use tolerance::Tolerance;
 
 use r9v_ir::Op;
