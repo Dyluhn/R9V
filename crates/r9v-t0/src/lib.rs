@@ -20,6 +20,7 @@ pub mod dtype;
 pub mod embed_gather;
 pub mod error;
 pub mod gather_rows;
+pub mod harness;
 pub mod linear_attn_scan;
 pub mod logit_softcap;
 pub mod matmul;
