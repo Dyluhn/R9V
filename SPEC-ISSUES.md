@@ -47,3 +47,45 @@ What: The core-type notes call `i4`, `PerRow`, and `Scheme` weights-only, while 
 Why it blocks or misleads: Enforcing “weights-only” as `Tensor.class == Weight` makes the specified n-gram op impossible to construct, even though its staging bytes remain quantized weight-origin data with their scale records. Treating the staging tensor as unquantized would misdescribe its bytes and break reference dequantization.
 Option taken: Allowed weight-side quant schemes and `i4` on `Class::Staging` as well as `Class::Weight`; `PerToken` and `PerBlock32` remain activation-only. The exception is limited to the class explicitly used by `gather_staging`.
 Proposed resolution: Clarify in §2.1–§2.2 that “weights-only” includes quantized weight-origin rows in `Staging` tensors, or give `gather_staging` a distinct closed scheme/class representation.
+
+## SI-7 — A1.2 — spec 1 §4.A `quant_act`
+What: Spec 1 §4.A specifies `quant_act` as `x [T, N] (f16|bf16|f32) -> xq [T, N] (i8|e4m3) PerToken, scale [T] f32` with attrs `target: i8|e4m3, smoothing: None|Folded`, omitting `PerBlock32` and rank-2 scale even though Spec 2 §3.4 and Card A1.5 require `i8 PerBlock32` with scale `[T, N/32] f32`.
+Why it blocks or misleads: Standard GGUF models without `r9v.*` metadata require `i8 PerBlock32` activation quantization for llama.cpp MMQ parity. Strictly enforcing Spec 1 §4.A's closed signature prevents the IR from expressing block-scaled activation quantization.
+Option taken: Added a `scheme: QuantScheme` attribute to `QuantActOp` supporting `PerToken` and `PerBlock32`. Validated that `PerBlock32` requires target `i8`, `N` divisible by 32, and scale rank 2 `[T, N/32] f32`, while rejecting `e4m3 PerBlock32`.
+Proposed resolution: Update Spec 1 §4.A to add `scheme: PerToken | PerBlock32` to `attrs` and document the conditional `scale` shape (`[T]` for `PerToken`, `[T, N/32]` for `PerBlock32`).
+
+## SI-8 — A1.2 — spec 1 §4.A `ngram_gather`
+What: Spec 1 §4.A specifies `ngram_gather` consuming `gather_staging [T, Np, Dn] (i4|i8, Block), row_scales -> x [T, Np·Dn] act_dtype`, notes a `Device` table mode where hashing occurs on device and `gather_staging` is unused, but provides no signature for device-table mode.
+Why it blocks or misleads: Without a signature for the device-table case, the op cannot validate its inputs when gathering directly from a device table, and ignoring input tensors leads to silent signature mismatch between graph and execution.
+Option taken: Added a closed `source: NgramSource` attribute (`Staged` vs `Device`). Validated an exact two-tensor signature for each mode: `(gather_staging, row_scales)` for staged mode, and `(token_ids [T] u32, table [TotalEntries, Dn])` with `Device` placement and `Weight` class for device-table mode.
+Proposed resolution: Explicitly document the two input tensor signatures for staged mode and device-table mode in Spec 1 §4.A.
+
+## SI-9 — A1.2 — spec 1 §4.C `matmul`
+What: Spec 1 §4.C lists `epilogue: None|Bias|Residual|Act(act)` and includes `bias? [N] f32` in the input signature, but omits the `residual` activation tensor `[M, N]` from the signature.
+Why it blocks or misleads: Spec 1 §3.4 and §5.2 explicitly permit matmul residual epilogues and partial sum flow through them. Without a formal input tensor for the residual operand, the step graph cannot represent or validate fused matmul-residual nodes.
+Option taken: Validated input tensors conditionally based on `epilogue`: `None` and `Act` require exactly 2 inputs `(x, w)`, `Bias` requires 3 inputs `(x, w, bias [N] f32)`, and `Residual` requires 3 inputs `(x, w, residual [M, N])` with matching activation dtype.
+Proposed resolution: Update Spec 1 §4.C to list `epilogue_in?` in inputs, specifying `bias [N] f32` for `Bias` and `residual [M, N] act_dtype` for `Residual`.
+
+## SI-10 — A1.2 — spec 1 §4.A `gather_rows` and `scatter_add_rows`
+What: Spec 1 §4.A names `gather_rows` and `scatter_add_rows` as ops exposed for reference-tier MoE and tree-verify bookkeeping, but omits their input/output tensor signatures, ranks, and dtypes.
+Why it blocks or misleads: Without declared tensor signatures, graph construction, op validation, and sharding tables for these ops cannot be verified against the specification.
+Option taken: Defined and validated explicit signatures: `gather_rows(x [N, D], indices [M] u32) -> y [M, D]` and `scatter_add_rows(x [M, D], indices [M] u32, dest? [N, D]) -> y [N, D]`.
+Proposed resolution: Add explicit signature blocks and shape/dtype constraints for `gather_rows` and `scatter_add_rows` in Spec 1 §4.A.
+
+## SI-11 — A1.2 — spec 1 §4.G collective operations
+What: Spec 1 §4.G lists collective ops `all_reduce`, `all_gather`, `reduce_scatter`, `all_to_all(counts)`, `send(peer)`, `recv(peer)`, `barrier` and groups attributes `group: GroupId`, `dtype`, `reduce_in: f32` at the section level, but omits explicit per-op argument mappings.
+Why it blocks or misleads: The absence of per-op attribute definitions leaves `send` and `recv` without an explicit communicator `group`, `reduce_scatter` and `all_gather` without a partition axis, `recv` without an expected shape, and `all_to_all` without an explicit counts tensor signature.
+Option taken: Added `group: GroupId` to `SendOp` and `RecvOp`, `shape: Box<[Dim]>` to `RecvOp`, `axis: u32` to `AllGatherOp` and `ReduceScatterOp`, `reduce_in == DType::F32` validation to `AllReduceOp` and `ReduceScatterOp`, and validated a two-tensor input signature `(x, counts [P] u32)` for `AllToAllOp`.
+Proposed resolution: Provide individual op signatures and attribute listings for each collective operation in Spec 1 §4.G.
+
+## SI-12 — A1.2 — spec 1 §3.1, §3.2, §4.D, §4.F non-Tensor step graph inputs
+What: Spec 1 §3.1 defines a graph as a DAG of op instances over tensors, but §3.2, §4.D, and §4.F describe `BatchMeta`, `SamplingParams`, `rng_state`, and `TreeMask` as graph inputs or op arguments without defining them as Tensors.
+Why it blocks or misleads: Modeling non-tensor execution metadata as fake `Tensor` instances compromises tensor invariant validation, while omitting them prevents step graphs from capturing complete runtime inputs.
+Option taken: Kept `rng_state`, `BatchMeta` (including its optional `TreeMask`), and `SamplingParams` as typed non-Tensor external values because `DType` is closed. Op-level `validate(&self, inputs, outputs)` validates only the tensor portions of signatures, while structured non-tensor metadata and parameters are validated via dedicated typed validation methods (such as `SamplingParams::validate()`).
+Proposed resolution: Clarify in Spec 1 §3.1 and §3.2 that step graphs capture structured non-tensor external inputs alongside tensor edges, and specify that op tensor validation applies strictly to tensor portions.
+
+## SI-13 — A1.2 — spec 1 §3.4 `logits_postprocess -> sample` fusion
+What: Spec 1 §3.4 lists `logits_postprocess -> sample` as a permitted fusion pattern, but `logits_postprocess` emits `probs [S, q, V] f32` (rank 3) while `sample` consumes `probs [S, V] f32` (rank 2).
+Why it blocks or misleads: During decode `q = 1` the query dimension is degenerate, but prefill and speculative verify steps have `q > 1`, creating a structural rank contradiction across the fused edge.
+Option taken: Modeled the fusion pattern for decode-class steps where `q = 1` allows squeezing the degenerate dimension into `[S, V]`, and documented that multi-token sampling requires per-token dispatch.
+Proposed resolution: Clarify in Spec 1 §3.4 that `logits_postprocess -> sample` fusion applies specifically to decode-class sequences with `q = 1`.
