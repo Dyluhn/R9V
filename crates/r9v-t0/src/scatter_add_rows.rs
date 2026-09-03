@@ -217,17 +217,22 @@ pub fn scatter_add_rows(
         }
     }
 
-    // Bounds check every index before modifying output
-    for pos in 0..m {
-        let idx = indices.read_u32(pos);
-        if idx as usize >= n {
-            problems.push(T0Error::RowIndexOutOfRange {
-                op: "scatter_add_rows",
-                tensor: "indices",
-                position: pos,
-                index: idx,
-                upper_bound: n,
-            });
+    // Bounds check every index before modifying output. Skipped when the
+    // index count already mismatches M (recorded above): reading 0..m
+    // would panic on the short buffer instead of returning the typed
+    // DimensionMismatch (A1.10 illegal fuzz).
+    if indices.shape()[0] == m {
+        for pos in 0..m {
+            let idx = indices.read_u32(pos);
+            if idx as usize >= n {
+                problems.push(T0Error::RowIndexOutOfRange {
+                    op: "scatter_add_rows",
+                    tensor: "indices",
+                    position: pos,
+                    index: idx,
+                    upper_bound: n,
+                });
+            }
         }
     }
 
