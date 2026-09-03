@@ -28,6 +28,6 @@ pub use permute::{
 };
 pub use sparse::{
     l1s_index_lane, l1s_index_region_bytes, l1s_pack_indices, l1s_unpack_indices, l1s_value_dims,
-    L1Regions, L1sRegions, L1S_INDEX_BITS, L1S_INDEX_BYTES_PER_TILE, L1S_KEPT_PER_LANE,
-    L1S_KEPT_PER_TILE,
+    L1Regions, L1sRegions, L1S_INDEX_BITS, L1S_INDEX_BYTES_PER_LANE, L1S_INDEX_BYTES_PER_TILE,
+    L1S_KEPT_PER_LANE, L1S_KEPT_PER_TILE,
 };
