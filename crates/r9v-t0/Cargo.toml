@@ -8,3 +8,4 @@ repository.workspace = true
 description = "R9V CPU reference scalar T0 and SIMD T0v implementations (Spec 4, Spec 14 §2)"
 
 [dependencies]
+r9v-common = { path = "../r9v-common" }

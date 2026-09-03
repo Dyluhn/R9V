@@ -8,3 +8,4 @@ repository.workspace = true
 description = "R9V development and maintenance automation tasks (Spec 14 §2, §4)"
 
 [dependencies]
+r9v-common = { path = "../crates/r9v-common" }
