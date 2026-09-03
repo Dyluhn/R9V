@@ -2,6 +2,7 @@
 //! API-shape and trait boundary tests for `r9v-models` (Spec 8; card A1.3; CONVENTIONS.md §4.1).
 
 use r9v_ir::version::IrVersion;
+use r9v_models::families::llama::AcceptedKeyDef;
 use r9v_models::{
     BoundWeight, CacheDtype, ExpertSummary, Ffn, FusionDecl, GgufMeta, Graph, GraphBuilder,
     LayerSpec, LayerSummary, MetaValue, Mixer, MixerKind, MlaSpec, ModelGraph, ModelSpec,
@@ -116,6 +117,27 @@ fn test_all_public_types_send_sync() {
 
     assert_send::<MetaValue>();
     assert_sync::<MetaValue>();
+
+    assert_send::<AcceptedKeyDef>();
+    assert_sync::<AcceptedKeyDef>();
+}
+
+#[test]
+fn test_family_registry_api() {
+    use r9v_models::families::{
+        find_family, is_supported_architecture, nearest_family, supported_architectures,
+    };
+
+    let archs = supported_architectures();
+    assert_eq!(archs.len(), 8);
+    for arch in archs {
+        assert!(is_supported_architecture(arch));
+        assert_eq!(find_family(arch), Some("llama"));
+    }
+
+    assert!(!is_supported_architecture("gpt2"));
+    assert_eq!(find_family("gpt2"), None);
+    assert_eq!(nearest_family("gpt2"), "llama");
 }
 
 #[test]

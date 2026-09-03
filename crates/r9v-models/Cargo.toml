@@ -12,3 +12,7 @@ r9v-common = { path = "../r9v-common" }
 r9v-ir = { path = "../r9v-ir" }
 r9v-state = { path = "../r9v-state" }
 thiserror = "2.0"
+
+[dev-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

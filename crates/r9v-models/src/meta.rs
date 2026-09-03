@@ -160,6 +160,11 @@ impl SyntheticGgufMeta {
         self.entries.insert(key.into(), MetaValue::U32Array(val));
         self
     }
+
+    /// Removes an entry by key if present.
+    pub fn remove(&mut self, key: &str) -> Option<MetaValue> {
+        self.entries.remove(key)
+    }
 }
 
 impl GgufMeta for SyntheticGgufMeta {

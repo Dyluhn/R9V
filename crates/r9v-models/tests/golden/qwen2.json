@@ -1,0 +1,179 @@
+{
+  "architecture": "qwen2",
+  "model_spec": {
+    "dm": 128,
+    "vocab": 1000,
+    "embed_scale": 1.0,
+    "tied_embeddings": false,
+    "final_norm": {
+      "kind": "rms",
+      "eps": 0.000001,
+      "weight_offset": 0.0
+    },
+    "final_logit_softcap": null,
+    "positions": "scalar",
+    "eos_ids": [
+      2
+    ],
+    "bos_id": 1,
+    "layer_count": 2,
+    "layers": [
+      {
+        "layer_index": 0,
+        "norm_placement": "pre",
+        "norm_kind": {
+          "kind": "rms",
+          "eps": 0.000001,
+          "weight_offset": 0.0
+        },
+        "residual_scale": 1.0,
+        "mixer": {
+          "kind": "attention",
+          "h": 4,
+          "hkv": 2,
+          "d": 32,
+          "dv": 32,
+          "qkv_bias": true,
+          "o_bias": false,
+          "qk_norm": null,
+          "rope": {
+            "theta": 1000000.0,
+            "rot_dim": 32,
+            "style": "neox",
+            "scaling": "none"
+          },
+          "window": null,
+          "sinks": 0,
+          "logit_softcap": null,
+          "output_gate": false,
+          "cache_dtype": "e4m3"
+        },
+        "ffn": {
+          "kind": "dense",
+          "dff": 256,
+          "act": "silu",
+          "gated": true,
+          "bias": false
+        }
+      },
+      {
+        "layer_index": 1,
+        "norm_placement": "pre",
+        "norm_kind": {
+          "kind": "rms",
+          "eps": 0.000001,
+          "weight_offset": 0.0
+        },
+        "residual_scale": 1.0,
+        "mixer": {
+          "kind": "attention",
+          "h": 4,
+          "hkv": 2,
+          "d": 32,
+          "dv": 32,
+          "qkv_bias": true,
+          "o_bias": false,
+          "qk_norm": null,
+          "rope": {
+            "theta": 1000000.0,
+            "rot_dim": 32,
+            "style": "neox",
+            "scaling": "none"
+          },
+          "window": null,
+          "sinks": 0,
+          "logit_softcap": null,
+          "output_gate": false,
+          "cache_dtype": "e4m3"
+        },
+        "ffn": {
+          "kind": "dense",
+          "dff": 256,
+          "act": "silu",
+          "gated": true,
+          "bias": false
+        }
+      }
+    ]
+  },
+  "bound_weights": [
+    "token_embd.weight",
+    "blk.0.attn_norm.weight",
+    "blk.0.attn_q.weight",
+    "blk.0.attn_q.bias",
+    "blk.0.attn_k.weight",
+    "blk.0.attn_k.bias",
+    "blk.0.attn_v.weight",
+    "blk.0.attn_v.bias",
+    "blk.0.attn_output.weight",
+    "blk.0.ffn_norm.weight",
+    "blk.0.ffn_gate.weight",
+    "blk.0.ffn_up.weight",
+    "blk.0.ffn_down.weight",
+    "blk.1.attn_norm.weight",
+    "blk.1.attn_q.weight",
+    "blk.1.attn_q.bias",
+    "blk.1.attn_k.weight",
+    "blk.1.attn_k.bias",
+    "blk.1.attn_v.weight",
+    "blk.1.attn_v.bias",
+    "blk.1.attn_output.weight",
+    "blk.1.ffn_norm.weight",
+    "blk.1.ffn_gate.weight",
+    "blk.1.ffn_up.weight",
+    "blk.1.ffn_down.weight",
+    "output_norm.weight",
+    "output.weight"
+  ],
+  "state_declarations": [
+    {
+      "layer": 0,
+      "handle_layer": 0,
+      "state_kind": "KvPaged",
+      "dim": 32,
+      "cache": "E4m3",
+      "retain": "all"
+    },
+    {
+      "layer": 1,
+      "handle_layer": 1,
+      "state_kind": "KvPaged",
+      "dim": 32,
+      "cache": "E4m3",
+      "retain": "all"
+    }
+  ],
+  "fusion_declarations": [
+    {
+      "kind": "qkv",
+      "tensors": [
+        "blk.0.attn_q.weight",
+        "blk.0.attn_k.weight",
+        "blk.0.attn_v.weight"
+      ]
+    },
+    {
+      "kind": "gate_up",
+      "tensors": [
+        "blk.0.ffn_gate.weight",
+        "blk.0.ffn_up.weight"
+      ]
+    },
+    {
+      "kind": "qkv",
+      "tensors": [
+        "blk.1.attn_q.weight",
+        "blk.1.attn_k.weight",
+        "blk.1.attn_v.weight"
+      ]
+    },
+    {
+      "kind": "gate_up",
+      "tensors": [
+        "blk.1.ffn_gate.weight",
+        "blk.1.ffn_up.weight"
+      ]
+    }
+  ],
+  "tied_declarations": []
+}
