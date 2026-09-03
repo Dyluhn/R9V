@@ -262,6 +262,261 @@ pub enum IrError {
         value: f32,
     },
 
+    /// An op received an unexpected number of input tensors (Spec 1 §4).
+    #[error("op `{op}` expected {expected} inputs, got {got} (Spec 1 §4)")]
+    OpInputCountMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Expected input count.
+        expected: usize,
+        /// Actual input count.
+        got: usize,
+    },
+
+    /// An op received an unexpected number of input tensors when multiple counts are accepted (Spec 1 §4).
+    #[error("op `{op}` expected one of {expected:?} inputs, got {got} (Spec 1 §4)")]
+    OpInputCountCandidatesMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Accepted input counts.
+        expected: Box<[usize]>,
+        /// Actual input count.
+        got: usize,
+    },
+
+    /// An op received an unexpected number of output tensors (Spec 1 §4).
+    #[error("op `{op}` expected {expected} outputs, got {got} (Spec 1 §4)")]
+    OpOutputCountMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Expected output count.
+        expected: usize,
+        /// Actual output count.
+        got: usize,
+    },
+
+    /// An op received an unexpected number of output tensors when multiple counts are accepted (Spec 1 §4).
+    #[error("op `{op}` expected one of {expected:?} outputs, got {got} (Spec 1 §4)")]
+    OpOutputCountCandidatesMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Accepted output counts.
+        expected: Box<[usize]>,
+        /// Actual output count.
+        got: usize,
+    },
+
+    /// An op tensor has an unexpected dtype (Spec 1 §4).
+    #[error("op `{op}` tensor `{tensor}` expected dtype in {expected:?}, got {got} (Spec 1 §4)")]
+    OpDTypeMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Tensor role or parameter name.
+        tensor: &'static str,
+        /// Allowed dtypes.
+        expected: Box<[DType]>,
+        /// Actual dtype.
+        got: DType,
+    },
+
+    /// An op tensor has an unexpected rank (Spec 1 §4).
+    #[error("op `{op}` tensor `{tensor}` expected rank {expected}, got {got} (Spec 1 §4)")]
+    OpRankMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Tensor role or parameter name.
+        tensor: &'static str,
+        /// Expected rank.
+        expected: usize,
+        /// Actual rank.
+        got: usize,
+    },
+
+    /// An op tensor has a shape mismatch against constraints (Spec 1 §4).
+    #[error("op `{op}` tensor `{tensor}` shape mismatch: {detail} (Spec 1 §4)")]
+    OpShapeMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Tensor role or parameter name.
+        tensor: &'static str,
+        /// Detail of the mismatch.
+        detail: String,
+    },
+
+    /// An op tensor has an unexpected layout (Spec 1 §4).
+    #[error("op `{op}` tensor `{tensor}` expected layout {expected}, got {got} (Spec 1 §4)")]
+    OpLayoutMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Tensor role or parameter name.
+        tensor: &'static str,
+        /// Expected layout.
+        expected: LayoutId,
+        /// Actual layout.
+        got: LayoutId,
+    },
+
+    /// An op tensor has an unexpected quantization scheme (Spec 1 §4).
+    #[error("op `{op}` tensor `{tensor}` unexpected quant scheme {quant:?} (Spec 1 §4)")]
+    OpQuantMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Tensor role or parameter name.
+        tensor: &'static str,
+        /// Actual quant scheme.
+        quant: QuantScheme,
+    },
+
+    /// An op tensor has an illegal placement (Spec 1 §4).
+    #[error("op `{op}` tensor `{tensor}` illegal placement {placement} (Spec 1 §4)")]
+    OpPlacementMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Tensor role or parameter name.
+        tensor: &'static str,
+        /// Actual placement.
+        placement: Placement,
+    },
+
+    /// An op tensor has an unexpected class (Spec 1 §4).
+    #[error("op `{op}` tensor `{tensor}` expected class {expected}, got {got} (Spec 1 §4)")]
+    OpClassMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Tensor role or parameter name.
+        tensor: &'static str,
+        /// Expected class.
+        expected: Class,
+        /// Actual class.
+        got: Class,
+    },
+
+    /// An op attribute violates its specification (Spec 1 §4).
+    #[error("op `{op}` attribute `{attribute}` invalid: {reason} (Spec 1 §4)")]
+    OpAttributeInvalid {
+        /// Op name.
+        op: &'static str,
+        /// Attribute name.
+        attribute: &'static str,
+        /// Failure reason.
+        reason: String,
+    },
+
+    /// An op received an incompatible state handle kind (Spec 1 §4.D, §4.E).
+    #[error("op `{op}` expected state kind {expected:?}, got {got:?} (Spec 1 §4)")]
+    StateHandleKindMismatch {
+        /// Op name.
+        op: &'static str,
+        /// Expected state kind.
+        expected: crate::StateKind,
+        /// Actual state kind.
+        got: crate::StateKind,
+    },
+
+    /// A batch axis value exceeded the maximum bucket size of 4096 (Spec 1 §3.5).
+    #[error("axis `{axis}` value {value} exceeds max bucket {max} (Spec 1 §3.5)")]
+    BucketExceeded {
+        /// Axis name.
+        axis: &'static str,
+        /// Actual value.
+        value: u32,
+        /// Maximum bucket size (4096).
+        max: u32,
+    },
+
+    /// A bucket value is not valid for the given axis (Spec 1 §3.5).
+    #[error("invalid bucket value {value} for axis `{axis}` (Spec 1 §3.5)")]
+    InvalidBucket {
+        /// Axis name.
+        axis: &'static str,
+        /// Value.
+        value: u32,
+    },
+
+    /// Graph contains a cycle (Spec 1 §3.1).
+    #[error("graph contains a cycle involving node {node} (Spec 1 §3.1)")]
+    GraphCycle {
+        /// Offending node index.
+        node: usize,
+    },
+
+    /// Referenced graph node does not exist.
+    #[error("graph node {node} not found")]
+    GraphNodeNotFound {
+        /// Missing node id.
+        node: usize,
+    },
+
+    /// Referenced graph edge does not exist.
+    #[error("graph edge {edge} not found")]
+    GraphEdgeNotFound {
+        /// Missing edge id.
+        edge: usize,
+    },
+
+    /// A graph op requires a structured external input that was not bound
+    /// (Spec 1 §3.2, §4).
+    #[error("graph op `{required_by}` requires external input {kind:?} (Spec 1 §3.2, §4)")]
+    GraphExternalInputMissing {
+        /// Missing structured input kind.
+        kind: crate::graph::ExternalInputKind,
+        /// Op that requires the input.
+        required_by: &'static str,
+    },
+
+    /// A graph op mutates structured state but its external output was not
+    /// declared (Spec 1 §3.2, §4.F).
+    #[error("graph op `{required_by}` requires external output {kind:?} (Spec 1 §3.2, §4.F)")]
+    GraphExternalOutputMissing {
+        /// Missing structured output kind.
+        kind: crate::graph::ExternalOutputKind,
+        /// Op that requires the output.
+        required_by: &'static str,
+    },
+
+    /// An external output was bound to an edge that is not produced by an op
+    /// in this graph (Spec 1 §3.1–§3.2).
+    #[error("external output {kind:?} cannot bind unproduced edge {edge} (Spec 1 §3.1–§3.2)")]
+    GraphExternalOutputUnproduced {
+        /// External output kind being bound.
+        kind: crate::graph::ExternalOutputKind,
+        /// Edge without an operation producer.
+        edge: usize,
+    },
+
+    /// A graph-owned source tensor uses a class reserved for request-time or
+    /// operation-produced data (Spec 1 §2.3, §3.1–§3.2).
+    #[error("graph-owned source edge cannot use tensor class {class} (Spec 1 §2.3, §3.1–§3.2)")]
+    GraphSourceClassInvalid {
+        /// Rejected tensor class.
+        class: Class,
+    },
+
+    /// A tensor edge is placed on a device other than the graph capture rank
+    /// (Spec 1 §3.1).
+    #[error("graph edge {edge} is on device rank {tensor_rank}, expected graph rank {graph_rank} (Spec 1 §3.1)")]
+    GraphTensorRankMismatch {
+        /// Edge carrying the mismatched tensor.
+        edge: usize,
+        /// Rank in the tensor placement.
+        tensor_rank: u32,
+        /// Rank in the step-graph key.
+        graph_rank: u32,
+    },
+
+    /// A stride mismatch occurred between actual and expected layout (Spec 1 §3.3).
+    #[error(
+        "stride mismatch on edge {edge}: actual {actual:?}, expected {expected:?} (Spec 1 §3.3)"
+    )]
+    StrideMismatch {
+        /// Edge id.
+        edge: usize,
+        /// Actual strides.
+        actual: Box<[i64]>,
+        /// Expected contiguous strides.
+        expected: Box<[i64]>,
+    },
+
     /// Collect-all wrapper: every problem found before returning
     /// (CONVENTIONS.md §1.4). Constructors return the single problem directly
     /// when only one exists.
@@ -270,4 +525,20 @@ pub enum IrError {
         /// Every problem found, in deterministic field order.
         problems: Box<[IrError]>,
     },
+}
+
+impl IrError {
+    /// Collapses a list of accumulated errors into `Ok(())`, single `Err(e)`,
+    /// or [`IrError::Multiple`] per CONVENTIONS.md §1.4.
+    pub fn from_problems(mut problems: Vec<IrError>) -> Result<(), Self> {
+        if problems.is_empty() {
+            Ok(())
+        } else if problems.len() == 1 {
+            Err(problems.pop().expect("problems holds exactly one entry"))
+        } else {
+            Err(Self::Multiple {
+                problems: problems.into_boxed_slice(),
+            })
+        }
+    }
 }
