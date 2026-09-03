@@ -4731,11 +4731,11 @@ impl StateWriteKvOp {
             // DECISION(A1.14): with `latent`, canonical exact-split form writes
             // operand 0 as compressed latent c_kv ([T, H, kv_lora_rank]) and
             // operand 1 as rotated k_rope ([T, H, rope_dim]), consistent with
-            // Spec 1 §4.D compressed-latent-plus-rope wording, Spec 3 §3.6
+            // Spec 1 §4.D compressed-latent-plus-rope wording, Spec 3 §3.2
             // physical regions, and preexisting A1.3 call order. The combined form
             // (operand 0 holding kv_lora_rank + rope_dim) remains accepted for
             // A1.2-era compatibility; the inverted order (rope first, latent second)
-            // is rejected. Spec 1 §4.D, Spec 3 §3.6, SI-29.
+            // is rejected. Spec 1 §4.D, Spec 3 §3.2, SI-29.
             if let Some(ref l) = self.latent {
                 if k.rank() == 3 && v.rank() == 3 {
                     if let (Dim::Concrete(d0), Dim::Concrete(d1)) = (k.shape()[2], v.shape()[2]) {
