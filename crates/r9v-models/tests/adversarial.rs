@@ -571,7 +571,7 @@ fn dense_gated_bias_lowers_through_bias_epilogue() {
 }
 
 /// MLA with `qk_norm` lowers to per-side norms instead of being rejected or
-/// ignored (Spec 8 §3; card A1.14, SI-20).
+/// ignored (Spec 8 §3; card A1.14, SI-29).
 #[test]
 fn mla_qk_norm_lowers_instead_of_rejecting() {
     let mixer = Mixer::Attention {

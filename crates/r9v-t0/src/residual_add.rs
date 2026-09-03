@@ -6,7 +6,7 @@ use r9v_ir::{DType, ResidualAddOp};
 use crate::buffer::{TensorView, TensorViewMut};
 use crate::error::T0Error;
 
-/// Executes scalar T0 residual addition: `a + scale * b` in f32, cast to `out_dtype` (Spec 1 §4.B, Spec 1 §6.1, Spec 1 §6.4, Spec 4 §2; card A1.14, SI-18).
+/// Executes scalar T0 residual addition: `a + scale * b` in f32, cast to `out_dtype` (Spec 1 §4.B, Spec 1 §6.1, Spec 1 §6.4, Spec 4 §2; card A1.14, SI-27).
 pub fn residual_add(
     op: &ResidualAddOp,
     a: &TensorView<'_>,
@@ -72,7 +72,7 @@ pub fn residual_add(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.B, Spec 4 §2; card A1.14, SI-18).
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.B, Spec 4 §2; card A1.14, SI-27).
 pub fn residual_add_f64_reference(a: &[f64], b: &[f64], scale: f64) -> Vec<f64> {
     assert_eq!(a.len(), b.len());
     a.iter()

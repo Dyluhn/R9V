@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! IR-level oracles for card A1.14: BatchMeta.positions projections, strict
 //! rope positions wiring, the split/concat/softcap extension ops, scaled
-//! residuals, and the exact MLA state-write pair (SI-18 through SI-23).
+//! residuals, and the exact MLA state-write pair (SI-27 through SI-33).
 
 use r9v_ir::{
     CacheScaleGranularity, Class, DType, Dim, EdgeId, EmbedGatherOp, ExternalInputKind, Graph,
-    IrError, LayoutId, LogitSoftcapOp, MlaLatent, Op, Placement, PlanId, PositionsKind,
+    IrError, IrVersion, LayoutId, LogitSoftcapOp, MlaLatent, Op, Placement, PlanId, PositionsKind,
     QuantScheme, ResidualAddOp, RopeOp, RopeScaling, RopeStyle, ShapeSymbol, ShardLayout, SplitOp,
     StateHandle, StateKind, StateWriteKvOp, StepGraphKey, Tensor,
 };
@@ -355,12 +355,12 @@ fn state_write_accepts_exact_mla_split_pair() {
         kv_lora_rank: 16,
         rope_dim: 8,
     };
-    let k = act_tensor(
-        vec![Dim::Concrete(2), Dim::Concrete(1), Dim::Concrete(8)],
+    let c_kv = act_tensor(
+        vec![Dim::Concrete(2), Dim::Concrete(1), Dim::Concrete(16)],
         DType::F16,
     );
-    let v = act_tensor(
-        vec![Dim::Concrete(2), Dim::Concrete(1), Dim::Concrete(16)],
+    let k_rope = act_tensor(
+        vec![Dim::Concrete(2), Dim::Concrete(1), Dim::Concrete(8)],
         DType::F16,
     );
     let op = || StateWriteKvOp {
@@ -369,15 +369,38 @@ fn state_write_accepts_exact_mla_split_pair() {
         latent: Some(latent),
         handle: StateHandle::new(0, StateKind::KvLatent),
     };
-    op().validate(&[k.clone(), v.clone()], &[])
-        .expect("exact (rope, latent) split pair validates");
+    // 1. Exact canonical split: operand 0 compressed latent c_kv, operand 1 rotated k_rope (Spec 1 §4.D, SI-29)
+    op().validate(&[c_kv.clone(), k_rope.clone()], &[])
+        .expect("exact canonical (latent, rotary) split pair validates");
 
-    // Swapped or wrong widths are rejected.
-    let err = op().validate(&[v, k], &[]).unwrap_err();
+    // 2. Reject the inversion: operand 0 rotary, operand 1 latent
+    let err = op()
+        .validate(&[k_rope.clone(), c_kv.clone()], &[])
+        .unwrap_err();
     assert!(
         !format!("{err:?}").is_empty(),
-        "mismatched split pair rejected: {err}"
+        "inverted split pair rejected: {err}"
     );
+
+    // 3. Retain explicitly documented A1.2 combined-form compatibility (k dim = kv_lora_rank + rope_dim)
+    let k_combined = act_tensor(
+        vec![Dim::Concrete(2), Dim::Concrete(1), Dim::Concrete(24)],
+        DType::F16,
+    );
+    op().validate(&[k_combined, c_kv], &[])
+        .expect("combined form validates for A1.2 compatibility");
+}
+
+#[test]
+fn ir_version_bumped_for_residual_add_signature_change() {
+    // Card A1.14 / Spec 1 §7 / SI-27: ResidualAddOp gained a scale attribute,
+    // which is an op signature change requiring a minor version bump from 0.1.0 to 0.2.0.
+    assert_eq!(
+        IrVersion::CURRENT,
+        IrVersion::new(0, 2, 0),
+        "IrVersion::CURRENT must be 0.2.0 after ResidualAddOp scale signature change"
+    );
+    assert_eq!(IrVersion::CURRENT.to_string(), "0.2.0");
 }
 
 #[test]

@@ -990,7 +990,7 @@ pub static BARRIER_RULES: &[ShardingRule] = &[ShardingRule::new(&[], &[])];
 // every A1.14 producer binds Replicated tensors, and head/expert sharding of
 // MLA channel ranges is a future partitioner card's table entry, not this
 // card's. Rejected inventing HeadShard channel-range rules the partitioner
-// has no lowering for. SI-20.
+// has no lowering for. SI-29.
 pub static SPLIT_RULES: &[ShardingRule] = &[ShardingRule::new(
     &[ShardLayoutPattern::Replicated],
     &[

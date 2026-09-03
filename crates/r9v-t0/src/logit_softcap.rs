@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Scalar T0 implementation of the final-logit softcap (card A1.14, SI-19, Spec 4 §2).
+//! Scalar T0 implementation of the final-logit softcap (card A1.14, SI-28, Spec 4 §2).
 
 use r9v_ir::{DType, LogitSoftcapOp};
 
@@ -7,7 +7,7 @@ use crate::buffer::{TensorView, TensorViewMut};
 use crate::error::T0Error;
 
 /// Executes scalar T0 logit softcap: `y = cap * tanh(x / cap)` in f32 over
-/// `x [T, V] f32` (card A1.14, SI-19, Spec 4 §2).
+/// `x [T, V] f32` (card A1.14, SI-28, Spec 4 §2).
 pub fn logit_softcap(
     op: &LogitSoftcapOp,
     x: &TensorView<'_>,
@@ -63,7 +63,7 @@ pub fn logit_softcap(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0 (card A1.14, SI-19).
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (card A1.14, SI-28).
 pub fn logit_softcap_f64_reference(x: &[f64], cap: f64) -> Vec<f64> {
     x.iter().map(|&v| cap * (v / cap).tanh()).collect()
 }

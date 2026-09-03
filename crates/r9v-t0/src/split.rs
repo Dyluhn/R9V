@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Scalar T0 implementation of the last-axis channel split (card A1.14, SI-20, Spec 4 §2).
+//! Scalar T0 implementation of the last-axis channel split (card A1.14, SI-29, Spec 4 §2).
 
 use r9v_ir::{DType, SplitOp};
 
@@ -8,7 +8,7 @@ use crate::error::T0Error;
 
 /// Executes scalar T0 channel split: `x [T, H, D]` into `a [T, H, first]`
 /// and `b [T, H, D - first]`, copying values unchanged in ascending index
-/// order (card A1.14, SI-20, Spec 4 §2).
+/// order (card A1.14, SI-29, Spec 4 §2).
 pub fn split(
     op: &SplitOp,
     x: &TensorView<'_>,
@@ -121,7 +121,7 @@ pub fn split(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0 (card A1.14, SI-20).
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (card A1.14, SI-29).
 pub fn split_f64_reference(x: &[f64], shape: [usize; 3], first: usize) -> (Vec<f64>, Vec<f64>) {
     let [t, h, d] = shape;
     assert_eq!(x.len(), t * h * d);

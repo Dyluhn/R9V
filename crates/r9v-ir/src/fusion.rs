@@ -357,7 +357,7 @@ fn match_pair(producer: &Op, consumer: &Op) -> Option<FusionPattern> {
         },
         // DECISION(A1.14): split, concat, and logit_softcap participate in no
         // Spec 1 §3.4 fusion as producer or consumer; listed explicitly so the
-        // closed match stays exhaustive. SI-19, SI-20.
+        // closed match stays exhaustive. SI-28, SI-29.
         Op::Split(_) | Op::Concat(_) | Op::LogitSoftcap(_) => None,
         Op::EmbedGather(_)
         | Op::NgramGather(_)

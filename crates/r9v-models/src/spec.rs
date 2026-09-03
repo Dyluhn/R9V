@@ -687,7 +687,7 @@ impl LayerSpec {
                     // Card A1.14 lowers qk_norm on the MLA form instead of
                     // rejecting it (per-side norms in the generic builder);
                     // nothing to refuse here beyond the norm's own validation
-                    // above. SI-20.
+                    // above. SI-29.
                 }
                 check_layer_dim(&mut problems, layer_idx, "h", *h, MAX_ATTENTION_HEADS);
                 check_layer_dim(&mut problems, layer_idx, "hkv", *hkv, MAX_KV_HEADS);

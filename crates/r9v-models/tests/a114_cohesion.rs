@@ -2,7 +2,7 @@
 //! Model/IR graph-value cohesion oracles for card A1.14: opaque SSA value
 //! identity, typed BatchMeta.positions projections, explicit MTP captures,
 //! exact MLA lowering, and scaled-residual / final-softcap lowering
-//! (SI-18 through SI-23).
+//! (SI-27 through SI-32).
 
 use r9v_ir::{ActivationKind, DType, Dim, NormAxis, Op, RopeScaling, RopeStyle, ShapeSymbol};
 use r9v_ir::{IrVersion, StateKind};
@@ -79,7 +79,7 @@ fn tiny_model(layers: Vec<LayerSpec>) -> ModelSpec {
 }
 
 /// Two structurally identical weights mint distinct edges, cloning preserves
-/// identity, and consumers read the intended edge (SI-22).
+/// identity, and consumers read the intended edge (SI-31).
 #[test]
 fn identical_descriptor_weights_never_alias() {
     let mut builder = GraphBuilder::new(IrVersion::CURRENT, "a114-ssa");
@@ -140,7 +140,7 @@ fn identical_descriptor_weights_never_alias() {
 }
 
 /// Scalar models bind one `[T] u32` positions projection; every rope reads
-/// it, never token IDs (SI-21).
+/// it, never token IDs (SI-30).
 #[test]
 fn scalar_positions_projection_feeds_rope() {
     let model = tiny_model(vec![tiny_layer()]);
@@ -196,7 +196,7 @@ fn scalar_positions_projection_feeds_rope() {
     assert_eq!(ropes, 2, "both rope nodes present");
 }
 
-/// MRoPE models bind one `[T, 3] u32` projection accepted by rope (SI-21).
+/// MRoPE models bind one `[T, 3] u32` projection accepted by rope (SI-30).
 #[test]
 fn mrope_positions_projection_feeds_rope() {
     let mut mixer = tiny_mixer();
@@ -230,7 +230,7 @@ fn mrope_positions_projection_feeds_rope() {
     }
 }
 
-/// A second positions kind on one builder conflicts instead of aliasing (SI-21).
+/// A second positions kind on one builder conflicts instead of aliasing (SI-30).
 #[test]
 fn conflicting_positions_binding_rejected_at_builder() {
     let mut builder = GraphBuilder::new(IrVersion::CURRENT, "a114-pos-conflict");
@@ -251,7 +251,7 @@ fn conflicting_positions_binding_rejected_at_builder() {
 }
 
 /// MTP `Last` captures the parent's final hidden value; both heads restart
-/// from it and keep disjoint `blk.0.mtp.*` weights (SI-23).
+/// from it and keep disjoint `blk.0.mtp.*` weights (SI-32).
 #[test]
 fn mtp_last_capture_binds_parent_hidden() {
     let mtp = MtpSpec {
@@ -355,7 +355,7 @@ fn mtp_last_capture_binds_parent_hidden() {
     );
 }
 
-/// MTP `Layer(n)` captures that layer's output, not the final hidden (SI-23).
+/// MTP `Layer(n)` captures that layer's output, not the final hidden (SI-32).
 #[test]
 fn mtp_layer_capture_selects_layer_output() {
     let mtp = MtpSpec {
@@ -422,7 +422,7 @@ fn mla_mixer() -> Mixer {
 }
 
 /// MLA with unequal dims lowers to exact split/rope/write/reconstructed
-/// edges, rotates only rotary channels, and lowers qk_norm (SI-20).
+/// edges, rotates only rotary channels, and lowers qk_norm (SI-29).
 #[test]
 fn mla_unequal_dims_split_rope_write_reconstruct() {
     let mixer = mla_mixer();
@@ -470,16 +470,24 @@ fn mla_unequal_dims_split_rope_write_reconstruct() {
     }
     assert_eq!(ropes, 2, "q-rope and k-rope only");
 
-    // State write carries the exact (latent, rotary) pair.
+    // State write carries the exact canonical (latent, rotary) pair.
     let mut writes = 0;
     for node in graph.graph().nodes() {
         if let Op::StateWriteKv(w) = &node.op {
             if w.latent.is_some() {
                 writes += 1;
-                let k = &graph.graph().edges()[node.inputs[0].0].tensor;
-                let v = &graph.graph().edges()[node.inputs[1].0].tensor;
-                assert_eq!(k.shape()[2], Dim::Concrete(8), "written k is rotary");
-                assert_eq!(v.shape()[2], Dim::Concrete(16), "written v is latent");
+                let c_kv = &graph.graph().edges()[node.inputs[0].0].tensor;
+                let k_rope = &graph.graph().edges()[node.inputs[1].0].tensor;
+                assert_eq!(
+                    c_kv.shape()[2],
+                    Dim::Concrete(16),
+                    "written operand 0 is latent"
+                );
+                assert_eq!(
+                    k_rope.shape()[2],
+                    Dim::Concrete(8),
+                    "written operand 1 is rotary"
+                );
             }
         }
     }
@@ -537,7 +545,7 @@ fn mla_unequal_dims_split_rope_write_reconstruct() {
     }
 }
 
-/// Non-unit residual scales lower exactly on every layer residual (SI-18).
+/// Non-unit residual scales lower exactly on every layer residual (SI-27).
 #[test]
 fn residual_scale_lowers_exactly() {
     let mut layer = tiny_layer();
@@ -564,7 +572,7 @@ fn residual_scale_lowers_exactly() {
     );
 }
 
-/// Unit residual scale keeps the A1.3 unit form on every residual (SI-18).
+/// Unit residual scale keeps the A1.3 unit form on every residual (SI-27).
 #[test]
 fn default_residual_scale_stays_unit() {
     let model = tiny_model(vec![tiny_layer()]);
@@ -577,7 +585,7 @@ fn default_residual_scale_stays_unit() {
     }
 }
 
-/// A set final logit softcap lowers to one exact op; None lowers to none (SI-19).
+/// A set final logit softcap lowers to one exact op; None lowers to none (SI-28).
 #[test]
 fn final_logit_softcap_lowers_exactly() {
     let mut model = tiny_model(vec![tiny_layer()]);
@@ -658,7 +666,7 @@ fn malformed_inputs_report_typed_errors() {
 
 /// One full-featured model (MLA with qk_norm, MTP, scale, softcap)
 /// validates end to end. MRoPE mode is covered by its own projection oracle;
-/// the MLA rotary width constrains MRoPE section sums (SI-20), so the full
+/// the MLA rotary width constrains MRoPE section sums (SI-29), so the full
 /// model stays on scalar positions.
 #[test]
 fn full_featured_model_validates() {

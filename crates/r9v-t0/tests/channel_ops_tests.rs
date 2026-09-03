@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Deterministic tests for scalar T0 split/concat/logit_softcap against their
-//! f64 references plus malformed-input rejection (card A1.14, SI-19, SI-20).
+//! f64 references plus malformed-input rejection (card A1.14, SI-28, SI-29).
 
 use r9v_common::rng::SeededRng;
 use r9v_ir::{ConcatOp, DType, LogitSoftcapOp, SplitOp};

@@ -2140,7 +2140,7 @@ impl ScatterAddRowsOp {
     }
 }
 
-/// Last-axis channel split op (card A1.14, SI-20).
+/// Last-axis channel split op (card A1.14, SI-29).
 ///
 /// `x [T, H, D] -> (a [T, H, first], b [T, H, D - first])`
 ///
@@ -2320,7 +2320,7 @@ impl SplitOp {
         IrError::from_problems(problems)
     }
 
-    /// Returns legal sharding rules (card A1.14, SI-20; Spec 1 §5.2).
+    /// Returns legal sharding rules (card A1.14, SI-29; Spec 1 §5.2).
     pub fn legal_layouts(&self) -> &'static [ShardingRule] {
         sharding::SPLIT_RULES
     }
@@ -2343,7 +2343,7 @@ impl SplitOp {
     }
 }
 
-/// Last-axis channel concatenation op (card A1.14, SI-20).
+/// Last-axis channel concatenation op (card A1.14, SI-29).
 ///
 /// `(a [T, H, Da], b [T, H, Db]) -> y [T, H, Da + Db]`
 ///
@@ -2490,7 +2490,7 @@ impl ConcatOp {
         IrError::from_problems(problems)
     }
 
-    /// Returns legal sharding rules (card A1.14, SI-20; Spec 1 §5.2).
+    /// Returns legal sharding rules (card A1.14, SI-29; Spec 1 §5.2).
     pub fn legal_layouts(&self) -> &'static [ShardingRule] {
         sharding::CONCAT_RULES
     }
@@ -2761,7 +2761,7 @@ pub struct ResidualAddOp {
     /// Output activation dtype.
     pub out_dtype: DType,
     /// Residual branch scale from `LayerSpec.residual_scale` (Spec 8 §3;
-    /// card A1.14, SI-18). `1.0` reproduces the A1.3 `a + b` form exactly.
+    /// card A1.14, SI-27). `1.0` reproduces the A1.3 `a + b` form exactly.
     pub scale: f32,
 }
 
@@ -3277,7 +3277,7 @@ impl ActivationOp {
     }
 }
 
-/// Final-logit soft-capping op (card A1.14, SI-19).
+/// Final-logit soft-capping op (card A1.14, SI-28).
 ///
 /// `x [T, V] f32 -> y [T, V] f32` with `y = cap * tanh(x / cap)` computed in
 /// f32, applied once to the `lm_head` output when
@@ -3379,7 +3379,7 @@ impl LogitSoftcapOp {
         IrError::from_problems(problems)
     }
 
-    /// Returns legal sharding rules (card A1.14, SI-19; Spec 1 §5.2).
+    /// Returns legal sharding rules (card A1.14, SI-28; Spec 1 §5.2).
     pub fn legal_layouts(&self) -> &'static [ShardingRule] {
         sharding::LOGIT_SOFTCAP_RULES
     }
@@ -4728,29 +4728,30 @@ impl StateWriteKvOp {
                     &mut problems,
                 );
             }
-            // DECISION(A1.14): with `latent`, the exact-split form writes the
-            // decoupled rotary key as `k` (`[T, H, rope_dim]`, rope already
-            // applied) and the compressed latent as `v` (`[T, H,
-            // kv_lora_rank]`, never rotated); the combined form (`k` holding
-            // `kv_lora_rank + rope_dim`) stays accepted for A1.2-era graphs.
-            // Rejected leaving `v` unconstrained in the split form (the latent
-            // width is then exact, not incidental). Spec 1 §4.D, SI-20.
+            // DECISION(A1.14): with `latent`, canonical exact-split form writes
+            // operand 0 as compressed latent c_kv ([T, H, kv_lora_rank]) and
+            // operand 1 as rotated k_rope ([T, H, rope_dim]), consistent with
+            // Spec 1 §4.D compressed-latent-plus-rope wording, Spec 3 §3.6
+            // physical regions, and preexisting A1.3 call order. The combined form
+            // (operand 0 holding kv_lora_rank + rope_dim) remains accepted for
+            // A1.2-era compatibility; the inverted order (rope first, latent second)
+            // is rejected. Spec 1 §4.D, Spec 3 §3.6, SI-29.
             if let Some(ref l) = self.latent {
                 if k.rank() == 3 && v.rank() == 3 {
-                    if let (Dim::Concrete(dk), Dim::Concrete(dv)) = (k.shape()[2], v.shape()[2]) {
+                    if let (Dim::Concrete(d0), Dim::Concrete(d1)) = (k.shape()[2], v.shape()[2]) {
                         let combined = l.kv_lora_rank.checked_add(l.rope_dim);
-                        let is_combined = combined == Some(dk);
-                        let is_split = dk == l.rope_dim && dv == l.kv_lora_rank;
+                        let is_combined = combined == Some(d0);
+                        let is_split = d0 == l.kv_lora_rank && d1 == l.rope_dim;
                         if !is_combined && !is_split {
                             problems.push(IrError::OpShapeMismatch {
                                 op: "state_write_kv",
                                 tensor: "k/v",
                                 detail: format!(
-                                    "MLA key dim {dk} / value dim {dv} must be the combined latent (rank {} + rope {}) or the exact split pair (rope {} / latent {})",
+                                    "MLA latent dim {d0} / rotary dim {d1} must be the combined latent (rank {} + rope {}) or the exact split pair (latent {} / rotary {})",
                                     l.kv_lora_rank,
                                     l.rope_dim,
-                                    l.rope_dim,
-                                    l.kv_lora_rank
+                                    l.kv_lora_rank,
+                                    l.rope_dim
                                 ),
                             });
                         }
@@ -4758,13 +4759,13 @@ impl StateWriteKvOp {
                 } else if k.rank() == 3 {
                     if let Dim::Concrete(d) = k.shape()[2] {
                         let latent_dim = l.kv_lora_rank.checked_add(l.rope_dim);
-                        if latent_dim != Some(d) && d != l.rope_dim {
+                        if latent_dim != Some(d) && d != l.kv_lora_rank {
                             problems.push(IrError::OpShapeMismatch {
                                 op: "state_write_kv",
                                 tensor: "k",
                                 detail: format!(
-                                    "key dim {d} does not match MLA latent specs (rank {} + rope {})",
-                                    l.kv_lora_rank, l.rope_dim
+                                    "latent dim {d} does not match MLA latent specs (rank {} + rope {} or rank {})",
+                                    l.kv_lora_rank, l.rope_dim, l.kv_lora_rank
                                 ),
                             });
                         }
@@ -7335,9 +7336,9 @@ pub enum Op {
     GatherRows(GatherRowsOp),
     /// Deterministic scatter-add rows (Spec 1 §4.A).
     ScatterAddRows(ScatterAddRowsOp),
-    /// Last-axis channel split (card A1.14, SI-20).
+    /// Last-axis channel split (card A1.14, SI-29).
     Split(SplitOp),
-    /// Last-axis channel concatenation (card A1.14, SI-20).
+    /// Last-axis channel concatenation (card A1.14, SI-29).
     Concat(ConcatOp),
     /// Normalization: RMS or Layer norm (Spec 1 §4.B).
     Norm(NormOp),
@@ -7347,7 +7348,7 @@ pub enum Op {
     ActMul(ActMulOp),
     /// Standalone activation (Spec 1 §4.B).
     Activation(ActivationOp),
-    /// Final-logit softcap (card A1.14, SI-19).
+    /// Final-logit softcap (card A1.14, SI-28).
     LogitSoftcap(LogitSoftcapOp),
     /// Rotary Position Embedding (Spec 1 §4.B).
     Rope(RopeOp),

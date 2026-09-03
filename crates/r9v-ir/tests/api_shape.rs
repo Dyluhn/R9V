@@ -658,8 +658,8 @@ fn api_shape_constructors_are_reachable() {
     let cpu = ArchDescriptor::cpu();
     assert_eq!(cpu.family, ArchFamily::Cpu);
 
-    assert_eq!(IrVersion::CURRENT, IrVersion::new(0, 1, 0));
-    assert_eq!(IrVersion::CURRENT.to_string(), "0.1.0");
+    assert_eq!(IrVersion::CURRENT, IrVersion::new(0, 2, 0));
+    assert_eq!(IrVersion::CURRENT.to_string(), "0.2.0");
 
     let plan = PlanId::new(42);
     assert_eq!(plan.as_u64(), 42);

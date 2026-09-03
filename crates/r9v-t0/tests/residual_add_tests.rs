@@ -233,7 +233,7 @@ fn residual_add_determinism_twice_bit_identical() {
 
 #[test]
 fn residual_add_non_unit_scale_matches_reference() {
-    // Card A1.14 (SI-18): `y = a + scale * b` with a non-unit scale.
+    // Card A1.14 (SI-27): `y = a + scale * b` with a non-unit scale.
     let mut rng = SeededRng::new(0xA1_5014);
     let tol = Tolerance::f32();
     let shape = [2, 32];

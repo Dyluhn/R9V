@@ -94,7 +94,7 @@ pub fn build_model(
                 // DECISION(A1.14): the n-gram injection residual stays
                 // unscaled: LayerSpec.residual_scale governs the layer's own
                 // mixer/FFN residuals (Spec 8 §3.1), while this model-level
-                // injection shows a plain residual_add there. SI-18.
+                // injection shows a plain residual_add there. SI-27.
                 x = builder.op_residual_add(x, proj, DType::F16)?;
             }
         }
@@ -151,7 +151,7 @@ pub fn build_model(
     let lm_logits = builder.op_matmul(h_final.clone(), w_head, DType::F32)?;
     // A set final_logit_softcap lowers to one logit_softcap op; None emits
     // nothing, reproducing the A1.3 graph exactly (Spec 8 §3; card A1.14,
-    // SI-19).
+    // SI-28).
     let logits = match model.final_logit_softcap {
         Some(cap) => builder.op_logit_softcap(lm_logits, cap)?,
         None => lm_logits,
@@ -400,7 +400,7 @@ fn build_mixer_with_ns(
 
             if let Some(mla_spec) = mla {
                 // Multi-Head Latent Attention (MLA, DeepSeek-style; card
-                // A1.14, SI-20). Compressed latents and decoupled rotary
+                // A1.14, SI-29). Compressed latents and decoupled rotary
                 // parts travel as explicit edges: the query splits into
                 // (q_nope, q_rope) with rope applied to the rotary part only,
                 // and the attention query is reconstructed by concatenation
@@ -478,7 +478,7 @@ fn build_mixer_with_ns(
                 // projection, before rope, one weight per side — with the
                 // head axis over the combined query width and a row norm over
                 // the head-less KV rows, which have no per-head structure
-                // (card A1.14, SI-20).
+                // (card A1.14, SI-29).
                 if let Some(norm) = qk_norm {
                     let w_q_norm = builder.weight(
                         format!("blk.{layer_idx}.{weight_ns}attn_q_norm.weight"),
@@ -519,7 +519,7 @@ fn build_mixer_with_ns(
                 // standard rot_dim names the full-path width and exceeds the
                 // rope part whenever they differ. Rejected reusing
                 // rope.rot_dim verbatim (validation must reject rot_dim > D,
-                // never silently clamp). Spec 8 §3.1, SI-20.
+                // never silently clamp). Spec 8 §3.1, SI-29.
                 let mla_rope = RopeSpec {
                     rot_dim: mla_spec.qk_rope_dim,
                     ..rope.clone()
@@ -556,7 +556,7 @@ fn build_mixer_with_ns(
                     kv_lora_rank: mla_spec.kv_lora_rank,
                     rope_dim: mla_spec.qk_rope_dim,
                 });
-                builder.op_state_write_kv(k_rope, c_kv, handle, *cache, latent_info)?;
+                builder.op_state_write_kv(c_kv, k_rope, handle, *cache, latent_info)?;
 
                 let mask = if let Some(w) = window {
                     AttentionMask::CausalWindow(*w)
@@ -1229,7 +1229,7 @@ pub fn build_mtp_subgraph(
     // The child graph's input explicitly captures the chosen parent hidden
     // value (Layer(n) or Last, selected by the caller); every head restarts
     // from that capture, so no head chains off another head's output
-    // (card A1.14, SI-23).
+    // (card A1.14, SI-32).
     let mut mtp_builder = parent_builder.subgraph_with_capture("mtp", &hidden)?;
     let head_input = mtp_builder.capture_value()?;
     let per_head = checked_u32(mtp.layers_per_head.len(), "mtp layers per head")?;

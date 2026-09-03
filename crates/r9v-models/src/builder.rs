@@ -109,7 +109,7 @@ pub struct BoundWeight {
 }
 
 /// Opaque SSA graph value: a structural [`Tensor`] descriptor pinned to the
-/// exact [`EdgeId`] that produced or bound it (Spec 8 §2; card A1.14, SI-22).
+/// exact [`EdgeId`] that produced or bound it (Spec 8 §2; card A1.14, SI-31).
 ///
 /// Cloning a `Value` preserves its edge identity. Two `Value`s with
 /// structurally identical descriptors never alias: each binder and each op
@@ -141,7 +141,7 @@ impl Value {
 }
 
 /// Explicit parent-to-child hidden-state capture for subgraphs
-/// (Spec 8 §2, §5; Spec 7 §6; card A1.14, SI-23).
+/// (Spec 8 §2, §5; Spec 7 §6; card A1.14, SI-32).
 ///
 /// Records that the child graph's input edge carries the parent graph's
 /// hidden value: `child_edge` (in the child graph) reads whatever
@@ -364,7 +364,7 @@ impl GraphBuilder {
     }
 
     /// Returns the `BatchMeta.positions` projection value for the position
-    /// encoding kind (Spec 8 §2; Spec 1 §2.5, §4.B; card A1.14, SI-21).
+    /// encoding kind (Spec 8 §2; Spec 1 §2.5, §4.B; card A1.14, SI-30).
     ///
     /// Scalar models bind the `[T] u32` projection, MRoPE models the
     /// `[T, 3] u32` projection. The projection is bound at most once: a repeat
@@ -402,7 +402,7 @@ impl GraphBuilder {
     }
 
     /// Returns the captured parent hidden value feeding this subgraph
-    /// (Spec 8 §2, §5; card A1.14, SI-23).
+    /// (Spec 8 §2, §5; card A1.14, SI-32).
     ///
     /// Reports [`ModelsError::SubgraphError`] on a plain [`GraphBuilder::subgraph`]
     /// builder that carries no capture.
@@ -416,7 +416,7 @@ impl GraphBuilder {
     /// Binds a GGUF weight tensor by name, role, expected shape and scheme class (Spec 8 §2, §5).
     ///
     /// Every call mints a fresh edge, so two structurally identical weights
-    /// never alias (card A1.14, SI-22).
+    /// never alias (card A1.14, SI-31).
     pub fn weight(
         &mut self,
         name: impl Into<String>,
@@ -468,7 +468,7 @@ impl GraphBuilder {
     ///
     /// Inputs carry their SSA identity; each declared output descriptor mints
     /// a fresh edge, so outputs never alias any existing value (card A1.14,
-    /// SI-22).
+    /// SI-31).
     pub fn op(
         &mut self,
         op: Op,
@@ -557,7 +557,7 @@ impl GraphBuilder {
     }
 
     /// Spawns a child builder whose input carries the given parent hidden
-    /// value (Spec 8 §2, §5; card A1.14, SI-23).
+    /// value (Spec 8 §2, §5; card A1.14, SI-32).
     ///
     /// The child input is a fresh `SubgraphHidden` external edge with the
     /// parent value's shape and dtype; the parent edge is recorded so
@@ -791,7 +791,7 @@ impl GraphBuilder {
     }
 
     /// Emits a residual addition (`ResidualAddOp`) with an explicit branch
-    /// scale: `y = a + scale * b` in f32 (Spec 8 §3; card A1.14, SI-18).
+    /// scale: `y = a + scale * b` in f32 (Spec 8 §3; card A1.14, SI-27).
     pub fn op_residual_add_scaled(
         &mut self,
         a: Value,
@@ -837,7 +837,7 @@ impl GraphBuilder {
     }
 
     /// Emits a last-axis channel split (`SplitOp`): `x [T, H, D]` into
-    /// `[T, H, first]` and `[T, H, D - first]` (card A1.14, SI-20).
+    /// `[T, H, first]` and `[T, H, D - first]` (card A1.14, SI-29).
     pub fn op_split(&mut self, x: Value, first: u32) -> Result<(Value, Value), ModelsError> {
         const CTX: &str = "op_split";
         let shape = x.tensor().shape().to_vec();
@@ -887,7 +887,7 @@ impl GraphBuilder {
 
     /// Emits a last-axis channel concatenation (`ConcatOp`):
     /// `(a [T, H, Da], b [T, H, Db])` into `[T, H, Da + Db]`
-    /// (card A1.14, SI-20).
+    /// (card A1.14, SI-29).
     pub fn op_concat(&mut self, a: Value, b: Value) -> Result<Value, ModelsError> {
         const CTX: &str = "op_concat";
         for (name, value) in [("a", &a), ("b", &b)] {
@@ -931,7 +931,7 @@ impl GraphBuilder {
     }
 
     /// Emits a final-logit softcap (`LogitSoftcapOp`): `y = cap * tanh(x / cap)`
-    /// in f32 (Spec 8 §3; card A1.14, SI-19).
+    /// in f32 (Spec 8 §3; card A1.14, SI-28).
     pub fn op_logit_softcap(&mut self, x: Value, cap: f32) -> Result<Value, ModelsError> {
         let out_tensor = Tensor::new(
             x.tensor().shape().to_vec(),
@@ -1312,7 +1312,7 @@ impl ModelGraph {
     }
 
     /// Explicit parent-to-child hidden-state capture, if this graph was built
-    /// as a captured subgraph (Spec 8 §2, §5; card A1.14, SI-23).
+    /// as a captured subgraph (Spec 8 §2, §5; card A1.14, SI-32).
     pub fn capture(&self) -> Option<SubgraphCapture> {
         self.capture
     }

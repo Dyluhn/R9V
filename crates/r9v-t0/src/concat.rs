@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Scalar T0 implementation of the last-axis channel concatenation (card A1.14, SI-20, Spec 4 §2).
+//! Scalar T0 implementation of the last-axis channel concatenation (card A1.14, SI-29, Spec 4 §2).
 
 use r9v_ir::{ConcatOp, DType};
 
@@ -8,7 +8,7 @@ use crate::error::T0Error;
 
 /// Executes scalar T0 channel concatenation: `(a [T, H, Da], b [T, H, Db])`
 /// into `y [T, H, Da + Db]`, copying values unchanged in ascending index
-/// order (card A1.14, SI-20, Spec 4 §2).
+/// order (card A1.14, SI-29, Spec 4 §2).
 pub fn concat(
     _op: &ConcatOp,
     a: &TensorView<'_>,
@@ -107,7 +107,7 @@ pub fn concat(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0 (card A1.14, SI-20).
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (card A1.14, SI-29).
 pub fn concat_f64_reference(a: &[f64], b: &[f64], t: usize, h: usize) -> Vec<f64> {
     assert_eq!(a.len() % (t * h), 0);
     assert_eq!(b.len() % (t * h), 0);

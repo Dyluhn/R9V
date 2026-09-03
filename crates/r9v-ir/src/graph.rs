@@ -252,7 +252,7 @@ pub enum ExternalInputKind {
     /// Captured parent hidden state feeding a subgraph (`[T, Dm]` act).
     ///
     /// Bound only inside subgraph builders from an explicit
-    /// parent-to-child capture record (Spec 8 §2, §5; card A1.14, SI-23);
+    /// parent-to-child capture record (Spec 8 §2, §5; card A1.14, SI-32);
     /// parent step graphs never bind it.
     SubgraphHidden,
 }
@@ -370,7 +370,7 @@ impl ExternalOutput {
 }
 
 /// `BatchMeta.positions` projection kind bound as a typed graph edge
-/// (Spec 1 §2.5; card A1.14, SI-21).
+/// (Spec 1 §2.5; card A1.14, SI-30).
 ///
 /// One structured `BatchMeta` is the single external input; its `positions`
 /// field is additionally projected as a typed edge so `rope` consumes an
@@ -493,7 +493,7 @@ fn validate_external_input_tensor(
         // any per-token activation row `[T, Dm]`; the model dim is symbolic at
         // this layer and only the leading token axis is pinned. Rejected
         // reusing EmbedOverride (that kind names the multimodal escape hatch,
-        // not an MTP capture). Spec 1 §3.2, Spec 8 §2, SI-23.
+        // not an MTP capture). Spec 1 §3.2, Spec 8 §2, SI-32.
         ExternalInputKind::SubgraphHidden => (
             "subgraph_hidden",
             2,
@@ -1054,7 +1054,7 @@ impl Graph {
     }
 
     /// Projects `BatchMeta.positions` as a typed graph edge for `rope`
-    /// (Spec 1 §2.5, §4.B; card A1.14, SI-21).
+    /// (Spec 1 §2.5, §4.B; card A1.14, SI-30).
     ///
     /// The structured `BatchMeta` external input must already be registered;
     /// the projection is bound at most once per graph. Binding the same kind
@@ -1770,7 +1770,7 @@ impl Graph {
         }
 
         // 3. Rope positions must resolve to the BatchMeta.positions projection
-        // (Spec 1 §2.5, §4.B; card A1.14, SI-21): token IDs or any other edge
+        // (Spec 1 §2.5, §4.B; card A1.14, SI-30): token IDs or any other edge
         // is never an acceptable positions source.
         for node in &self.nodes {
             if matches!(node.op, Op::Rope(_)) {
