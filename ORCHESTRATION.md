@@ -20,6 +20,10 @@ Use this order without substitution:
 
 If the required `agy` model is not exposed by the installed client, report the exact availability problem. Do not silently substitute another model for production work.
 
+## Gemini quota orchestration
+
+The zero-cost machine-readable status command is `agy -p '/usage' --output-format json`. Gemini availability is constrained by both `gemini-5h` and `gemini-weekly` buckets; `reset_time` values are rolling-window timestamps. After any quota-exhaustion response, the root starts a non-blocking background timer for the latest `reset_time` among depleted Gemini buckets, continues on Muse meanwhile, re-queries status when the timer fires, rearms if necessary, and immediately returns new work to Gemini once both buckets permit it.
+
 ## Communication
 
 Between work periods, communicate only completed evidence, decisions, blockers that need action, and the next material dispatch. Do not spend usage repeating that an agent is still running or narrating routine matching and testing.
