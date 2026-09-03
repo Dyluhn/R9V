@@ -9,3 +9,5 @@ description = "R9V CPU reference scalar T0 and SIMD T0v implementations (Spec 4,
 
 [dependencies]
 r9v-common = { path = "../r9v-common" }
+r9v-ir = { path = "../r9v-ir" }
+thiserror = "2.0"

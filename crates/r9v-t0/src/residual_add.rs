@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Scalar T0 implementation of elementwise residual addition (Spec 1 §4.B, §6.1, Spec 4 §2).
+
+use r9v_ir::{DType, ResidualAddOp};
+
+use crate::buffer::{TensorView, TensorViewMut};
+use crate::error::T0Error;
+
+/// Executes scalar T0 residual addition: `a + b` in f32, cast to `out_dtype` (Spec 1 §4.B).
+pub fn residual_add(
+    op: &ResidualAddOp,
+    a: &TensorView<'_>,
+    b: &TensorView<'_>,
+    y: &mut TensorViewMut<'_>,
+) -> Result<(), T0Error> {
+    let mut problems = Vec::new();
+
+    if a.shape() != b.shape() {
+        problems.push(format!(
+            "operand b shape {:?} does not match operand a shape {:?}",
+            b.shape(),
+            a.shape()
+        ));
+    }
+    if a.shape() != y.shape() {
+        problems.push(format!(
+            "output y shape {:?} does not match operand a shape {:?}",
+            y.shape(),
+            a.shape()
+        ));
+    }
+    if !matches!(a.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
+        problems.push(format!(
+            "operand a: expected f16, bf16, or f32, got {:?}",
+            a.dtype()
+        ));
+    }
+    if !matches!(b.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
+        problems.push(format!(
+            "operand b: expected f16, bf16, or f32, got {:?}",
+            b.dtype()
+        ));
+    }
+    if y.dtype() != op.out_dtype {
+        problems.push(format!(
+            "output y: expected out_dtype {:?}, got {:?}",
+            op.out_dtype,
+            y.dtype()
+        ));
+    }
+
+    T0Error::from_problems("residual_add", problems)?;
+
+    let num_elem = a.num_elements();
+    for i in 0..num_elem {
+        let val_a = a.read_f32(i);
+        let val_b = b.read_f32(i);
+        let sum = val_a + val_b;
+        y.write_f32(i, sum);
+    }
+
+    Ok(())
+}
+
+/// Straightforward 64-bit floating point reference implementation for testing against T0.
+pub fn residual_add_f64_reference(a: &[f64], b: &[f64]) -> Vec<f64> {
+    assert_eq!(a.len(), b.len());
+    a.iter().zip(b.iter()).map(|(&x, &y)| x + y).collect()
+}
