@@ -4,7 +4,7 @@
 use r9v_ir::{DType, RopeOp, RopeScaling, RopeStyle};
 
 use crate::buffer::{TensorView, TensorViewMut};
-use crate::error::T0Error;
+use crate::error::{push_shape_agreement, T0Error};
 
 /// Precomputes RoPE frequencies for a given token position and rotary dimension.
 #[allow(clippy::needless_range_loop)]
@@ -126,36 +126,58 @@ pub fn rope(
     let mut problems = Vec::new();
 
     if op.rot_dim == 0 || !op.rot_dim.is_multiple_of(2) {
-        problems.push(format!(
-            "rot_dim must be positive and even, got {}",
-            op.rot_dim
-        ));
+        problems.push(T0Error::InvalidAttribute {
+            op: "rope",
+            attribute: "rot_dim",
+            reason: format!("must be positive and even, got {}", op.rot_dim),
+        });
     }
     if !op.theta.is_finite() || op.theta <= 0.0 {
-        problems.push(format!("theta must be finite and > 0, got {}", op.theta));
+        problems.push(T0Error::InvalidAttribute {
+            op: "rope",
+            attribute: "theta",
+            reason: format!("must be finite and > 0, got {}", op.theta),
+        });
     }
     if !matches!(op.out_dtype, DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "out_dtype must be f16, bf16, or f32, got {:?}",
-            op.out_dtype
-        ));
+        problems.push(T0Error::InvalidAttribute {
+            op: "rope",
+            attribute: "out_dtype",
+            reason: format!("must be f16, bf16, or f32, got {:?}", op.out_dtype),
+        });
     }
     if let Some(sections) = op.mrope_sections {
         if sections.contains(&0) {
-            problems.push("mrope sections must be positive".to_string());
+            problems.push(T0Error::InvalidAttribute {
+                op: "rope",
+                attribute: "mrope_sections",
+                reason: "sections must be positive".to_string(),
+            });
         }
         if sections.iter().any(|&s| s % 2 != 0) {
-            problems.push("mrope section dimensions must be even".to_string());
+            problems.push(T0Error::InvalidAttribute {
+                op: "rope",
+                attribute: "mrope_sections",
+                reason: "section dimensions must be even".to_string(),
+            });
         }
         match sections.iter().try_fold(0u32, |sum, &s| sum.checked_add(s)) {
             Some(total) if total > op.rot_dim => {
-                problems.push(format!(
-                    "sum of mrope sections {total} exceeds rot_dim {}",
-                    op.rot_dim
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "mrope_sections",
+                    reason: format!(
+                        "sum of mrope sections {total} exceeds rot_dim {}",
+                        op.rot_dim
+                    ),
+                });
             }
             None => {
-                problems.push("sum of mrope sections exceeds u32::MAX".to_string());
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "mrope_sections",
+                    reason: "sum of mrope sections exceeds u32::MAX".to_string(),
+                });
             }
             Some(_) => {}
         }
@@ -164,9 +186,11 @@ pub fn rope(
         RopeScaling::None => {}
         RopeScaling::Linear(factor) => {
             if !factor.is_finite() || factor <= 0.0 {
-                problems.push(format!(
-                    "scaling factor must be finite and > 0, got {factor}"
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "scaling.factor",
+                    reason: format!("must be finite and > 0, got {factor}"),
+                });
             }
         }
         RopeScaling::Yarn {
@@ -177,119 +201,150 @@ pub fn rope(
             mscale,
         } => {
             if !factor.is_finite() || factor <= 0.0 {
-                problems.push(format!(
-                    "scaling factor must be finite and > 0, got {factor}"
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "scaling.factor",
+                    reason: format!("must be finite and > 0, got {factor}"),
+                });
             }
             if !beta_fast.is_finite() || beta_fast <= 0.0 {
-                problems.push(format!(
-                    "scaling beta_fast must be finite and > 0, got {beta_fast}"
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "scaling.beta_fast",
+                    reason: format!("must be finite and > 0, got {beta_fast}"),
+                });
             }
             if !beta_slow.is_finite() || beta_slow <= 0.0 {
-                problems.push(format!(
-                    "scaling beta_slow must be finite and > 0, got {beta_slow}"
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "scaling.beta_slow",
+                    reason: format!("must be finite and > 0, got {beta_slow}"),
+                });
             }
             if beta_slow > beta_fast {
-                problems.push(format!(
-                    "scaling beta_slow ({beta_slow}) cannot exceed beta_fast ({beta_fast})"
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "scaling.beta_slow",
+                    reason: format!(
+                        "beta_slow ({beta_slow}) cannot exceed beta_fast ({beta_fast})"
+                    ),
+                });
             }
             if orig_ctx == 0 {
-                problems.push("scaling orig_ctx must be > 0".to_string());
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "scaling.orig_ctx",
+                    reason: "must be > 0".to_string(),
+                });
             }
             if !mscale.is_finite() || mscale <= 0.0 {
-                problems.push(format!(
-                    "scaling mscale must be finite and > 0, got {mscale}"
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "scaling.mscale",
+                    reason: format!("must be finite and > 0, got {mscale}"),
+                });
             }
         }
         RopeScaling::Dynamic => {
             if op.rot_dim == 2 {
-                problems.push(
-                    "rot_dim 2 is invalid for Dynamic RoPE: exponent rot_dim / (rot_dim - 2) requires rot_dim > 2 to avoid division by zero".to_string(),
-                );
+                problems.push(T0Error::InvalidAttribute {
+                    op: "rope",
+                    attribute: "scaling",
+                    reason: "rot_dim 2 is invalid for Dynamic RoPE: exponent rot_dim / (rot_dim - 2) requires rot_dim > 2 to avoid division by zero".to_string(),
+                });
             }
         }
     }
 
     if x.rank() != 3 {
-        problems.push(format!(
-            "input x: expected rank 3 [T, H, D], got rank {} with shape {:?}",
-            x.rank(),
-            x.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "x",
+            expected: 3,
+            got: x.rank(),
+            shape: x.shape().to_vec(),
+        });
     }
     if y.rank() != 3 {
-        problems.push(format!(
-            "output y: expected rank 3 [T, H, D], got rank {} with shape {:?}",
-            y.rank(),
-            y.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "y",
+            expected: 3,
+            got: y.rank(),
+            shape: y.shape().to_vec(),
+        });
     }
     if !matches!(x.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "input x: expected f16, bf16, or f32, got {:?}",
-            x.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "x",
+            expected: vec![DType::F16, DType::Bf16, DType::F32],
+            got: x.dtype(),
+        });
     }
     if y.dtype() != op.out_dtype {
-        problems.push(format!(
-            "output y: expected out_dtype {:?}, got {:?}",
-            op.out_dtype,
-            y.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![op.out_dtype],
+            got: y.dtype(),
+        });
     }
     if positions.dtype() != DType::U32 {
-        problems.push(format!(
-            "positions: expected u32, got {:?}",
-            positions.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "positions",
+            expected: vec![DType::U32],
+            got: positions.dtype(),
+        });
     }
 
     if op.mrope_sections.is_some() {
-        if positions.rank() != 2 || (positions.rank() == 2 && positions.shape()[1] != 3) {
-            problems.push(format!(
-                "mrope requires positions with rank 2 [T, 3], got rank {} with shape {:?}",
-                positions.rank(),
-                positions.shape()
-            ));
+        if positions.rank() != 2 {
+            problems.push(T0Error::RankMismatch {
+                tensor: "positions",
+                expected: 2,
+                got: positions.rank(),
+                shape: positions.shape().to_vec(),
+            });
+        } else if positions.shape()[1] != 3 {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "d1",
+                expected_from: "mrope",
+                expected: 3,
+                tensor: "positions",
+                got: positions.shape()[1],
+            });
         }
     } else if positions.rank() != 1 {
-        problems.push(format!(
-            "standard rope requires positions with rank 1 [T], got rank {} with shape {:?}",
-            positions.rank(),
-            positions.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "positions",
+            expected: 1,
+            got: positions.rank(),
+            shape: positions.shape().to_vec(),
+        });
     }
 
     if x.rank() == 3 {
         let t = x.shape()[0];
         let d = x.shape()[2];
         if positions.shape()[0] != t {
-            problems.push(format!(
-                "positions token dimension {} does not match input x token dimension T={}",
-                positions.shape()[0],
-                t
-            ));
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "T",
+                expected_from: "x",
+                expected: t,
+                tensor: "positions",
+                got: positions.shape()[0],
+            });
         }
         if (op.rot_dim as usize) > d {
-            problems.push(format!(
-                "rot_dim {} exceeds head dimension D={}",
-                op.rot_dim, d
-            ));
+            problems.push(T0Error::InvalidAttribute {
+                op: "rope",
+                attribute: "rot_dim",
+                reason: format!("rot_dim {} exceeds head dimension D={d}", op.rot_dim),
+            });
         }
         if y.rank() == 3 && y.shape() != x.shape() {
-            problems.push(format!(
-                "output y shape {:?} does not match input x shape {:?}",
-                y.shape(),
-                x.shape()
-            ));
+            push_shape_agreement(&mut problems, "y", "x", y.shape(), x.shape());
         }
     }
 
-    T0Error::from_problems("rope", problems)?;
+    T0Error::from_problems(problems)?;
 
     let t = x.shape()[0];
     let h = x.shape()[1];

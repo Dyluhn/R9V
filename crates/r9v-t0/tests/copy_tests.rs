@@ -4,7 +4,7 @@
 
 use r9v_common::rng::SeededRng;
 use r9v_ir::{CopyKind, CopyOp, DType};
-use r9v_t0::{copy, copy_f64_reference, TypedBuffer};
+use r9v_t0::{copy, copy_f64_reference, T0Error, TypedBuffer};
 
 fn generate_f32_data(rng: &mut SeededRng, len: usize, scale: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(len);
@@ -129,9 +129,18 @@ fn copy_rejects_shape_and_dtype_mismatches() {
     let mut dst = TypedBuffer::zeros(&[2, 32], DType::F32); // shape mismatch
 
     let err = copy(&op, &src.as_view(), &mut dst.as_view_mut()).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("validation error(s)"));
-    assert!(msg.contains("does not match"));
+    assert!(
+        matches!(
+            err,
+            T0Error::DimensionMismatch {
+                tensor: "y",
+                expected: 64,
+                got: 32,
+                ..
+            }
+        ),
+        "expected y dimension mismatch, got {err:?}"
+    );
 }
 
 #[test]

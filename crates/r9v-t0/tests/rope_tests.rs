@@ -4,7 +4,7 @@
 
 use r9v_common::rng::SeededRng;
 use r9v_ir::{DType, RopeOp, RopeScaling, RopeStyle};
-use r9v_t0::{rope, rope_f64_reference, Tolerance, TypedBuffer};
+use r9v_t0::{rope, rope_f64_reference, T0Error, Tolerance, TypedBuffer};
 
 fn generate_f32_data(rng: &mut SeededRng, len: usize, scale: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(len);
@@ -375,11 +375,31 @@ fn rope_rejects_odd_rot_dim_and_dimension_mismatch() {
         &mut y_buf.as_view_mut(),
     )
     .unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("validation error(s)"));
-    assert!(msg.contains("rot_dim must be positive and even"));
-    assert!(msg.contains("exceeds head dimension"));
-    assert!(msg.contains("does not match"));
+    let T0Error::Multiple { problems } = err else {
+        panic!("expected aggregated Multiple, got {err:?}");
+    };
+    assert_eq!(problems.len(), 3);
+    assert!(
+        problems.iter().any(|e| matches!(
+            e,
+            T0Error::InvalidAttribute {
+                attribute: "rot_dim",
+                ..
+            }
+        )),
+        "missing rot_dim problem: {problems:?}"
+    );
+    assert!(
+        problems.iter().any(|e| matches!(
+            e,
+            T0Error::DimensionMismatch {
+                tensor: "positions",
+                dim_name: "T",
+                ..
+            }
+        )),
+        "missing positions problem: {problems:?}"
+    );
 }
 
 #[test]

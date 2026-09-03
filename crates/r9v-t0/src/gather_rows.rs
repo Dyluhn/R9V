@@ -100,7 +100,7 @@ pub fn gather_rows(
         });
     }
 
-    T0Error::from_typed_problems(problems)?;
+    T0Error::from_problems(problems)?;
 
     let n = x.shape()[0];
     let d = x.shape()[1];
@@ -168,7 +168,7 @@ pub fn gather_rows(
         }
     }
 
-    T0Error::from_typed_problems(problems)?;
+    T0Error::from_problems(problems)?;
 
     // Execute bit-exact copy for each row
     for row_out in 0..m {

@@ -142,7 +142,7 @@ pub fn scatter_add_rows(
         }
     }
 
-    T0Error::from_typed_problems(problems)?;
+    T0Error::from_problems(problems)?;
 
     let m = x.shape()[0];
     let d = x.shape()[1];
@@ -231,7 +231,7 @@ pub fn scatter_add_rows(
         }
     }
 
-    T0Error::from_typed_problems(problems)?;
+    T0Error::from_problems(problems)?;
 
     // Initialize y with dest or zeros
     if let Some(dest_view) = dest {

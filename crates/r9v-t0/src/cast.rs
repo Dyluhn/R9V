@@ -5,7 +5,7 @@ use r9v_ir::{CastOp, DType};
 
 use crate::buffer::{TensorData, TensorDataMut, TensorView, TensorViewMut};
 use crate::dtype::dtype_element_size;
-use crate::error::T0Error;
+use crate::error::{push_shape_agreement, T0Error};
 
 /// Executes scalar T0 precision cast: `x -> y` with `y.dtype == op.dtype` (Spec 1 §4.A, Spec 1 §6.4, Spec 4 §2).
 pub fn cast(op: &CastOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Result<(), T0Error> {
@@ -15,21 +15,17 @@ pub fn cast(op: &CastOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resul
     let mut problems = Vec::new();
 
     if x.shape() != y.shape() {
-        problems.push(format!(
-            "output y shape {:?} does not match input x shape {:?}",
-            y.shape(),
-            x.shape()
-        ));
+        push_shape_agreement(&mut problems, "y", "x", y.shape(), x.shape());
     }
     if y.dtype() != op.dtype {
-        problems.push(format!(
-            "output y dtype {:?} does not match op target dtype {:?}",
-            y.dtype(),
-            op.dtype
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![op.dtype],
+            got: y.dtype(),
+        });
     }
 
-    T0Error::from_problems("cast", problems)?;
+    T0Error::from_problems(problems)?;
 
     // Identity casts copy raw storage bit-exactly instead of round-tripping through `f32`,
     // which cannot represent U32/I32 magnitudes beyond 2^24 and would normalize FP8 NaN

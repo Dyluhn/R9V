@@ -4,7 +4,7 @@
 
 use r9v_common::rng::SeededRng;
 use r9v_ir::{DType, ResidualAddOp};
-use r9v_t0::{residual_add, residual_add_f64_reference, Tolerance, TypedBuffer};
+use r9v_t0::{residual_add, residual_add_f64_reference, T0Error, Tolerance, TypedBuffer};
 
 fn generate_f32_data(rng: &mut SeededRng, len: usize, scale: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(len);
@@ -319,7 +319,17 @@ fn residual_add_rejects_shape_and_dtype_mismatches() {
         &mut y_buf.as_view_mut(),
     )
     .unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("validation error(s)"));
-    assert!(msg.contains("does not match"));
+    let T0Error::Multiple { problems } = err else {
+        panic!("expected aggregated Multiple, got {err:?}");
+    };
+    assert_eq!(problems.len(), 2);
+    for tensor in ["b", "y"] {
+        assert!(
+            problems.iter().any(|e| matches!(
+                e,
+                T0Error::DimensionMismatch { tensor: t, .. } if *t == tensor
+            )),
+            "missing {tensor} shape problem: {problems:?}"
+        );
+    }
 }

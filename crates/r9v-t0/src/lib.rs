@@ -51,7 +51,9 @@ pub use philox::{philox4x32_10, u32_to_unit_f32, RngState};
 pub use quant_act::{fp8_e4m3_encode_f64_oracle, quant_act, quant_act_f64_reference};
 pub use residual_add::{residual_add, residual_add_f64_reference};
 pub use rope::{rope, rope_f64_reference};
-pub use sampling::{logits_postprocess, sample, verify, VerifyOutput};
+pub use sampling::{
+    logits_postprocess, logits_postprocess_f64_reference, sample, verify, VerifyOutput,
+};
 pub use scatter_add_rows::{scatter_add_rows, scatter_add_rows_f64_reference};
 pub use split::{split, split_f64_reference};
 pub use tolerance::Tolerance;

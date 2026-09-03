@@ -406,7 +406,7 @@ pub fn matmul_with_scales(
         });
     }
 
-    T0Error::from_typed_problems(problems)?;
+    T0Error::from_problems(problems)?;
 
     let m = x.shape()[0];
     let k_x = x.shape()[1];
@@ -700,7 +700,7 @@ pub fn matmul_with_scales(
         }
     }
 
-    T0Error::from_typed_problems(problems)?;
+    T0Error::from_problems(problems)?;
 
     // Validate activation scale values are finite and non-negative
     if let Some(xs) = x_scale {

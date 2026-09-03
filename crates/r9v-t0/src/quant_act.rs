@@ -5,7 +5,7 @@ use r9v_ir::{DType, QuantActOp, QuantScheme};
 
 use crate::buffer::{TensorView, TensorViewMut};
 use crate::dtype::fp8_e4m3_encode;
-use crate::error::T0Error;
+use crate::error::{push_shape_agreement, T0Error};
 
 /// Executes scalar T0 activation quantization (Spec 1 §4.A, Spec 2 §3.4, Spec 4 §2).
 pub fn quant_act(
@@ -21,52 +21,53 @@ pub fn quant_act(
     let mut problems = Vec::new();
 
     if op.target != DType::I8 && op.target != DType::E4m3 {
-        problems.push(format!(
-            "quant_act target must be i8 or e4m3, got {:?}",
-            op.target
-        ));
+        problems.push(T0Error::InvalidAttribute {
+            op: "quant_act",
+            attribute: "target",
+            reason: format!("must be i8 or e4m3, got {:?}", op.target),
+        });
     }
 
     if x.rank() != 2 {
-        problems.push(format!(
-            "input x: expected rank 2 [T, N], got rank {} with shape {:?}",
-            x.rank(),
-            x.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "x",
+            expected: 2,
+            got: x.rank(),
+            shape: x.shape().to_vec(),
+        });
     }
     if xq.rank() != 2 {
-        problems.push(format!(
-            "output xq: expected rank 2 [T, N], got rank {} with shape {:?}",
-            xq.rank(),
-            xq.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "xq",
+            expected: 2,
+            got: xq.rank(),
+            shape: xq.shape().to_vec(),
+        });
     }
     if !matches!(x.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "input x: expected f16, bf16, or f32, got {:?}",
-            x.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "x",
+            expected: vec![DType::F16, DType::Bf16, DType::F32],
+            got: x.dtype(),
+        });
     }
     if xq.dtype() != op.target {
-        problems.push(format!(
-            "output xq dtype {:?} does not match op target {:?}",
-            xq.dtype(),
-            op.target
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "xq",
+            expected: vec![op.target],
+            got: xq.dtype(),
+        });
     }
     if scale.dtype() != DType::F32 {
-        problems.push(format!(
-            "output scale: expected f32, got {:?}",
-            scale.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "scale",
+            expected: vec![DType::F32],
+            got: scale.dtype(),
+        });
     }
 
     if x.rank() == 2 && xq.rank() == 2 && x.shape() != xq.shape() {
-        problems.push(format!(
-            "output xq shape {:?} does not match input x shape {:?}",
-            xq.shape(),
-            x.shape()
-        ));
+        push_shape_agreement(&mut problems, "xq", "x", xq.shape(), x.shape());
     }
 
     if x.rank() == 2 {
@@ -76,48 +77,77 @@ pub fn quant_act(
         match op.scheme {
             QuantScheme::PerToken => {
                 if op.target != DType::I8 && op.target != DType::E4m3 {
-                    problems.push(format!(
-                        "PerToken only supports i8 or e4m3 target, got {:?}",
-                        op.target
-                    ));
+                    problems.push(T0Error::InvalidAttribute {
+                        op: "quant_act",
+                        attribute: "scheme",
+                        reason: format!(
+                            "PerToken only supports i8 or e4m3 target, got {:?}",
+                            op.target
+                        ),
+                    });
                 }
-                if scale.rank() != 1 || scale.shape()[0] != t {
-                    problems.push(format!(
-                        "PerToken scale: expected rank 1 [{t}], got rank {} with shape {:?}",
-                        scale.rank(),
-                        scale.shape()
-                    ));
+                if scale.rank() != 1 {
+                    problems.push(T0Error::RankMismatch {
+                        tensor: "scale",
+                        expected: 1,
+                        got: scale.rank(),
+                        shape: scale.shape().to_vec(),
+                    });
+                } else if scale.shape()[0] != t {
+                    problems.push(T0Error::DimensionMismatch {
+                        dim_name: "T",
+                        expected_from: "x",
+                        expected: t,
+                        tensor: "scale",
+                        got: scale.shape()[0],
+                    });
                 }
             }
             QuantScheme::PerBlock32 => {
                 if op.target != DType::I8 {
-                    problems.push(format!(
-                        "PerBlock32 only supports i8 target, got {:?}",
-                        op.target
-                    ));
+                    problems.push(T0Error::InvalidAttribute {
+                        op: "quant_act",
+                        attribute: "scheme",
+                        reason: format!("PerBlock32 only supports i8 target, got {:?}", op.target),
+                    });
                 }
                 if !n.is_multiple_of(32) {
-                    problems.push(format!("PerBlock32 requires N={n} divisible by 32"));
+                    problems.push(T0Error::InvalidAttribute {
+                        op: "quant_act",
+                        attribute: "scheme",
+                        reason: format!("PerBlock32 requires N={n} divisible by 32"),
+                    });
                 } else {
                     let expected_blocks = n / 32;
-                    if scale.rank() != 2 || scale.shape() != [t, expected_blocks] {
-                        problems.push(format!(
-                            "PerBlock32 scale: expected shape [{t}, {expected_blocks}], got shape {:?}",
-                            scale.shape()
-                        ));
+                    if scale.rank() != 2 {
+                        problems.push(T0Error::RankMismatch {
+                            tensor: "scale",
+                            expected: 2,
+                            got: scale.rank(),
+                            shape: scale.shape().to_vec(),
+                        });
+                    } else if scale.shape() != [t, expected_blocks] {
+                        push_shape_agreement(
+                            &mut problems,
+                            "scale",
+                            "x",
+                            scale.shape(),
+                            &[t, expected_blocks],
+                        );
                     }
                 }
             }
             _ => {
-                problems.push(format!(
-                    "quant_act only supports PerToken or PerBlock32, got {:?}",
-                    op.scheme
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "quant_act",
+                    attribute: "scheme",
+                    reason: format!("only supports PerToken or PerBlock32, got {:?}", op.scheme),
+                });
             }
         }
     }
 
-    T0Error::from_problems("quant_act", problems)?;
+    T0Error::from_problems(problems)?;
 
     let t = x.shape()[0];
     let n = x.shape()[1];

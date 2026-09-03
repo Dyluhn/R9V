@@ -4,7 +4,7 @@
 use r9v_ir::{DType, ResidualAddOp};
 
 use crate::buffer::{TensorView, TensorViewMut};
-use crate::error::T0Error;
+use crate::error::{push_shape_agreement, T0Error};
 
 /// Executes scalar T0 residual addition: `a + scale * b` in f32, cast to `out_dtype` (Spec 1 §4.B, Spec 1 §6.1, Spec 1 §6.4, Spec 4 §2; card A1.14, SI-27).
 pub fn residual_add(
@@ -20,46 +20,41 @@ pub fn residual_add(
     let mut problems = Vec::new();
 
     if !op.scale.is_finite() || op.scale == 0.0 {
-        problems.push(format!(
-            "attribute scale: must be finite and non-zero, got {}",
-            op.scale
-        ));
+        problems.push(T0Error::InvalidAttribute {
+            op: "residual_add",
+            attribute: "scale",
+            reason: format!("must be finite and non-zero, got {}", op.scale),
+        });
     }
     if a.shape() != b.shape() {
-        problems.push(format!(
-            "operand b shape {:?} does not match operand a shape {:?}",
-            b.shape(),
-            a.shape()
-        ));
+        push_shape_agreement(&mut problems, "b", "a", b.shape(), a.shape());
     }
     if a.shape() != y.shape() {
-        problems.push(format!(
-            "output y shape {:?} does not match operand a shape {:?}",
-            y.shape(),
-            a.shape()
-        ));
+        push_shape_agreement(&mut problems, "y", "a", y.shape(), a.shape());
     }
     if !matches!(a.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "operand a: expected f16, bf16, or f32, got {:?}",
-            a.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "a",
+            expected: vec![DType::F16, DType::Bf16, DType::F32],
+            got: a.dtype(),
+        });
     }
     if !matches!(b.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "operand b: expected f16, bf16, or f32, got {:?}",
-            b.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "b",
+            expected: vec![DType::F16, DType::Bf16, DType::F32],
+            got: b.dtype(),
+        });
     }
     if y.dtype() != op.out_dtype {
-        problems.push(format!(
-            "output y: expected out_dtype {:?}, got {:?}",
-            op.out_dtype,
-            y.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![op.out_dtype],
+            got: y.dtype(),
+        });
     }
 
-    T0Error::from_problems("residual_add", problems)?;
+    T0Error::from_problems(problems)?;
 
     let num_elem = a.num_elements();
     for i in 0..num_elem {

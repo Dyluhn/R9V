@@ -4,7 +4,7 @@
 
 use r9v_common::rng::SeededRng;
 use r9v_ir::{CastOp, DType};
-use r9v_t0::{bf16_to_f32, cast, cast_f64_reference, Tolerance, TypedBuffer};
+use r9v_t0::{bf16_to_f32, cast, cast_f64_reference, T0Error, Tolerance, TypedBuffer};
 
 fn generate_f32_data(rng: &mut SeededRng, len: usize, scale: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(len);
@@ -168,9 +168,22 @@ fn cast_rejects_shape_and_dtype_mismatches() {
     let mut y_buf = TypedBuffer::zeros(&[2, 32], DType::F32); // shape and dtype mismatch
 
     let err = cast(&op, &x_buf.as_view(), &mut y_buf.as_view_mut()).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("validation error(s)"));
-    assert!(msg.contains("does not match"));
+    let T0Error::Multiple { problems } = err else {
+        panic!("expected aggregated Multiple, got {err:?}");
+    };
+    assert_eq!(problems.len(), 2);
+    assert!(
+        problems
+            .iter()
+            .any(|e| matches!(e, T0Error::DimensionMismatch { tensor, .. } if *tensor == "y")),
+        "missing shape problem: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|e| matches!(e, T0Error::DTypeMismatch { tensor, .. } if *tensor == "y")),
+        "missing dtype problem: {problems:?}"
+    );
 }
 
 /// Identity casts preserve `u32` values beyond 2^24 exactly (Spec 1 §2.1, Spec 1 §6.4).
@@ -385,5 +398,16 @@ fn cast_identity_rejects_shape_mismatch() {
     let x_buf = TypedBuffer::zeros(&[2, 64], DType::U32);
     let mut y_buf = TypedBuffer::zeros(&[2, 32], DType::U32);
     let err = cast(&op, &x_buf.as_view(), &mut y_buf.as_view_mut()).unwrap_err();
-    assert!(err.to_string().contains("does not match"));
+    assert!(
+        matches!(
+            err,
+            T0Error::DimensionMismatch {
+                tensor: "y",
+                expected: 64,
+                got: 32,
+                ..
+            }
+        ),
+        "expected y dimension mismatch, got {err:?}"
+    );
 }

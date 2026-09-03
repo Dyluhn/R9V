@@ -23,72 +23,105 @@ pub fn concat(
 
     for (name, view) in [("a", a), ("b", b)] {
         if view.rank() != 3 {
-            problems.push(format!(
-                "input {name}: expected rank 3 [T, H, D], got rank {} with shape {:?}",
-                view.rank(),
-                view.shape()
-            ));
+            problems.push(T0Error::RankMismatch {
+                tensor: name,
+                expected: 3,
+                got: view.rank(),
+                shape: view.shape().to_vec(),
+            });
         }
         if !matches!(view.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-            problems.push(format!(
-                "input {name}: expected f16, bf16, or f32, got {:?}",
-                view.dtype()
-            ));
+            problems.push(T0Error::DTypeMismatch {
+                tensor: name,
+                expected: vec![DType::F16, DType::Bf16, DType::F32],
+                got: view.dtype(),
+            });
         }
     }
     if y.rank() != 3 {
-        problems.push(format!(
-            "output y: expected rank 3 [T, H, Da + Db], got rank {} with shape {:?}",
-            y.rank(),
-            y.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "y",
+            expected: 3,
+            got: y.rank(),
+            shape: y.shape().to_vec(),
+        });
     }
     if !matches!(y.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "output y: expected f16, bf16, or f32, got {:?}",
-            y.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![DType::F16, DType::Bf16, DType::F32],
+            got: y.dtype(),
+        });
     }
     if b.dtype() != a.dtype() {
-        problems.push(format!(
-            "input b: expected input a dtype {:?}, got {:?}",
-            a.dtype(),
-            b.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "b",
+            expected: vec![a.dtype()],
+            got: b.dtype(),
+        });
     }
     if y.dtype() != a.dtype() {
-        problems.push(format!(
-            "output y: expected input a dtype {:?}, got {:?}",
-            a.dtype(),
-            y.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![a.dtype()],
+            got: y.dtype(),
+        });
     }
     if a.rank() == 3 && b.rank() == 3 && y.rank() == 3 {
         let (t, h, da) = (a.shape()[0], a.shape()[1], a.shape()[2]);
-        if b.shape()[0] != t || b.shape()[1] != h {
-            problems.push(format!(
-                "input b shape {:?} does not share input a [T, H] = [{t}, {h}]",
-                b.shape()
-            ));
+        if b.shape()[0] != t {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "T",
+                expected_from: "a",
+                expected: t,
+                tensor: "b",
+                got: b.shape()[0],
+            });
         }
-        if y.shape()[0] != t || y.shape()[1] != h {
-            problems.push(format!(
-                "output y shape {:?} does not share input a [T, H] = [{t}, {h}]",
-                y.shape()
-            ));
+        if b.shape()[1] != h {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "H",
+                expected_from: "a",
+                expected: h,
+                tensor: "b",
+                got: b.shape()[1],
+            });
+        }
+        if y.shape()[0] != t {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "T",
+                expected_from: "a",
+                expected: t,
+                tensor: "y",
+                got: y.shape()[0],
+            });
+        }
+        if y.shape()[1] != h {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "H",
+                expected_from: "a",
+                expected: h,
+                tensor: "y",
+                got: y.shape()[1],
+            });
         }
         match da.checked_add(b.shape()[2]) {
             Some(sum) if sum == y.shape()[2] => {}
-            Some(sum) => problems.push(format!(
-                "input widths {da} + {} = {sum} do not match output dim {}",
-                b.shape()[2],
-                y.shape()[2]
-            )),
-            None => problems.push("input widths overflow usize".to_string()),
+            Some(sum) => problems.push(T0Error::DimensionMismatch {
+                dim_name: "D",
+                expected_from: "a+b",
+                expected: y.shape()[2],
+                tensor: "y",
+                got: sum,
+            }),
+            None => problems.push(T0Error::ArithmeticOverflow {
+                op: "concat",
+                detail: "input widths overflow usize".to_string(),
+            }),
         }
     }
 
-    T0Error::from_problems("concat", problems)?;
+    T0Error::from_problems(problems)?;
 
     let (t, h, da) = (a.shape()[0], a.shape()[1], a.shape()[2]);
     let db = b.shape()[2];

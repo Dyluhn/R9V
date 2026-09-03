@@ -279,7 +279,7 @@ pub fn embed_gather_with_scales(
         }
     }
 
-    T0Error::from_typed_problems(problems)?;
+    T0Error::from_problems(problems)?;
 
     let t_len = token_ids.shape()[0];
     let v_vocab = table.shape()[0];
@@ -369,7 +369,7 @@ pub fn embed_gather_with_scales(
         }
     }
 
-    T0Error::from_typed_problems(problems)?;
+    T0Error::from_problems(problems)?;
 
     let superblock_k = match scheme_res {
         Some(SchemeId::I4K) => 256,

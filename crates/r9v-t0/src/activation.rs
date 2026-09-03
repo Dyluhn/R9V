@@ -4,7 +4,7 @@
 use r9v_ir::{ActivationKind, ActivationOp, DType};
 
 use crate::buffer::{TensorView, TensorViewMut};
-use crate::error::T0Error;
+use crate::error::{push_shape_agreement, T0Error};
 
 use std::f64::consts::{FRAC_1_SQRT_2 as INV_SQRT_2_F64, FRAC_2_SQRT_PI as TWO_DIV_SQRT_PI_F64};
 
@@ -186,46 +186,49 @@ pub fn activation(
     let mut problems = Vec::new();
 
     if x.rank() != 2 {
-        problems.push(format!(
-            "input x: expected rank 2 [T, Dff], got rank {} with shape {:?}",
-            x.rank(),
-            x.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "x",
+            expected: 2,
+            got: x.rank(),
+            shape: x.shape().to_vec(),
+        });
     }
     if y.rank() != 2 {
-        problems.push(format!(
-            "output y: expected rank 2 [T, Dff], got rank {} with shape {:?}",
-            y.rank(),
-            y.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "y",
+            expected: 2,
+            got: y.rank(),
+            shape: y.shape().to_vec(),
+        });
     }
     if !matches!(x.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "input x: expected f16, bf16, or f32, got {:?}",
-            x.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "x",
+            expected: vec![DType::F16, DType::Bf16, DType::F32],
+            got: x.dtype(),
+        });
     }
     if y.dtype() != x.dtype() {
-        problems.push(format!(
-            "output y dtype {:?} does not match input x dtype {:?}",
-            y.dtype(),
-            x.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![x.dtype()],
+            got: y.dtype(),
+        });
     }
     if x.rank() == 2 && y.rank() == 2 && x.shape() != y.shape() {
-        problems.push(format!(
-            "output y shape {:?} does not match input x shape {:?}",
-            y.shape(),
-            x.shape()
-        ));
+        push_shape_agreement(&mut problems, "y", "x", y.shape(), x.shape());
     }
     if let Some(c) = op.clamp {
         if !c.is_finite() || c <= 0.0 {
-            problems.push(format!("clamp must be finite and > 0, got {c}"));
+            problems.push(T0Error::InvalidAttribute {
+                op: "activation",
+                attribute: "clamp",
+                reason: format!("must be finite and > 0, got {c}"),
+            });
         }
     }
 
-    T0Error::from_problems("activation", problems)?;
+    T0Error::from_problems(problems)?;
 
     let num_elem = x.num_elements();
     for i in 0..num_elem {

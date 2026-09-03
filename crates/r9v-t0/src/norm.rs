@@ -4,7 +4,7 @@
 use r9v_ir::{DType, NormAxis, NormKind, NormOp};
 
 use crate::buffer::{TensorView, TensorViewMut};
-use crate::error::T0Error;
+use crate::error::{push_shape_agreement, T0Error};
 
 /// Executes scalar T0 normalization (RMS or LayerNorm) per Spec 1 §4.B, §6.4, Spec 4 §2.
 ///
@@ -26,115 +26,146 @@ pub fn norm(
     let mut problems = Vec::new();
 
     if !op.eps.is_finite() || op.eps <= 0.0 {
-        problems.push(format!("eps must be finite and > 0, got {}", op.eps));
+        problems.push(T0Error::InvalidAttribute {
+            op: "norm",
+            attribute: "eps",
+            reason: format!("must be finite and > 0, got {}", op.eps),
+        });
     }
     if !matches!(op.out_dtype, DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "out_dtype must be f16, bf16, or f32, got {:?}",
-            op.out_dtype
-        ));
+        problems.push(T0Error::InvalidAttribute {
+            op: "norm",
+            attribute: "out_dtype",
+            reason: format!("must be f16, bf16, or f32, got {:?}", op.out_dtype),
+        });
     }
     if !op.weight_offset.is_finite() {
-        problems.push(format!(
-            "weight_offset must be finite, got {}",
-            op.weight_offset
-        ));
+        problems.push(T0Error::InvalidAttribute {
+            op: "norm",
+            attribute: "weight_offset",
+            reason: format!("must be finite, got {}", op.weight_offset),
+        });
     }
     if let NormAxis::Head(d) = op.axis {
         if d == 0 {
-            problems.push("NormAxis::Head(d): d must be > 0".to_string());
+            problems.push(T0Error::InvalidAttribute {
+                op: "norm",
+                attribute: "axis",
+                reason: "NormAxis::Head(d): d must be > 0".to_string(),
+            });
         }
     }
 
     if x.rank() != 2 {
-        problems.push(format!(
-            "input x: expected rank 2 [T, N], got rank {} with shape {:?}",
-            x.rank(),
-            x.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "x",
+            expected: 2,
+            got: x.rank(),
+            shape: x.shape().to_vec(),
+        });
     }
     if weight.rank() != 1 {
-        problems.push(format!(
-            "weight: expected rank 1 [N], got rank {} with shape {:?}",
-            weight.rank(),
-            weight.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "weight",
+            expected: 1,
+            got: weight.rank(),
+            shape: weight.shape().to_vec(),
+        });
     }
     if y.rank() != 2 {
-        problems.push(format!(
-            "output y: expected rank 2 [T, N], got rank {} with shape {:?}",
-            y.rank(),
-            y.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "y",
+            expected: 2,
+            got: y.rank(),
+            shape: y.shape().to_vec(),
+        });
     }
     if !matches!(x.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "input x: expected f16, bf16, or f32, got {:?}",
-            x.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "x",
+            expected: vec![DType::F16, DType::Bf16, DType::F32],
+            got: x.dtype(),
+        });
     }
     if weight.dtype() != DType::F32 {
-        problems.push(format!("weight: expected f32, got {:?}", weight.dtype()));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "weight",
+            expected: vec![DType::F32],
+            got: weight.dtype(),
+        });
     }
     if y.dtype() != op.out_dtype {
-        problems.push(format!(
-            "output y: expected out_dtype {:?}, got {:?}",
-            op.out_dtype,
-            y.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![op.out_dtype],
+            got: y.dtype(),
+        });
     }
 
     if let Some(b) = bias {
         if b.rank() != 1 {
-            problems.push(format!(
-                "bias: expected rank 1 [N], got rank {} with shape {:?}",
-                b.rank(),
-                b.shape()
-            ));
+            problems.push(T0Error::RankMismatch {
+                tensor: "bias",
+                expected: 1,
+                got: b.rank(),
+                shape: b.shape().to_vec(),
+            });
         }
         if b.dtype() != DType::F32 {
-            problems.push(format!("bias: expected f32, got {:?}", b.dtype()));
+            problems.push(T0Error::DTypeMismatch {
+                tensor: "bias",
+                expected: vec![DType::F32],
+                got: b.dtype(),
+            });
         }
     }
 
     if x.rank() == 2 && weight.rank() == 1 {
         let n = x.shape()[1];
         if weight.shape()[0] != n {
-            problems.push(format!(
-                "weight dimension {} does not match x feature dimension N={}",
-                weight.shape()[0],
-                n
-            ));
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "N",
+                expected_from: "x",
+                expected: n,
+                tensor: "weight",
+                got: weight.shape()[0],
+            });
         }
         if let Some(b) = bias {
             if b.rank() == 1 && b.shape()[0] != n {
-                problems.push(format!(
-                    "bias dimension {} does not match x feature dimension N={}",
-                    b.shape()[0],
-                    n
-                ));
+                problems.push(T0Error::DimensionMismatch {
+                    dim_name: "N",
+                    expected_from: "x",
+                    expected: n,
+                    tensor: "bias",
+                    got: b.shape()[0],
+                });
             }
         }
         if let NormAxis::Head(d) = op.axis {
             if d == 0 {
-                problems.push("NormAxis::Head(d): d must be > 0".to_string());
+                problems.push(T0Error::InvalidAttribute {
+                    op: "norm",
+                    attribute: "axis",
+                    reason: "NormAxis::Head(d): d must be > 0".to_string(),
+                });
             } else if !n.is_multiple_of(d as usize) {
-                problems.push(format!(
-                    "feature dimension N={n} is not divisible by head dimension d={d}"
-                ));
+                problems.push(T0Error::InvalidAttribute {
+                    op: "norm",
+                    attribute: "axis",
+                    reason: format!(
+                        "feature dimension N={n} is not divisible by head dimension d={d}"
+                    ),
+                });
             }
         }
     }
 
     if x.rank() == 2 && y.rank() == 2 && y.shape() != x.shape() {
-        problems.push(format!(
-            "output y shape {:?} does not match input x shape {:?}",
-            y.shape(),
-            x.shape()
-        ));
+        push_shape_agreement(&mut problems, "y", "x", y.shape(), x.shape());
     }
 
-    T0Error::from_problems("norm", problems)?;
+    T0Error::from_problems(problems)?;
 
     let t = x.shape()[0];
     let n = x.shape()[1];

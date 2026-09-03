@@ -5,7 +5,7 @@ use r9v_ir::{ActMulOp, DType};
 
 use crate::activation::{eval_activation_f32, eval_activation_f64};
 use crate::buffer::{TensorView, TensorViewMut};
-use crate::error::T0Error;
+use crate::error::{push_shape_agreement, T0Error};
 
 /// Executes scalar T0 gated activation product: `y = act(gate) * up` (Spec 1 §4.B, Spec 1 §6.4, Spec 4 §2).
 pub fn act_mul(
@@ -21,67 +21,67 @@ pub fn act_mul(
     let mut problems = Vec::new();
 
     if gate.rank() != 2 {
-        problems.push(format!(
-            "operand gate: expected rank 2 [T, Dff], got rank {} with shape {:?}",
-            gate.rank(),
-            gate.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "gate",
+            expected: 2,
+            got: gate.rank(),
+            shape: gate.shape().to_vec(),
+        });
     }
     if up.rank() != 2 {
-        problems.push(format!(
-            "operand up: expected rank 2 [T, Dff], got rank {} with shape {:?}",
-            up.rank(),
-            up.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "up",
+            expected: 2,
+            got: up.rank(),
+            shape: up.shape().to_vec(),
+        });
     }
     if y.rank() != 2 {
-        problems.push(format!(
-            "output y: expected rank 2 [T, Dff], got rank {} with shape {:?}",
-            y.rank(),
-            y.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "y",
+            expected: 2,
+            got: y.rank(),
+            shape: y.shape().to_vec(),
+        });
     }
     if !matches!(gate.dtype(), DType::F16 | DType::Bf16 | DType::F32) {
-        problems.push(format!(
-            "operand gate: expected f16, bf16, or f32, got {:?}",
-            gate.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "gate",
+            expected: vec![DType::F16, DType::Bf16, DType::F32],
+            got: gate.dtype(),
+        });
     }
     if up.dtype() != gate.dtype() {
-        problems.push(format!(
-            "operand up dtype {:?} does not match gate dtype {:?}",
-            up.dtype(),
-            gate.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "up",
+            expected: vec![gate.dtype()],
+            got: up.dtype(),
+        });
     }
     if y.dtype() != gate.dtype() {
-        problems.push(format!(
-            "output y dtype {:?} does not match gate dtype {:?}",
-            y.dtype(),
-            gate.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![gate.dtype()],
+            got: y.dtype(),
+        });
     }
     if gate.rank() == 2 && up.rank() == 2 && gate.shape() != up.shape() {
-        problems.push(format!(
-            "operand up shape {:?} does not match gate shape {:?}",
-            up.shape(),
-            gate.shape()
-        ));
+        push_shape_agreement(&mut problems, "up", "gate", up.shape(), gate.shape());
     }
     if gate.rank() == 2 && y.rank() == 2 && gate.shape() != y.shape() {
-        problems.push(format!(
-            "output y shape {:?} does not match gate shape {:?}",
-            y.shape(),
-            gate.shape()
-        ));
+        push_shape_agreement(&mut problems, "y", "gate", y.shape(), gate.shape());
     }
     if let Some(c) = op.clamp {
         if !c.is_finite() || c <= 0.0 {
-            problems.push(format!("clamp must be finite and > 0, got {c}"));
+            problems.push(T0Error::InvalidAttribute {
+                op: "act_mul",
+                attribute: "clamp",
+                reason: format!("must be finite and > 0, got {c}"),
+            });
         }
     }
 
-    T0Error::from_problems("act_mul", problems)?;
+    T0Error::from_problems(problems)?;
 
     let num_elem = gate.num_elements();
     for i in 0..num_elem {

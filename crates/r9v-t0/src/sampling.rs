@@ -106,7 +106,7 @@ pub fn logits_postprocess(
             }
         }
     }
-    T0Error::from_typed_problems(parameter_problems)?;
+    T0Error::from_problems(parameter_problems)?;
 
     if let Some(history) = history_counts {
         let expected_hist = s * v;
@@ -133,6 +133,26 @@ pub fn logits_postprocess(
         }
     }
 
+    // DECISION(A1.8): raw-logit NaN and +Inf are rejected with their exact (seq, query, token) location before any output is touched, while -Inf is allowed as the intentional encoding of impossible tokens (it is also what the grammar mask writes); rejected treating -Inf as invalid because callers legitimately pre-mask logits, and rejected post-softmax-only detection because a NaN poisons the whole row's max/sum and hides its origin. Spec 1 §4.F.
+    for s_idx in 0..s {
+        for q_idx in 0..q {
+            let offset = (s_idx * q + q_idx) * v;
+            for (tok, &logit) in logits[offset..offset + v].iter().enumerate() {
+                if logit.is_nan() || logit == f32::INFINITY {
+                    return Err(T0Error::InvalidLogit {
+                        op: "logits_postprocess",
+                        seq: s_idx,
+                        query: q_idx,
+                        token: tok,
+                        value: logit,
+                    });
+                }
+            }
+        }
+    }
+
+    // DECISION(A1.8): the whole output is computed into a staging buffer and copied to out_probs only on success, so any mid-loop refusal (masked-out row, post-transform overflow, degenerate renormalization) leaves the caller's buffer bit-identical; rejected in-place writes because an early row would already be overwritten when a later row fails. Spec 1 §4.F.
+    let mut staged_probs = vec![0.0f32; expected_len];
     let mut work_logits = vec![0.0f32; v];
     let mut exp_vals = vec![0.0f32; v];
     let mut cand_mask = vec![false; v];
@@ -144,7 +164,7 @@ pub fn logits_postprocess(
         for q_idx in 0..q {
             let offset = (s_idx * q + q_idx) * v;
             let logit_slice = &logits[offset..offset + v];
-            let out_slice = &mut out_probs[offset..offset + v];
+            let out_slice = &mut staged_probs[offset..offset + v];
             let mask_slice = grammar_mask.map(|m| &m[offset..offset + v]);
 
             work_logits.copy_from_slice(logit_slice);
@@ -194,6 +214,21 @@ pub fn logits_postprocess(
                     if !allowed {
                         work_logits[tok] = f32::NEG_INFINITY;
                     }
+                }
+            }
+
+            // Post-transform overflow check: bias, penalties, and temperature
+            // scaling run in f32 and can overflow finite inputs to +Inf (or NaN
+            // via Inf arithmetic). -Inf stays legal (masked/impossible token).
+            for (tok, &l) in work_logits.iter().enumerate() {
+                if l.is_nan() || l == f32::INFINITY {
+                    return Err(T0Error::InvalidLogit {
+                        op: "logits_postprocess",
+                        seq: s_idx,
+                        query: q_idx,
+                        token: tok,
+                        value: l,
+                    });
                 }
             }
 
@@ -328,7 +363,167 @@ pub fn logits_postprocess(
         }
     }
 
+    out_probs.copy_from_slice(&staged_probs);
     Ok(())
+}
+
+// DECISION(A1.8): the f64 oracle re-implements the logits_postprocess pipeline (bias, penalties, temperature, mask, stable (-logit, index) sort, top-k/top-p/min-p, renormalization, temperature-zero argmax) independently in f64 rather than calling the f32 implementation, so cross-tests compare two formulas instead of one formula against itself; rejected deriving the oracle from the f32 code path because a shared implementation would reproduce shared bugs. Spec 1 §4.F, §6.5.
+/// Independent 64-bit floating point oracle for `logits_postprocess` (Spec 1 §4.F, §6.5).
+///
+/// Re-implements the postprocessing pipeline in `f64` for cross-testing the f32
+/// T0 implementation within [`crate::tolerance::Tolerance`] bounds. Assumes
+/// valid inputs (finite logits or intentional `-Inf`, finite biases, at least
+/// one unmasked token per row); invalid inputs are a test bug, not an error.
+#[allow(clippy::too_many_arguments)]
+pub fn logits_postprocess_f64_reference(
+    logits: &[f64],
+    s: usize,
+    q: usize,
+    v: usize,
+    params: &[SamplingParams],
+    history_counts: Option<&[u32]>,
+    grammar_mask: Option<&[bool]>,
+) -> Vec<f64> {
+    assert_eq!(logits.len(), s * q * v);
+    assert_eq!(params.len(), s);
+    if let Some(history) = history_counts {
+        assert_eq!(history.len(), s * v);
+    }
+    if let Some(mask) = grammar_mask {
+        assert_eq!(mask.len(), s * q * v);
+    }
+
+    let mut probs = vec![0.0f64; s * q * v];
+    let mut work = vec![0.0f64; v];
+
+    for s_idx in 0..s {
+        let p = &params[s_idx];
+        let hist_row = history_counts.map(|h| &h[s_idx * v..(s_idx + 1) * v]);
+        for q_idx in 0..q {
+            let offset = (s_idx * q + q_idx) * v;
+            work.copy_from_slice(&logits[offset..offset + v]);
+            let out_slice = &mut probs[offset..offset + v];
+            let mask_slice = grammar_mask.map(|m| &m[offset..offset + v]);
+
+            for &(token_id, bias) in &p.logit_bias {
+                work[token_id as usize] += bias as f64;
+            }
+            if let Some(hist) = hist_row {
+                for (tok, &count) in hist.iter().enumerate().take(v) {
+                    if count > 0 {
+                        let l = work[tok];
+                        if p.repetition_penalty != 1.0 {
+                            work[tok] = if l > 0.0 {
+                                l / p.repetition_penalty as f64
+                            } else {
+                                l * p.repetition_penalty as f64
+                            };
+                        }
+                        if p.presence_penalty != 0.0 {
+                            work[tok] -= p.presence_penalty as f64;
+                        }
+                        if p.frequency_penalty != 0.0 {
+                            work[tok] -= (count as f64) * p.frequency_penalty as f64;
+                        }
+                    }
+                }
+            }
+            if p.temperature > 0.0 {
+                let inv_temp = 1.0 / p.temperature as f64;
+                for l in &mut work {
+                    *l *= inv_temp;
+                }
+            }
+            if let Some(mask) = mask_slice {
+                for (tok, &allowed) in mask.iter().enumerate().take(v) {
+                    if !allowed {
+                        work[tok] = f64::NEG_INFINITY;
+                    }
+                }
+            }
+
+            if p.temperature == 0.0 {
+                let mut best_idx = 0;
+                let mut best_val = f64::NEG_INFINITY;
+                for (tok, &l) in work.iter().enumerate() {
+                    if l > best_val {
+                        best_val = l;
+                        best_idx = tok;
+                    }
+                }
+                out_slice.fill(0.0);
+                out_slice[best_idx] = 1.0;
+                continue;
+            }
+
+            let max_l = work
+                .iter()
+                .copied()
+                .filter(|&l| l > f64::NEG_INFINITY)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let mut sum_exp = 0.0f64;
+            let mut exp_vals = vec![0.0f64; v];
+            for tok in 0..v {
+                if work[tok] > f64::NEG_INFINITY {
+                    let e = (work[tok] - max_l).exp();
+                    exp_vals[tok] = e;
+                    sum_exp += e;
+                }
+            }
+            assert!(sum_exp > 0.0 && sum_exp.is_finite());
+            for tok in 0..v {
+                out_slice[tok] = exp_vals[tok] / sum_exp;
+            }
+
+            let mut candidates: Vec<usize> =
+                (0..v).filter(|&i| work[i] > f64::NEG_INFINITY).collect();
+            candidates.sort_by(|&a, &b| {
+                (-work[a], a)
+                    .partial_cmp(&(-work[b], b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if p.top_k > 0 && (p.top_k as usize) < candidates.len() {
+                candidates.truncate(p.top_k as usize);
+            }
+            if p.top_p < 1.0 {
+                let mut cumsum = 0.0f64;
+                let mut keep = 0;
+                for &idx in &candidates {
+                    cumsum += out_slice[idx];
+                    keep += 1;
+                    if cumsum >= p.top_p as f64 {
+                        break;
+                    }
+                }
+                candidates.truncate(keep.max(1));
+            }
+            if p.min_p > 0.0 && !candidates.is_empty() {
+                let p_max = out_slice[candidates[0]];
+                let thresh = p.min_p as f64 * p_max;
+                let filtered: Vec<usize> = candidates
+                    .iter()
+                    .copied()
+                    .filter(|&idx| out_slice[idx] >= thresh)
+                    .collect();
+                if !filtered.is_empty() {
+                    candidates = filtered;
+                } else {
+                    candidates.truncate(1);
+                }
+            }
+
+            let cand_sum: f64 = candidates.iter().map(|&idx| out_slice[idx]).sum();
+            assert!(cand_sum > 0.0 && cand_sum.is_finite());
+            let inv_cand_sum = 1.0 / cand_sum;
+            for slot in out_slice.iter_mut() {
+                *slot = 0.0;
+            }
+            for &idx in &candidates {
+                out_slice[idx] = exp_vals[idx] / sum_exp * inv_cand_sum;
+            }
+        }
+    }
+    probs
 }
 
 /// Stochastic or greedy inverse-CDF token sampling op (Spec 1 §4.F).
@@ -381,6 +576,9 @@ pub fn sample(
     for s_idx in 0..s {
         validate_distribution(&probs[s_idx * v..(s_idx + 1) * v], "sample", s_idx, 0)?;
     }
+    for rng in rng_states.iter() {
+        rng.ensure_can_advance(1, "sample")?;
+    }
 
     let mut tokens = Vec::with_capacity(s);
 
@@ -388,7 +586,7 @@ pub fn sample(
         let p_row = &probs[s_idx * v..(s_idx + 1) * v];
 
         // Draw uniform random float u in (0, 1) and advance RNG state by 1
-        let u = rng.draw_uniform_f32();
+        let u = rng.draw_uniform_f32()?;
 
         let mut cumsum = 0.0f32;
         let mut chosen = v - 1;
@@ -549,6 +747,24 @@ pub fn verify(
         });
     }
 
+    // DECISION(A1.8): TypicalAcceptance eps/delta are validated publicly at the verify boundary (finite, strictly positive) before any RNG or output mutation, matching the IR contract; rejected deferring validation to the per-position loop because a late refusal would leave earlier sequences' RNG states advanced and outputs committed. Spec 7 §4.
+    if let VerifyMethod::TypicalAcceptance { eps, delta } = *method {
+        if !eps.is_finite() || eps <= 0.0 {
+            return Err(T0Error::InvalidAttribute {
+                op: "verify",
+                attribute: "method.eps",
+                reason: format!("typical acceptance eps must be finite and > 0.0, got {eps}"),
+            });
+        }
+        if !delta.is_finite() || delta <= 0.0 {
+            return Err(T0Error::InvalidAttribute {
+                op: "verify",
+                attribute: "method.delta",
+                reason: format!("typical acceptance delta must be finite and > 0.0, got {delta}"),
+            });
+        }
+    }
+
     if let Some(tree_mask) = tree {
         if tree_mask.t() != k {
             return Err(T0Error::ShapeLengthMismatch {
@@ -574,6 +790,9 @@ pub fn verify(
             let offset = (s_idx * k_plus_one + pos) * v;
             validate_distribution(&target_probs[offset..offset + v], "verify", s_idx, pos)?;
         }
+    }
+    for rng in rng_states.iter() {
+        rng.ensure_can_advance(draw_advance, "verify")?;
     }
 
     // Precompute root-to-leaf paths for tree drafts (Spec 7 §5)
@@ -639,7 +858,7 @@ pub fn verify(
             };
             out_acc_slice[0] = bonus_tok;
             out_accept_len[s_idx] = 0;
-            rng.advance(1);
+            rng.advance(1)?;
             continue;
         }
 
@@ -714,8 +933,11 @@ pub fn verify(
                                     rng.draw_at(terminal_draw),
                                 )?;
                             } else {
-                                // Fallback to target argmax if residual is zeroed
-                                terminal_token = argmax_stable(target_dist) as u32;
+                                // DECISION(A1.8): a degenerate zero residual (norm(max(0, p-q)) undefined, reachable only through float rounding since exact p == q implies acceptance with alpha == 1) falls back to sampling the validated target distribution with the same reserved terminal draw k; rejected the argmax fallback because it is not distribution-exact and would silently change the draw-consumption contract (every rejection consumes exactly draw k). Spec 1 §4.F, Spec 7 §4.
+                                terminal_token = sample_from_distribution(
+                                    target_dist,
+                                    rng.draw_at(terminal_draw),
+                                )?;
                             }
                             false
                         }
@@ -800,7 +1022,7 @@ pub fn verify(
         out_acc_slice[best_path_len] = best_terminal_token;
 
         // Advance RNG state by k + 1 for clean non-overlapping step keying (Spec 1 §4.F, Spec 7 §4)
-        rng.advance(draw_advance);
+        rng.advance(draw_advance)?;
     }
 
     Ok(VerifyOutput {
@@ -932,7 +1154,7 @@ mod tests {
             0.0, 0.0, 0.0, 0.0, 1.0, // pos 2: bonus token is 1
             0.0, 1.0, 0.0, 0.0, 0.0,
         ];
-        let mut rng_states = vec![RngState::new(42, 1, 0)];
+        let mut rng_states = vec![RngState::from_u64(42, 1, 0).unwrap()];
 
         let out = verify(
             &draft_tokens,
