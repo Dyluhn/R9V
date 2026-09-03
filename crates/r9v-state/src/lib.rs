@@ -19,7 +19,7 @@ pub mod spec;
 pub use error::{InvalidItem, StateError, StateResult};
 pub use manager::{
     block_offset, required_pool_bytes, BatchMeta, Budget, CompactOp, GroupBudget, SlotRange,
-    StateConfig, StateManager, Stats, SLOT_NONE,
+    StateConfig, StateManager, Stats, MAX_SLOT_BLOCKS, SLOT_NONE,
 };
 pub use spec::{
     group_layers, CacheDtype, LayerGroup, Retain, StateSpec, BLOCK_SENTINEL, BLOCK_TOKENS,

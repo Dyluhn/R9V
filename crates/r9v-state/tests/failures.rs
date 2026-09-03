@@ -419,3 +419,88 @@ fn failed_new_seq_leaves_no_trace() {
     let err = m.new_seq(&[]).unwrap_err();
     assert!(matches!(err, StateError::SeqLimit { .. }), "{err:?}");
 }
+
+/// MAX_SLOT_BLOCKS admits at most 134_217_727 blocks so the highest possible
+/// flattened slot is strictly less than `SLOT_NONE` (`u32::MAX`). A capacity
+/// requesting one more block is rejected at construction without impractical allocation.
+#[test]
+fn max_slot_blocks_boundary_proves_no_slot_none_and_rejects_one_more_block() {
+    use r9v_state::{group_layers, BLOCK_TOKENS, MAX_SLOT_BLOCKS, SLOT_NONE};
+
+    assert_eq!(MAX_SLOT_BLOCKS, 134_217_727);
+    let max_block_id = MAX_SLOT_BLOCKS - 1;
+    assert_eq!(max_block_id, 134_217_726);
+
+    // Mathematical coverage: every lane in the highest admitted block strictly precedes SLOT_NONE.
+    for lane in 0..BLOCK_TOKENS {
+        let slot = u64::from(max_block_id) * u64::from(BLOCK_TOKENS) + u64::from(lane);
+        assert!(slot < u64::from(SLOT_NONE));
+        assert_ne!(slot as u32, SLOT_NONE);
+    }
+    let highest_real_slot = max_block_id * BLOCK_TOKENS + (BLOCK_TOKENS - 1);
+    assert_eq!(highest_real_slot, 4_294_967_263);
+    assert_eq!(SLOT_NONE, u32::MAX);
+    assert_eq!(u64::from(highest_real_slot) + 32, u64::from(SLOT_NONE));
+
+    // One more block (134_217_728 blocks total) would have admitted block id 134_217_727,
+    // whose lane 31 would equal SLOT_NONE (4_294_967_295 == u32::MAX).
+    let would_collide_block = MAX_SLOT_BLOCKS;
+    let collided_slot =
+        u64::from(would_collide_block) * u64::from(BLOCK_TOKENS) + u64::from(BLOCK_TOKENS - 1);
+    assert_eq!(collided_slot, u64::from(SLOT_NONE));
+
+    // One-more-block capacity is rejected without impractical allocation.
+    let cfg = StateConfig {
+        max_ctx: 32,
+        max_seqs: 1,
+    };
+    let spec = kv_all();
+    let groups = group_layers(&[spec]);
+    let block_bytes = groups[0].block_bytes().expect("valid block bytes");
+    let pool_bytes = (u64::from(MAX_SLOT_BLOCKS) + 1) * block_bytes;
+    let err = StateManager::new(cfg, vec![spec], pool_bytes).unwrap_err();
+    match err {
+        StateError::InvalidConfig { problems } => {
+            assert!(
+                problems
+                    .iter()
+                    .any(|p| p.reason.contains("exceeds u32 slot_map range 134217727")),
+                "got {problems:?}"
+            );
+        }
+        other => panic!("expected InvalidConfig, got {other:?}"),
+    }
+}
+
+/// Failed `free_seq` calls are atomic: state, statistics, and resources are unchanged on Err.
+#[test]
+fn free_seq_failure_leaves_all_state_and_stats_untouched() {
+    let mut m = tiny_manager();
+    let (a, _) = m.new_seq(&[]).unwrap();
+    let toks = vec![3; 64];
+    m.reserve(a, 64).unwrap();
+    m.write_tokens(a, 0, &toks).unwrap();
+    m.commit(a, 64).unwrap();
+
+    let before_stats = m.stats();
+    let before_budget = m.budget();
+    let before_free = m.free_blocks(0).unwrap();
+
+    // Calling free_seq on an unknown sequence fails and mutates nothing.
+    use r9v_common::SeqId;
+    let ghost = SeqId::new(9999);
+    let err = m.free_seq(ghost).unwrap_err();
+    assert!(matches!(err, StateError::UnknownSeq { .. }), "{err:?}");
+
+    assert_eq!(m.ctx_len(a).unwrap(), 64);
+    assert_eq!(m.free_blocks(0).unwrap(), before_free);
+    assert_eq!(m.stats(), before_stats);
+    assert_eq!(m.budget(), before_budget);
+
+    // Clean free_seq works and releases all resources.
+    m.free_seq(a).unwrap();
+    assert_eq!(
+        m.free_blocks(0).unwrap(),
+        before_budget.groups[0].total_blocks
+    );
+}

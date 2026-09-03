@@ -192,3 +192,50 @@ fn new_seq_refusal_takes_no_slots_and_consumes_no_id() {
     assert_eq!(b.as_u64(), 1);
     assert_eq!(m.fixed_slot(b, 1).unwrap(), 0);
 }
+
+/// Deterministic multi-group exhaustion leaks no slots across groups and
+/// preserves exact smallest-first allocation order upon recovery.
+#[test]
+fn multi_group_fixed_exhaustion_leaks_no_slots_and_preserves_determinism() {
+    use r9v_state::{StateConfig, StateError};
+    let mut m = manager_for(
+        StateConfig {
+            max_ctx: 128,
+            max_seqs: 2,
+        },
+        &hybrid_specs(),
+    );
+    // 2 live sequences fill both slots in recurrent and conv groups.
+    let (a, _) = m.new_seq(&[]).unwrap();
+    let (b, _) = m.new_seq(&[]).unwrap();
+    assert_eq!(m.free_slots(1).unwrap(), 0);
+    assert_eq!(m.free_slots(2).unwrap(), 0);
+
+    // Free sequence a: slot 0 becomes free in both group 1 and group 2.
+    m.free_seq(a).unwrap();
+    assert_eq!(m.free_slots(1).unwrap(), 1);
+    assert_eq!(m.free_slots(2).unwrap(), 1);
+
+    // Allocate c: takes slot 0 in both.
+    let (c, _) = m.new_seq(&[]).unwrap();
+    assert_eq!(m.fixed_slot(c, 1).unwrap(), 0);
+    assert_eq!(m.fixed_slot(c, 2).unwrap(), 0);
+    assert_eq!(m.free_slots(1).unwrap(), 0);
+    assert_eq!(m.free_slots(2).unwrap(), 0);
+
+    // Now exhaustion refusal: neither group leaks a slot, counters don't advance.
+    let err = m.new_seq(&[]).unwrap_err();
+    assert!(matches!(err, StateError::SeqLimit { .. }), "{err:?}");
+    assert_eq!(m.free_slots(1).unwrap(), 0);
+    assert_eq!(m.free_slots(2).unwrap(), 0);
+
+    // Free b (owned slot 1).
+    m.free_seq(b).unwrap();
+    assert_eq!(m.free_slots(1).unwrap(), 1);
+    assert_eq!(m.free_slots(2).unwrap(), 1);
+
+    // Allocate d: deterministic allocation yields slot 1 in both groups.
+    let (d, _) = m.new_seq(&[]).unwrap();
+    assert_eq!(m.fixed_slot(d, 1).unwrap(), 1);
+    assert_eq!(m.fixed_slot(d, 2).unwrap(), 1);
+}

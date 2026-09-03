@@ -34,10 +34,12 @@ use crate::spec::{
 pub const SLOT_NONE: u32 = u32::MAX;
 
 /// Maximum blocks per paged pool: the largest count whose flattened slots
-/// (`block_id * 32 + lane`) still fit in the u32 `slot_map` (Spec 1 §2.5).
-/// `(134_217_728 - 1) * 32 + 31 == u32::MAX`. Pools that would need more
+/// (`block_id * 32 + lane`) strictly precede `SLOT_NONE` (`u32::MAX`, Spec 1 §2.5).
+/// `(134_217_727 - 1) * 32 + 31 == 4_294_967_263 < u32::MAX`. Pools that would need more
 /// blocks are refused at construction, before any mutation.
-const MAX_SLOT_BLOCKS: u32 = 134_217_728;
+///
+/// Spec 1 §2.5, Spec 3 §3.3.
+pub const MAX_SLOT_BLOCKS: u32 = 134_217_727;
 
 /// Engine state configuration (Spec 3 §9 `[state]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -496,8 +498,9 @@ impl StateManager {
                     ),
                 }]));
             }
-            // Flattened slots are u32: refuse a capacity the `slot_map`
-            // cannot address, before any pool is built.
+            // Flattened slots are u32: refuse a capacity whose flattened
+            // slots could collide with `SLOT_NONE` (`u32::MAX`), before
+            // any pool is built.
             if capacity > u64::from(MAX_SLOT_BLOCKS) {
                 return Err(StateError::invalid(vec![InvalidItem {
                     index: u32::MAX,
@@ -506,7 +509,7 @@ impl StateManager {
                     ),
                 }]));
             }
-            // Safe: `capacity <= MAX_SLOT_BLOCKS <= u32::MAX`.
+            // Safe: `capacity <= MAX_SLOT_BLOCKS < u32::MAX`.
             capacity as u32
         };
         let assigned_paged = u64::from(blocks_per_group)
@@ -607,6 +610,20 @@ impl StateManager {
                 n: len_u32,
             });
         }
+        // Fallible checks first: the live-count and id counters must have room
+        // before checking limits or taking slots.
+        let next_live = self
+            .live_count
+            .checked_add(1)
+            .ok_or_else(|| StateError::Overflow {
+                what: "live sequence count".to_owned(),
+            })?;
+        let next_id = self
+            .next_seq
+            .checked_add(1)
+            .ok_or_else(|| StateError::Overflow {
+                what: "sequence id".to_owned(),
+            })?;
         let live = self.live_count;
         if live >= self.config.max_seqs {
             return Err(StateError::SeqLimit {
@@ -614,23 +631,16 @@ impl StateManager {
                 cap: self.config.max_seqs,
             });
         }
-        // Fallible checks first: the id counter must have room and every
-        // fixed group must hold a free slot before any is taken.
-        self.next_seq
-            .checked_add(1)
-            .ok_or_else(|| StateError::Overflow {
-                what: "sequence id".to_owned(),
-            })?;
         for (gi, g) in self.groups.iter().enumerate() {
             if !g.spec.is_recurrent() {
                 continue;
             }
-            let has_free = self
-                .fixed
-                .get(gi)
-                .and_then(|p| p.as_ref())
-                .is_some_and(|p| !p.free.is_empty());
-            if !has_free {
+            let pool = self.fixed.get(gi).and_then(|p| p.as_ref()).ok_or_else(|| {
+                StateError::InvalidBatch {
+                    detail: format!("group {gi} is not a fixed group"),
+                }
+            })?;
+            if pool.free.is_empty() {
                 return Err(StateError::SeqLimit {
                     live,
                     cap: self.config.max_seqs,
@@ -641,37 +651,48 @@ impl StateManager {
         // allocation per fixed group, two buffers per sequence inside the
         // slot; rejected: implicit parity-only bookkeeping with no pool
         // ownership (loses release/reuse accounting and exact budgeting).
-        // All groups were pre-checked, so these takes cannot fail.
+        // All groups were pre-checked, but any later failure rolls back
+        // already taken slots so no resources leak.
         let mut fixed_slots: Vec<Option<u32>> = vec![None; self.groups.len()];
         for (gi, g) in self.groups.iter().enumerate() {
             if !g.spec.is_recurrent() {
                 continue;
             }
-            let pool = self.fixed[gi]
-                .as_mut()
-                .ok_or_else(|| StateError::InvalidBatch {
-                    detail: format!("group {gi} is not a fixed group"),
-                })?;
-            let id = pool
-                .free
-                .iter()
-                .next()
-                .copied()
-                .ok_or(StateError::SeqLimit {
-                    live,
-                    cap: self.config.max_seqs,
-                })?;
+            let pool = match self.fixed.get_mut(gi).and_then(|p| p.as_mut()) {
+                Some(p) => p,
+                None => {
+                    for (rgi, rslot) in fixed_slots.into_iter().enumerate() {
+                        if let Some(sid) = rslot {
+                            if let Some(Some(rpool)) = self.fixed.get_mut(rgi) {
+                                rpool.free.insert(sid);
+                            }
+                        }
+                    }
+                    return Err(StateError::InvalidBatch {
+                        detail: format!("group {gi} is not a fixed group"),
+                    });
+                }
+            };
+            let id = match pool.free.iter().next().copied() {
+                Some(id) => id,
+                None => {
+                    for (rgi, rslot) in fixed_slots.into_iter().enumerate() {
+                        if let Some(sid) = rslot {
+                            if let Some(Some(rpool)) = self.fixed.get_mut(rgi) {
+                                rpool.free.insert(sid);
+                            }
+                        }
+                    }
+                    return Err(StateError::SeqLimit {
+                        live,
+                        cap: self.config.max_seqs,
+                    });
+                }
+            };
             pool.free.remove(&id);
             fixed_slots[gi] = Some(id);
         }
         let id = self.next_seq;
-        // Assign the increment checked above, before any mutation.
-        self.next_seq = self
-            .next_seq
-            .checked_add(1)
-            .ok_or_else(|| StateError::Overflow {
-                what: "sequence id".to_owned(),
-            })?;
         let g = self.groups.len();
         self.seqs.insert(
             id,
@@ -686,14 +707,8 @@ impl StateManager {
                 parity: vec![0; g],
             },
         );
-        // Safe from overflow: `live < max_seqs <= MAX_SEQS_HARD < u32::MAX`,
-        // but still checked — saturation must never hide a counting bug.
-        self.live_count = self
-            .live_count
-            .checked_add(1)
-            .ok_or_else(|| StateError::Overflow {
-                what: "live sequence count".to_owned(),
-            })?;
+        self.next_seq = next_id;
+        self.live_count = next_live;
         Ok((SeqId::new(id), 0))
     }
 
@@ -1392,10 +1407,80 @@ impl StateManager {
     /// cycles cannot grow unbounded tombstones. Session retention is deferred
     /// to roadmap B1: everything is released and nothing is retained.
     pub fn free_seq(&mut self, seq: SeqId) -> StateResult<()> {
+        // Validation phase: verify all preconditions, referenced pools,
+        // slots/blocks, and live-count without mutating any state.
+        let s = self
+            .seqs
+            .get(&seq.as_u64())
+            .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })?;
+
+        let next_live = self
+            .live_count
+            .checked_sub(1)
+            .ok_or_else(|| StateError::Overflow {
+                what: "live sequence count".to_owned(),
+            })?;
+
+        for (gi, ids) in s.tables.iter().enumerate() {
+            if ids.is_empty() {
+                continue;
+            }
+            let pool = self.pools.get(gi).and_then(|p| p.as_ref()).ok_or_else(|| {
+                StateError::InvalidBatch {
+                    detail: format!("group {gi} is not a paged group"),
+                }
+            })?;
+            let mut seen = BTreeSet::new();
+            for &id in ids {
+                if id >= pool.total {
+                    return Err(StateError::InvalidBatch {
+                        detail: format!(
+                            "block {id} in group {gi} exceeds pool capacity {}",
+                            pool.total
+                        ),
+                    });
+                }
+                if pool.free.contains(&id) {
+                    return Err(StateError::InvalidBatch {
+                        detail: format!("block {id} in group {gi} is already free"),
+                    });
+                }
+                if !seen.insert(id) {
+                    return Err(StateError::InvalidBatch {
+                        detail: format!("block {id} in group {gi} is duplicated in sequence table"),
+                    });
+                }
+            }
+        }
+
+        for (gi, slot) in s.fixed_slots.iter().enumerate() {
+            let Some(&id) = slot.as_ref() else { continue };
+            let pool = self.fixed.get(gi).and_then(|p| p.as_ref()).ok_or_else(|| {
+                StateError::InvalidBatch {
+                    detail: format!("group {gi} is not a fixed group"),
+                }
+            })?;
+            if id >= pool.total_slots {
+                return Err(StateError::InvalidBatch {
+                    detail: format!(
+                        "fixed slot {id} in group {gi} exceeds pool capacity {}",
+                        pool.total_slots
+                    ),
+                });
+            }
+            if pool.free.contains(&id) {
+                return Err(StateError::InvalidBatch {
+                    detail: format!("fixed slot {id} in group {gi} is already free"),
+                });
+            }
+        }
+
+        // Infallible commit phase: all validations passed, so mutations cannot fail.
         let s = self
             .seqs
             .remove(&seq.as_u64())
-            .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })?;
+            .expect("validated sequence exists in seqs");
+
         for (gi, ids) in s.tables.into_iter().enumerate() {
             if ids.is_empty() {
                 continue;
@@ -1404,9 +1489,7 @@ impl StateManager {
                 .pools
                 .get_mut(gi)
                 .and_then(|p| p.as_mut())
-                .ok_or_else(|| StateError::InvalidBatch {
-                    detail: format!("group {gi} is not a paged group"),
-                })?;
+                .expect("validated paged pool exists");
             for id in ids {
                 pool.release(id);
             }
@@ -1417,19 +1500,10 @@ impl StateManager {
                 .fixed
                 .get_mut(gi)
                 .and_then(|p| p.as_mut())
-                .ok_or_else(|| StateError::InvalidBatch {
-                    detail: format!("group {gi} is not a fixed group"),
-                })?;
+                .expect("validated fixed pool exists");
             pool.free.insert(id);
         }
-        // A live sequence was just removed, so the count is positive; still
-        // checked — saturation must never hide a counting bug.
-        self.live_count = self
-            .live_count
-            .checked_sub(1)
-            .ok_or_else(|| StateError::Overflow {
-                what: "live sequence count".to_owned(),
-            })?;
+        self.live_count = next_live;
         Ok(())
     }
 
@@ -1737,4 +1811,369 @@ fn flatten_slot(s: &SeqState, group: usize, pos: u32, end: u32) -> StateResult<u
         .ok_or_else(|| StateError::Overflow {
             what: "slot id".to_owned(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spec::{CacheDtype, Retain};
+
+    fn test_kv_spec() -> StateSpec {
+        StateSpec::KvPaged {
+            hkv: 2,
+            d: 16,
+            dv: 16,
+            cache: CacheDtype::E4M3,
+            retain: Retain::All,
+        }
+    }
+
+    fn test_rec_spec() -> StateSpec {
+        StateSpec::Recurrent { h: 2, d: 8, dv: 8 }
+    }
+
+    fn test_conv_spec() -> StateSpec {
+        StateSpec::ConvWindow { c: 4, w: 4 }
+    }
+
+    fn test_hybrid_manager() -> StateManager {
+        let cfg = StateConfig {
+            max_ctx: 128,
+            max_seqs: 4,
+        };
+        let specs = vec![test_kv_spec(), test_rec_spec(), test_conv_spec()];
+        let groups = group_layers(&specs);
+        let req = required_pool_bytes(cfg, &groups).expect("valid required bytes");
+        StateManager::new(cfg, specs, req * 2).expect("valid manager")
+    }
+
+    #[test]
+    fn max_slot_blocks_boundary_and_slot_none_collision() {
+        assert_eq!(MAX_SLOT_BLOCKS, 134_217_727);
+        let max_admitted_block = MAX_SLOT_BLOCKS - 1;
+        assert_eq!(max_admitted_block, 134_217_726);
+
+        // Prove no admitted real slot equals SLOT_NONE
+        for lane in 0..BLOCK_TOKENS {
+            let slot = u64::from(max_admitted_block) * u64::from(BLOCK_TOKENS) + u64::from(lane);
+            assert!(slot < u64::from(SLOT_NONE));
+            assert_ne!(slot as u32, SLOT_NONE);
+        }
+
+        let max_admitted_slot = max_admitted_block * BLOCK_TOKENS + (BLOCK_TOKENS - 1);
+        assert_eq!(max_admitted_slot, 4_294_967_263);
+        assert_eq!(SLOT_NONE, u32::MAX);
+        assert_eq!(u64::from(max_admitted_slot) + 32, u64::from(SLOT_NONE));
+
+        // Exact proof: block 134_217_727 (admitted by 134_217_728) would collide at lane 31
+        let collided_block = MAX_SLOT_BLOCKS;
+        let collided_slot =
+            u64::from(collided_block) * u64::from(BLOCK_TOKENS) + u64::from(BLOCK_TOKENS - 1);
+        assert_eq!(collided_slot, u64::from(SLOT_NONE));
+
+        // Verify with flatten_slot
+        let seq_state = SeqState {
+            ctx_len: 32,
+            tail_len: 0,
+            tables: vec![vec![max_admitted_block]],
+            indices: vec![vec![0]],
+            mirror: BTreeMap::new(),
+            compacted: None,
+            fixed_slots: vec![None],
+            parity: vec![0],
+        };
+        let flattened = flatten_slot(&seq_state, 0, 31, 32).expect("flattened slot ok");
+        assert_eq!(flattened, max_admitted_slot);
+        assert_ne!(flattened, SLOT_NONE);
+    }
+
+    #[test]
+    fn max_slot_blocks_plus_one_rejected_without_impractical_allocation() {
+        let cfg = StateConfig {
+            max_ctx: 32,
+            max_seqs: 1,
+        };
+        let spec = test_kv_spec();
+        let groups = group_layers(&[spec]);
+        let block_bytes = groups[0].block_bytes().expect("valid block bytes");
+        let pool_bytes = (u64::from(MAX_SLOT_BLOCKS) + 1) * block_bytes;
+        let err = StateManager::new(cfg, vec![spec], pool_bytes).unwrap_err();
+        match err {
+            StateError::InvalidConfig { problems } => {
+                assert!(
+                    problems
+                        .iter()
+                        .any(|p| p.reason.contains("exceeds u32 slot_map range 134217727")),
+                    "unexpected error: {problems:?}"
+                );
+            }
+            other => panic!("expected InvalidConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn free_seq_atomic_rejects_already_free_block_and_mutates_nothing() {
+        let mut m = test_hybrid_manager();
+        let (a, _) = m.new_seq(&[]).unwrap();
+        m.reserve(a, 64).unwrap();
+        m.write_tokens(a, 0, &vec![1; 64]).unwrap();
+        m.commit(a, 64).unwrap();
+
+        let s = m.seq(a).unwrap();
+        let block_to_corrupt = s.tables[0][0];
+
+        // Corrupt internal state: insert block back into pool.free
+        m.pools[0].as_mut().unwrap().free.insert(block_to_corrupt);
+
+        let before_stats = m.stats();
+        let before_budget = m.budget();
+        let before_seqs_len = m.seqs.len();
+        let before_live = m.live_count;
+        let before_next_seq = m.next_seq;
+        let before_free_blocks = m.pools[0].as_ref().unwrap().free.clone();
+        let before_free_slots_1 = m.fixed[1].as_ref().unwrap().free.clone();
+        let before_free_slots_2 = m.fixed[2].as_ref().unwrap().free.clone();
+
+        let err = m.free_seq(a).unwrap_err();
+        assert!(
+            matches!(err, StateError::InvalidBatch { .. }),
+            "got {err:?}"
+        );
+
+        // Invariant: failure is atomic, zero mutations
+        assert_eq!(m.seqs.len(), before_seqs_len);
+        assert!(m.seqs.contains_key(&a.as_u64()));
+        assert_eq!(m.live_count, before_live);
+        assert_eq!(m.next_seq, before_next_seq);
+        assert_eq!(m.stats(), before_stats);
+        assert_eq!(m.budget(), before_budget);
+        assert_eq!(m.pools[0].as_ref().unwrap().free, before_free_blocks);
+        assert_eq!(m.fixed[1].as_ref().unwrap().free, before_free_slots_1);
+        assert_eq!(m.fixed[2].as_ref().unwrap().free, before_free_slots_2);
+    }
+
+    #[test]
+    fn free_seq_atomic_rejects_out_of_bounds_block_and_mutates_nothing() {
+        let mut m = test_hybrid_manager();
+        let (a, _) = m.new_seq(&[]).unwrap();
+        m.reserve(a, 32).unwrap();
+        m.commit(a, 32).unwrap();
+
+        // Corrupt internal state: inject out-of-bounds block id
+        m.seqs.get_mut(&a.as_u64()).unwrap().tables[0].push(u32::MAX - 10);
+
+        let before_stats = m.stats();
+        let before_budget = m.budget();
+        let before_seqs_len = m.seqs.len();
+        let before_live = m.live_count;
+        let before_free_blocks = m.pools[0].as_ref().unwrap().free.clone();
+
+        let err = m.free_seq(a).unwrap_err();
+        assert!(
+            matches!(err, StateError::InvalidBatch { .. }),
+            "got {err:?}"
+        );
+
+        assert_eq!(m.seqs.len(), before_seqs_len);
+        assert!(m.seqs.contains_key(&a.as_u64()));
+        assert_eq!(m.live_count, before_live);
+        assert_eq!(m.stats(), before_stats);
+        assert_eq!(m.budget(), before_budget);
+        assert_eq!(m.pools[0].as_ref().unwrap().free, before_free_blocks);
+    }
+
+    #[test]
+    fn free_seq_atomic_rejects_already_free_fixed_slot_and_mutates_nothing() {
+        let mut m = test_hybrid_manager();
+        let (a, _) = m.new_seq(&[]).unwrap();
+
+        let slot_id = m.fixed_slot(a, 1).unwrap();
+        // Corrupt fixed pool: put slot back into free list
+        m.fixed[1].as_mut().unwrap().free.insert(slot_id);
+
+        let before_stats = m.stats();
+        let before_budget = m.budget();
+        let before_seqs_len = m.seqs.len();
+        let before_live = m.live_count;
+        let before_free_slots_1 = m.fixed[1].as_ref().unwrap().free.clone();
+        let before_free_slots_2 = m.fixed[2].as_ref().unwrap().free.clone();
+
+        let err = m.free_seq(a).unwrap_err();
+        assert!(
+            matches!(err, StateError::InvalidBatch { .. }),
+            "got {err:?}"
+        );
+
+        assert_eq!(m.seqs.len(), before_seqs_len);
+        assert!(m.seqs.contains_key(&a.as_u64()));
+        assert_eq!(m.live_count, before_live);
+        assert_eq!(m.stats(), before_stats);
+        assert_eq!(m.budget(), before_budget);
+        assert_eq!(m.fixed[1].as_ref().unwrap().free, before_free_slots_1);
+        assert_eq!(m.fixed[2].as_ref().unwrap().free, before_free_slots_2);
+    }
+
+    #[test]
+    fn free_seq_atomic_rejects_zero_live_count_and_mutates_nothing() {
+        let mut m = test_hybrid_manager();
+        let (a, _) = m.new_seq(&[]).unwrap();
+
+        // Corrupt live_count to 0
+        m.live_count = 0;
+
+        let before_stats = m.stats();
+        let before_budget = m.budget();
+        let before_free_blocks = m.pools[0].as_ref().unwrap().free.clone();
+        let before_free_slots_1 = m.fixed[1].as_ref().unwrap().free.clone();
+
+        let err = m.free_seq(a).unwrap_err();
+        assert!(matches!(err, StateError::Overflow { .. }), "got {err:?}");
+
+        assert_eq!(m.live_count, 0);
+        assert!(m.seqs.contains_key(&a.as_u64()));
+        assert_eq!(m.stats(), before_stats);
+        assert_eq!(m.budget(), before_budget);
+        assert_eq!(m.pools[0].as_ref().unwrap().free, before_free_blocks);
+        assert_eq!(m.fixed[1].as_ref().unwrap().free, before_free_slots_1);
+    }
+
+    #[test]
+    fn free_seq_atomic_multi_group_failure_releases_zero_blocks() {
+        let cfg = StateConfig {
+            max_ctx: 128,
+            max_seqs: 4,
+        };
+        let spec0 = test_kv_spec();
+        let spec1 = StateSpec::KvPaged {
+            hkv: 4,
+            d: 16,
+            dv: 16,
+            cache: CacheDtype::E4M3,
+            retain: Retain::All,
+        };
+        let specs = vec![spec0, spec1];
+        let groups = group_layers(&specs);
+        assert_eq!(groups.len(), 2);
+        let req = required_pool_bytes(cfg, &groups).expect("valid required bytes");
+        let mut m = StateManager::new(cfg, specs, req * 2).expect("valid manager");
+
+        let (a, _) = m.new_seq(&[]).unwrap();
+        m.reserve(a, 64).unwrap();
+        m.write_tokens(a, 0, &vec![1; 64]).unwrap();
+        m.commit(a, 64).unwrap();
+
+        let free_0 = m.pools[0].as_ref().unwrap().free.len();
+        let free_1 = m.pools[1].as_ref().unwrap().free.len();
+
+        // Corrupt group 1 table: inject an invalid block id
+        m.seqs.get_mut(&a.as_u64()).unwrap().tables[1].push(u32::MAX - 5);
+
+        let err = m.free_seq(a).unwrap_err();
+        assert!(
+            matches!(err, StateError::InvalidBatch { .. }),
+            "got {err:?}"
+        );
+
+        // Group 0 must not have released its blocks!
+        assert_eq!(m.pools[0].as_ref().unwrap().free.len(), free_0);
+        assert_eq!(m.pools[1].as_ref().unwrap().free.len(), free_1);
+        assert!(m.seqs.contains_key(&a.as_u64()));
+    }
+
+    #[test]
+    fn new_seq_atomic_multi_group_exhaustion_leaks_nothing() {
+        let mut m = test_hybrid_manager();
+        let _ = m.new_seq(&[]).unwrap();
+        let _ = m.new_seq(&[]).unwrap();
+
+        // Group 1 has 2 slots free, Group 2 has 2 slots free.
+        // Exhaust group 2 manually:
+        m.fixed[2].as_mut().unwrap().free.clear();
+
+        let before_g1_free = m.fixed[1].as_ref().unwrap().free.clone();
+        let before_next_seq = m.next_seq;
+        let before_live = m.live_count;
+        let before_seqs_len = m.seqs.len();
+
+        let err = m.new_seq(&[]).unwrap_err();
+        assert!(matches!(err, StateError::SeqLimit { .. }), "got {err:?}");
+
+        // Group 1 must NOT have leaked any slots!
+        assert_eq!(m.fixed[1].as_ref().unwrap().free, before_g1_free);
+        assert_eq!(m.next_seq, before_next_seq);
+        assert_eq!(m.live_count, before_live);
+        assert_eq!(m.seqs.len(), before_seqs_len);
+
+        // Restore a slot to group 2 and verify deterministic allocation succeeds
+        m.fixed[2].as_mut().unwrap().free.insert(3);
+        let (c, _) = m.new_seq(&[]).unwrap();
+        assert_eq!(c.as_u64(), before_next_seq);
+        assert_eq!(m.fixed_slot(c, 1).unwrap(), 2); // smallest free in group 1
+        assert_eq!(m.fixed_slot(c, 2).unwrap(), 3);
+    }
+
+    #[test]
+    fn new_seq_atomic_next_seq_overflow_without_leak_or_mutation() {
+        let mut m = test_hybrid_manager();
+        m.next_seq = u64::MAX;
+
+        let before_g1_free = m.fixed[1].as_ref().unwrap().free.clone();
+        let before_g2_free = m.fixed[2].as_ref().unwrap().free.clone();
+        let before_live = m.live_count;
+        let before_seqs_len = m.seqs.len();
+
+        let err = m.new_seq(&[]).unwrap_err();
+        assert!(matches!(err, StateError::Overflow { .. }), "got {err:?}");
+
+        assert_eq!(m.next_seq, u64::MAX);
+        assert_eq!(m.live_count, before_live);
+        assert_eq!(m.seqs.len(), before_seqs_len);
+        assert_eq!(m.fixed[1].as_ref().unwrap().free, before_g1_free);
+        assert_eq!(m.fixed[2].as_ref().unwrap().free, before_g2_free);
+    }
+
+    #[test]
+    fn new_seq_atomic_live_count_overflow_without_leak_or_mutation() {
+        let mut m = test_hybrid_manager();
+        m.config.max_seqs = u32::MAX;
+        m.live_count = u32::MAX;
+
+        let before_g1_free = m.fixed[1].as_ref().unwrap().free.clone();
+        let before_g2_free = m.fixed[2].as_ref().unwrap().free.clone();
+        let before_next_seq = m.next_seq;
+        let before_seqs_len = m.seqs.len();
+
+        let err = m.new_seq(&[]).unwrap_err();
+        assert!(matches!(err, StateError::Overflow { .. }), "got {err:?}");
+
+        assert_eq!(m.next_seq, before_next_seq);
+        assert_eq!(m.live_count, u32::MAX);
+        assert_eq!(m.seqs.len(), before_seqs_len);
+        assert_eq!(m.fixed[1].as_ref().unwrap().free, before_g1_free);
+        assert_eq!(m.fixed[2].as_ref().unwrap().free, before_g2_free);
+    }
+
+    #[test]
+    fn new_seq_rollback_on_injected_allocation_failure() {
+        let mut m = test_hybrid_manager();
+        // Remove fixed pool 2 to force failure in group 2 during allocation
+        m.fixed[2] = None;
+
+        let before_g1_free = m.fixed[1].as_ref().unwrap().free.clone();
+        let before_next_seq = m.next_seq;
+        let before_live = m.live_count;
+        let before_seqs_len = m.seqs.len();
+
+        let err = m.new_seq(&[]).unwrap_err();
+        assert!(
+            matches!(err, StateError::InvalidBatch { .. }),
+            "got {err:?}"
+        );
+
+        // Group 1 slot was taken and must have rolled back!
+        assert_eq!(m.fixed[1].as_ref().unwrap().free, before_g1_free);
+        assert_eq!(m.next_seq, before_next_seq);
+        assert_eq!(m.live_count, before_live);
+        assert_eq!(m.seqs.len(), before_seqs_len);
+    }
 }
