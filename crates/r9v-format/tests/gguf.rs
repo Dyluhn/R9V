@@ -120,9 +120,18 @@ fn ggml_codes_names_and_schemes_match_gguf_py() {
         ("Q4_K", 12, 256, 144, Some(SchemeId::I4K)),
         ("Q5_K", 13, 256, 176, Some(SchemeId::I5K)),
         ("Q6_K", 14, 256, 210, Some(SchemeId::I6K)),
+        ("IQ2_XXS", 16, 256, 66, Some(SchemeId::Iq2Xxs)),
+        ("IQ2_XS", 17, 256, 74, Some(SchemeId::Iq2Xs)),
+        ("IQ3_XXS", 18, 256, 98, Some(SchemeId::Iq3Xxs)),
+        ("IQ1_S", 19, 256, 50, Some(SchemeId::Iq1S)),
+        ("IQ4_NL", 20, 32, 18, Some(SchemeId::I4Nl)),
+        ("IQ3_S", 21, 256, 110, Some(SchemeId::Iq3S)),
+        ("IQ2_S", 22, 256, 82, Some(SchemeId::Iq2S)),
+        ("IQ4_XS", 23, 256, 136, Some(SchemeId::I4Xs)),
+        ("IQ1_M", 29, 256, 56, Some(SchemeId::Iq1M)),
         ("BF16", 30, 1, 2, None),
     ];
-    assert_eq!(GgmlType::ALL.len(), 12);
+    assert_eq!(GgmlType::ALL.len(), 21);
     for (name, code, block_len, block_bytes, scheme) in table {
         let ggml = GgmlType::from_name(name).expect("table name known");
         assert_eq!(ggml.code(), *code, "{name}");
@@ -141,7 +150,9 @@ fn ggml_codes_names_and_schemes_match_gguf_py() {
 
 #[test]
 fn unknown_ggml_codes_are_hard_errors_naming_the_type() {
-    for code in [0, 4, 5, 9, 15, 16, 17, 24, 29, 31, 34, 1000, u32::MAX] {
+    // 16-23 and 29 are the card-A2.4 IQ codes; the remaining gaps
+    // (including 4/5/9/15/24-28/31) stay hard errors.
+    for code in [0, 4, 5, 9, 15, 24, 25, 26, 27, 28, 31, 34, 1000, u32::MAX] {
         match GgmlType::from_code(code) {
             Err(FormatError::UnknownGgmlType { code: got }) => assert_eq!(got, code),
             other => panic!("code {code}: expected UnknownGgmlType, got {other:?}"),
@@ -149,7 +160,7 @@ fn unknown_ggml_codes_are_hard_errors_naming_the_type() {
         let text = format!("{}", FormatError::UnknownGgmlType { code });
         assert!(text.contains(&code.to_string()), "error names {code}");
     }
-    for name in ["", "q4_0", "Q4_2", "Q8_K", "IQ4_NL", "F32", "Q4-0"] {
+    for name in ["", "q4_0", "Q4_2", "Q8_K", "IQ5_0", "F32", "Q4-0"] {
         assert!(
             GgmlType::from_name(name).is_err(),
             "name {name} must be rejected"
@@ -512,29 +523,40 @@ fn repack_metadata_is_exact() {
         repack_bits_per_weight(SchemeId::I6K, 128),
         Err(FormatError::InvalidBlock { .. })
     ));
-    // Card-A2.4 ids still fail closed with their owner everywhere new.
-    for id in [
-        SchemeId::I4Nl,
-        SchemeId::I4Xs,
-        SchemeId::Iq3Xxs,
-        SchemeId::Iq3S,
-        SchemeId::Iq2Xxs,
-        SchemeId::Iq2Xs,
-        SchemeId::Iq2S,
-        SchemeId::Iq1S,
-        SchemeId::Iq1M,
-    ] {
-        for result in [
-            repack_record_bytes(id),
-            repack_outer_block(id).map(|_| 0),
-            repack_bits_per_weight(id, 256).map(|_| 0),
-        ] {
-            match result {
-                Err(FormatError::ReservedScheme { owner, .. }) => assert_eq!(owner, "A2.4"),
-                other => panic!("{id}: expected ReservedScheme, got {other:?}"),
-            }
-        }
-        assert!(repack_packing(id).is_err(), "{id}");
+    // Card-A2.4 ids are implemented (records, grouping, packing and
+    // bpw all resolve); the dedicated behavior lives in tests/iq.rs.
+    let implemented: &[(SchemeId, u32, u32, bool)] = &[
+        (SchemeId::I4Nl, 2, 32, true),
+        (SchemeId::I4Xs, 8, 256, true),
+        (SchemeId::Iq3Xxs, 34, 256, false),
+        (SchemeId::Iq3S, 46, 256, false),
+        (SchemeId::Iq2Xxs, 2, 256, false),
+        (SchemeId::Iq2Xs, 10, 256, false),
+        (SchemeId::Iq2S, 50, 256, false),
+        (SchemeId::Iq1S, 18, 256, false),
+        (SchemeId::Iq1M, 24, 256, false),
+    ];
+    for (id, record, outer, nibble) in implemented {
+        assert_eq!(
+            repack_record_bytes(*id).expect("iq record known"),
+            *record,
+            "{id}"
+        );
+        assert_eq!(
+            repack_outer_block(*id).expect("iq outer known"),
+            Some(*outer),
+            "{id}"
+        );
+        assert_eq!(
+            repack_packing(*id).expect("iq packing known"),
+            if *nibble {
+                r9v_format::Packing::Nibble4
+            } else {
+                r9v_format::Packing::Byte
+            },
+            "{id}"
+        );
+        assert!(repack_bits_per_weight(*id, 256).is_ok(), "{id}");
     }
 }
 
@@ -572,6 +594,22 @@ fn expected_soa_record(ggml: GgmlType, block: &[u8]) -> Vec<u8> {
         GgmlType::Q6_K => [block[208..210].to_vec(), block[192..208].to_vec()].concat(),
         // Gathered across the split wire layout (SI-57).
         GgmlType::Q2_K => [block[0..16].to_vec(), block[80..84].to_vec()].concat(),
+        // Card-A2.4 records (SI-70): wire order minus the index payload.
+        GgmlType::IQ4_NL => block[0..2].to_vec(),
+        GgmlType::IQ4_XS => block[0..8].to_vec(),
+        GgmlType::IQ3_XXS => [block[0..2].to_vec(), block[66..98].to_vec()].concat(),
+        GgmlType::IQ3_S => [
+            block[0..2].to_vec(),
+            block[66..74].to_vec(),
+            block[74..106].to_vec(),
+            block[106..110].to_vec(),
+        ]
+        .concat(),
+        GgmlType::IQ2_XXS => block[0..2].to_vec(),
+        GgmlType::IQ2_XS => [block[0..2].to_vec(), block[66..74].to_vec()].concat(),
+        GgmlType::IQ2_S => [block[0..2].to_vec(), block[34..82].to_vec()].concat(),
+        GgmlType::IQ1_S => [block[0..2].to_vec(), block[34..50].to_vec()].concat(),
+        GgmlType::IQ1_M => block[32..56].to_vec(),
         GgmlType::F16 => Vec::new(),
         GgmlType::BF16 => Vec::new(),
     }
@@ -643,7 +681,10 @@ fn a23_spec_issue_citations_resolve() {
         "src/repack.rs",
         "src/error.rs",
         "src/lib.rs",
+        "src/iq.rs",
+        "src/iq_lut.rs",
         "tests/gguf.rs",
+        "tests/iq.rs",
         "tests/api_shape.rs",
     ] {
         let text =

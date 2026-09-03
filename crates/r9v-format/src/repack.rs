@@ -22,7 +22,7 @@ use crate::scheme::SchemeId;
 use crate::FormatError;
 
 /// Byte length of one SoA scale record for `scheme` (Spec 2 §3.1,
-/// §3.3; card A2.3).
+/// §3.3; cards A2.3/A2.4).
 ///
 /// Native ids reuse the card-A2.2 sizes; `I4_K` shares its 16-byte
 /// Q4_K-identical record. `Q3_K`/`Q2_K` records gather the GGUF scale
@@ -30,7 +30,12 @@ use crate::FormatError;
 /// for `I3_K` (wire order), 16 scale bytes plus `d`/`dmin` for `I2_K`
 /// (reordered: the wire splits them around the value bytes). `I6_K`
 /// stores `d` first, then the sixteen `i8` scales (Spec 2 §3.3 table
-/// order). Card-A2.4 ids fail closed with their owner.
+/// order). IQ records (card A2.4, SI-70) follow the gguf-py wire order
+/// with the index payload removed: `I4_NL [d]`, `I4_XS
+/// [d][scales_h][scales_l]`, `IQ3_XXS [d][scales]`, `IQ3_S
+/// [d][qh][signs][scales]`, `IQ2_XXS [d]`, `IQ2_XS [d][scales]`,
+/// `IQ2_S [d][signs][qh][scales]`, `IQ1_S [d][qh]`, `IQ1_M
+/// [qh][scales]` (`d` packed in the scales).
 pub fn repack_record_bytes(scheme: SchemeId) -> Result<u32, FormatError> {
     match scheme {
         SchemeId::I8R | SchemeId::I8B128 | SchemeId::E4M3B128 => {
@@ -43,24 +48,21 @@ pub fn repack_record_bytes(scheme: SchemeId) -> Result<u32, FormatError> {
         SchemeId::I6K => Ok(18),
         SchemeId::I3K => Ok(14),
         SchemeId::I2K => Ok(20),
-        SchemeId::I4Nl
-        | SchemeId::I4Xs
-        | SchemeId::Iq3Xxs
-        | SchemeId::Iq3S
-        | SchemeId::Iq2Xxs
-        | SchemeId::Iq2Xs
-        | SchemeId::Iq2S
-        | SchemeId::Iq1S
-        | SchemeId::Iq1M => Err(FormatError::ReservedScheme {
-            scheme: scheme.name(),
-            owner: scheme.owner_card(),
-        }),
+        SchemeId::I4Nl | SchemeId::Iq2Xxs => Ok(2),
+        SchemeId::I4Xs => Ok(8),
+        SchemeId::Iq3Xxs => Ok(34),
+        SchemeId::Iq3S => Ok(46),
+        SchemeId::Iq2Xs => Ok(10),
+        SchemeId::Iq2S => Ok(50),
+        SchemeId::Iq1S => Ok(18),
+        SchemeId::Iq1M => Ok(24),
     }
 }
 
 /// Outer block `B` of the §3.1 SoA grouping for `scheme` (the wire
-/// block where one exists). Native ids reuse card-A2.2 answers;
-/// card-A2.4 ids fail closed with their owner.
+/// block where one exists). Native ids reuse card-A2.2 answers.
+/// `IQ4_NL` groups per 32 like the other 32-block types; every other
+/// IQ family groups per 256 (card A2.4).
 pub fn repack_outer_block(scheme: SchemeId) -> Result<Option<u32>, FormatError> {
     match scheme {
         SchemeId::I8R | SchemeId::I8B128 | SchemeId::I4K | SchemeId::E4M3B128 => {
@@ -70,9 +72,12 @@ pub fn repack_outer_block(scheme: SchemeId) -> Result<Option<u32>, FormatError> 
         | SchemeId::I4B32F
         | SchemeId::I4B32FM
         | SchemeId::I5B32F
-        | SchemeId::I5B32FM => Ok(Some(32)),
-        SchemeId::I5K | SchemeId::I6K | SchemeId::I3K | SchemeId::I2K => Ok(Some(256)),
-        SchemeId::I4Nl
+        | SchemeId::I5B32FM
+        | SchemeId::I4Nl => Ok(Some(32)),
+        SchemeId::I5K
+        | SchemeId::I6K
+        | SchemeId::I3K
+        | SchemeId::I2K
         | SchemeId::I4Xs
         | SchemeId::Iq3Xxs
         | SchemeId::Iq3S
@@ -80,38 +85,36 @@ pub fn repack_outer_block(scheme: SchemeId) -> Result<Option<u32>, FormatError> 
         | SchemeId::Iq2Xs
         | SchemeId::Iq2S
         | SchemeId::Iq1S
-        | SchemeId::Iq1M => Err(FormatError::ReservedScheme {
-            scheme: scheme.name(),
-            owner: scheme.owner_card(),
-        }),
+        | SchemeId::Iq1M => Ok(Some(256)),
     }
 }
 
 /// `L1` value packing for `scheme` (Spec 2 §2.2 table, §3.3).
 /// Five/three/two-bit types regroup into per-tile bit planes in lane
 /// order; 6-bit the same; everything else keeps its wire granularity.
+/// The IQ4 types pack per-weight nibbles; the grid IQ types pack
+/// index bytes over the index shape `[N, K/g]` (card A2.4, SI-70), so
+/// their `Byte` packing applies to the index dims, not the weight
+/// dims (see `crate::iq`).
 pub fn repack_packing(scheme: SchemeId) -> Result<Packing, FormatError> {
     match scheme {
         SchemeId::I8R | SchemeId::I8B128 | SchemeId::E4M3B128 | SchemeId::I8B32F => {
             Ok(Packing::Byte)
         }
-        SchemeId::I4K | SchemeId::I4B32F | SchemeId::I4B32FM => Ok(Packing::Nibble4),
+        SchemeId::I4K | SchemeId::I4B32F | SchemeId::I4B32FM | SchemeId::I4Nl | SchemeId::I4Xs => {
+            Ok(Packing::Nibble4)
+        }
         SchemeId::I5B32F | SchemeId::I5B32FM | SchemeId::I5K => Packing::bit_planes(5),
         SchemeId::I6K => Packing::bit_planes(6),
         SchemeId::I3K => Packing::bit_planes(3),
         SchemeId::I2K => Packing::bit_planes(2),
-        SchemeId::I4Nl
-        | SchemeId::I4Xs
-        | SchemeId::Iq3Xxs
+        SchemeId::Iq3Xxs
         | SchemeId::Iq3S
         | SchemeId::Iq2Xxs
         | SchemeId::Iq2Xs
         | SchemeId::Iq2S
         | SchemeId::Iq1S
-        | SchemeId::Iq1M => Err(FormatError::ReservedScheme {
-            scheme: scheme.name(),
-            owner: scheme.owner_card(),
-        }),
+        | SchemeId::Iq1M => Ok(Packing::Byte),
     }
 }
 
@@ -122,8 +125,11 @@ pub fn repack_packing(scheme: SchemeId) -> Result<Packing, FormatError> {
 /// size: `I8_B32F` 272/32 = 8.5, `I4_B32F` 144/32 = 4.5, `I4_B32FM`
 /// 160/32 = 5.0, `I5_B32F` 176/32 = 5.5, `I5_B32FM` 192/32 = 6.0,
 /// `I5_K` 1408/256 = 5.5, `I6_K` 1680/256 = 6.5625, `I3_K` 880/256 =
-/// 3.4375, `I2_K` 672/256 = 2.625. Native ids reuse the card-A2.2
-/// answers; card-A2.4 ids fail closed with their owner.
+/// 3.4375, `I2_K` 672/256 = 2.625, `I4_NL` 144/32 = 4.5, `I4_XS`
+/// 1088/256 = 4.25, `IQ3_XXS` 784/256 = 3.0625, `IQ3_S` 880/256 =
+/// 3.4375, `IQ2_XXS` 528/256 = 2.0625, `IQ2_XS` 592/256 = 2.3125,
+/// `IQ2_S` 656/256 = 2.5625, `IQ1_S` 400/256 = 1.5625, `IQ1_M`
+/// 448/256 = 1.75. Native ids reuse the card-A2.2 answers.
 pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), FormatError> {
     match scheme {
         SchemeId::I8R | SchemeId::I8B128 | SchemeId::I4K | SchemeId::E4M3B128 => {
@@ -133,7 +139,8 @@ pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), Fo
         | SchemeId::I4B32F
         | SchemeId::I4B32FM
         | SchemeId::I5B32F
-        | SchemeId::I5B32FM => {
+        | SchemeId::I5B32FM
+        | SchemeId::I4Nl => {
             if k == 0 || !k.is_multiple_of(32) {
                 return Err(FormatError::InvalidBlock {
                     name: "k",
@@ -141,9 +148,8 @@ pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), Fo
                     reason: "must be a nonzero multiple of 32",
                 });
             }
-            // No wildcard: the complementary `I5B32FM` arm is explicit
-            // and every other id is unreachable here (outer arm admits
-            // only the five 32-block repack ids), so it fails closed
+            // No wildcard: every admitted id has an explicit arm and
+            // every other id is unreachable here, so it fails closed
             // instead of silently inheriting a bit width.
             let wire_bits: u64 = match scheme {
                 SchemeId::I8B32F => 272,
@@ -151,6 +157,7 @@ pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), Fo
                 SchemeId::I4B32FM => 160,
                 SchemeId::I5B32F => 176,
                 SchemeId::I5B32FM => 192,
+                SchemeId::I4Nl => 144,
                 SchemeId::I8R
                 | SchemeId::I8B128
                 | SchemeId::I4K
@@ -159,7 +166,6 @@ pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), Fo
                 | SchemeId::I6K
                 | SchemeId::I3K
                 | SchemeId::I2K
-                | SchemeId::I4Nl
                 | SchemeId::I4Xs
                 | SchemeId::Iq3Xxs
                 | SchemeId::Iq3S
@@ -184,7 +190,18 @@ pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), Fo
                     })?;
             Ok((bits, k as u64))
         }
-        SchemeId::I5K | SchemeId::I6K | SchemeId::I3K | SchemeId::I2K => {
+        SchemeId::I5K
+        | SchemeId::I6K
+        | SchemeId::I3K
+        | SchemeId::I2K
+        | SchemeId::I4Xs
+        | SchemeId::Iq3Xxs
+        | SchemeId::Iq3S
+        | SchemeId::Iq2Xxs
+        | SchemeId::Iq2Xs
+        | SchemeId::Iq2S
+        | SchemeId::Iq1S
+        | SchemeId::Iq1M => {
             if k == 0 || !k.is_multiple_of(256) {
                 return Err(FormatError::InvalidBlock {
                     name: "k",
@@ -192,15 +209,22 @@ pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), Fo
                     reason: "must be a nonzero multiple of 256",
                 });
             }
-            // No wildcard: the complementary `I2K` arm is explicit and
-            // every other id is unreachable here (outer arm admits only
-            // the four K-block repack ids), so it fails closed instead
-            // of silently inheriting a bit width.
+            // No wildcard: every admitted id has an explicit arm and
+            // every other id is unreachable here, so it fails closed
+            // instead of silently inheriting a bit width.
             let wire_bits: u64 = match scheme {
                 SchemeId::I5K => 1408,
                 SchemeId::I6K => 1680,
                 SchemeId::I3K => 880,
                 SchemeId::I2K => 672,
+                SchemeId::I4Xs => 1088,
+                SchemeId::Iq3Xxs => 784,
+                SchemeId::Iq3S => 880,
+                SchemeId::Iq2Xxs => 528,
+                SchemeId::Iq2Xs => 592,
+                SchemeId::Iq2S => 656,
+                SchemeId::Iq1S => 400,
+                SchemeId::Iq1M => 448,
                 SchemeId::I8R
                 | SchemeId::I8B128
                 | SchemeId::I4K
@@ -210,15 +234,7 @@ pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), Fo
                 | SchemeId::I4B32FM
                 | SchemeId::I5B32F
                 | SchemeId::I5B32FM
-                | SchemeId::I4Nl
-                | SchemeId::I4Xs
-                | SchemeId::Iq3Xxs
-                | SchemeId::Iq3S
-                | SchemeId::Iq2Xxs
-                | SchemeId::Iq2Xs
-                | SchemeId::Iq2S
-                | SchemeId::Iq1S
-                | SchemeId::Iq1M => {
+                | SchemeId::I4Nl => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: scheme.name(),
                         expected: "K-block repack scheme",
@@ -235,18 +251,6 @@ pub fn repack_bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), Fo
                     })?;
             Ok((bits, k as u64))
         }
-        SchemeId::I4Nl
-        | SchemeId::I4Xs
-        | SchemeId::Iq3Xxs
-        | SchemeId::Iq3S
-        | SchemeId::Iq2Xxs
-        | SchemeId::Iq2Xs
-        | SchemeId::Iq2S
-        | SchemeId::Iq1S
-        | SchemeId::Iq1M => Err(FormatError::ReservedScheme {
-            scheme: scheme.name(),
-            owner: scheme.owner_card(),
-        }),
     }
 }
 
@@ -281,6 +285,11 @@ pub fn repack(
     n_rows: u32,
     k: u32,
 ) -> Result<RepackedTensor, FormatError> {
+    // Card-A2.4 IQ types repack through the codebook rules in
+    // `crate::iq` (packed indices plus LUTs, not per-weight logicals).
+    if crate::iq::is_iq(ggml) {
+        return crate::iq::iq_repack(ggml, wire, n_rows, k);
+    }
     let geo = wire_geometry(ggml, wire, n_rows, k)?;
     let dims = PaddedDims::new(n_rows, k, ggml.superblock_k())?;
     let block_len = ggml.block_len() as usize;
@@ -335,6 +344,24 @@ fn pack_logical(
         GgmlType::Q6_K => crate::permute::l1_pack_planes(logical, dims, 6),
         GgmlType::Q3_K => crate::permute::l1_pack_planes(logical, dims, 3),
         GgmlType::Q2_K => crate::permute::l1_pack_planes(logical, dims, 2),
+        GgmlType::IQ4_NL
+        | GgmlType::IQ4_XS
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_S
+        | GgmlType::IQ1_S
+        | GgmlType::IQ1_M => {
+            // Unreachable: repack routes IQ types to crate::iq before
+            // packing logicals. Fails closed rather than guessing a
+            // plane width for packed codebook indices.
+            Err(FormatError::SchemeMismatch {
+                scheme: ggml.name(),
+                expected: "card-A2.3 logical packing (iq packs via crate::iq)",
+                got: ggml.name(),
+            })
+        }
     }
 }
 
@@ -467,6 +494,19 @@ fn copy_block_record(ggml: GgmlType, block: &[u8], record: &mut [u8]) -> Result<
             expected: "quantized ggml block",
             got: ggml.name(),
         }),
+        GgmlType::IQ4_NL
+        | GgmlType::IQ4_XS
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_S
+        | GgmlType::IQ1_S
+        | GgmlType::IQ1_M => Err(FormatError::SchemeMismatch {
+            scheme: ggml.name(),
+            expected: "card-A2.3 scale record (iq records via crate::iq)",
+            got: ggml.name(),
+        }),
         GgmlType::Q8_0
         | GgmlType::Q4_0
         | GgmlType::Q4_1
@@ -518,6 +558,15 @@ fn copy_block_record(ggml: GgmlType, block: &[u8], record: &mut [u8]) -> Result<
 fn repacked_geometry(
     t: &RepackedTensor,
 ) -> Result<(Packing, usize, usize, usize, usize), FormatError> {
+    // Card-A2.4 IQ tensors validate through crate::iq (nibble or
+    // index-shape value regions, not A2.3 logicals).
+    if crate::iq::is_iq(t.ggml) {
+        return Err(FormatError::SchemeMismatch {
+            scheme: t.ggml.name(),
+            expected: "card-A2.3 repacked tensor (iq validates via crate::iq)",
+            got: t.ggml.name(),
+        });
+    }
     let dims = &t.dims;
     let (packing, record, outer) = match t.scheme {
         Some(scheme) => (
@@ -609,6 +658,11 @@ fn soa_record(
 /// order, reproducing the input wire bytes exactly. Padding rows and
 /// columns are dropped, never emitted.
 pub fn unpack_repacked(t: &RepackedTensor) -> Result<Vec<u8>, FormatError> {
+    // Card-A2.4 IQ types invert through `crate::iq` (their value
+    // region holds nibbles or packed index bytes, not A2.3 logicals).
+    if crate::iq::is_iq(t.ggml) {
+        return crate::iq::iq_unpack(t);
+    }
     let (packing, record, _outer, _n_blocks, k_blocks) = repacked_geometry(t)?;
     let ggml = t.ggml;
     let dims = &t.dims;
@@ -695,6 +749,15 @@ fn write_wire_block(
                 | GgmlType::Q4_K
                 | GgmlType::Q5_K
                 | GgmlType::Q6_K
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ3_S
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ2_S
+                | GgmlType::IQ1_S
+                | GgmlType::IQ1_M
                 | GgmlType::BF16 => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: ggml.name(),
@@ -734,6 +797,15 @@ fn write_wire_block(
                 | GgmlType::Q4_K
                 | GgmlType::Q5_K
                 | GgmlType::Q6_K
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ3_S
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ2_S
+                | GgmlType::IQ1_S
+                | GgmlType::IQ1_M
                 | GgmlType::BF16 => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: ggml.name(),
@@ -789,6 +861,15 @@ fn write_wire_block(
                 | GgmlType::Q2_K
                 | GgmlType::Q3_K
                 | GgmlType::Q6_K
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ3_S
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ2_S
+                | GgmlType::IQ1_S
+                | GgmlType::IQ1_M
                 | GgmlType::BF16 => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: ggml.name(),
@@ -879,6 +960,15 @@ fn write_wire_block(
                 | GgmlType::Q4_K
                 | GgmlType::Q5_K
                 | GgmlType::Q6_K
+                | GgmlType::IQ4_NL
+                | GgmlType::IQ4_XS
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ3_S
+                | GgmlType::IQ2_XXS
+                | GgmlType::IQ2_XS
+                | GgmlType::IQ2_S
+                | GgmlType::IQ1_S
+                | GgmlType::IQ1_M
                 | GgmlType::BF16 => {
                     return Err(FormatError::SchemeMismatch {
                         scheme: ggml.name(),
@@ -953,6 +1043,24 @@ fn write_wire_block(
                 }
             }
         }
+        GgmlType::IQ4_NL
+        | GgmlType::IQ4_XS
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_S
+        | GgmlType::IQ1_S
+        | GgmlType::IQ1_M => {
+            // Unreachable: unpack_repacked routes IQ types to
+            // crate::iq before emitting wire blocks. Fails closed
+            // rather than guessing a wire layout for packed indices.
+            return Err(FormatError::SchemeMismatch {
+                scheme: ggml.name(),
+                expected: "card-A2.3 wire block (iq inverts via crate::iq)",
+                got: ggml.name(),
+            });
+        }
     }
     Ok(())
 }
@@ -967,6 +1075,11 @@ fn write_wire_block(
 /// independent readers. Formulas and evaluation order match
 /// [`crate::ggml::ggml_dequantize`]; any divergence fails that test.
 pub fn repack_dequantize(t: &RepackedTensor) -> Result<Vec<f32>, FormatError> {
+    // Card-A2.4 IQ types decode through the independent codebook
+    // reader in `crate::iq` (tiles plus SoA, never wire blocks).
+    if crate::iq::is_iq(t.ggml) {
+        return crate::iq::repacked_dequantize(t);
+    }
     let (packing, record, _outer, _n_blocks, k_blocks) = repacked_geometry(t)?;
     let logical = unpack_logical(t, packing)?;
     let dims = &t.dims;
@@ -1138,6 +1251,24 @@ fn dequant_parsed(
             }
             Ok(())
         }
+        GgmlType::IQ4_NL
+        | GgmlType::IQ4_XS
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_S
+        | GgmlType::IQ1_S
+        | GgmlType::IQ1_M => {
+            // Unreachable: repack_dequantize routes IQ types to
+            // crate::iq before decoding tiles. Fails closed rather
+            // than guessing a codebook formula for packed indices.
+            Err(FormatError::SchemeMismatch {
+                scheme: ggml.name(),
+                expected: "card-A2.3 repacked decode (iq decodes via crate::iq)",
+                got: ggml.name(),
+            })
+        }
     }
 }
 
@@ -1161,7 +1292,16 @@ fn dequant_simple(ggml: GgmlType, d: f32, m: f32, value: u16) -> Result<f32, For
         | GgmlType::Q3_K
         | GgmlType::Q4_K
         | GgmlType::Q5_K
-        | GgmlType::Q6_K => Err(FormatError::SchemeMismatch {
+        | GgmlType::Q6_K
+        | GgmlType::IQ4_NL
+        | GgmlType::IQ4_XS
+        | GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_S
+        | GgmlType::IQ1_S
+        | GgmlType::IQ1_M => Err(FormatError::SchemeMismatch {
             scheme: ggml.name(),
             expected: "32-block _0/_1 type",
             got: ggml.name(),
@@ -1195,6 +1335,12 @@ fn u16_pair(record: &[u8], offset: usize, what: &'static str) -> Result<u16, For
 /// [`copy_block_record`] special-cases those three groups before
 /// consulting this function, so a `None` here is never silently
 /// treated as an empty or zero span.
+///
+/// Card-A2.4 spans are layout facts about the gguf-py wire, used by
+/// documentation and tests: `IQ4_NL` carries `[d]` at 0..2 and
+/// `IQ4_XS` carries `[d][scales_h][scales_l]` at 0..8, both verbatim
+/// in the SoA record. The grid families gather non-contiguous fields
+/// (`crate::iq::parse_block`), so no single span holds their record.
 fn record_span(ggml: GgmlType) -> Option<(usize, usize)> {
     match ggml {
         GgmlType::F16 | GgmlType::BF16 => None,
@@ -1204,6 +1350,15 @@ fn record_span(ggml: GgmlType) -> Option<(usize, usize)> {
         GgmlType::Q6_K => None,
         GgmlType::Q3_K => Some((96, 14)),
         GgmlType::Q2_K => None,
+        GgmlType::IQ4_NL => Some((0, 2)),
+        GgmlType::IQ4_XS => Some((0, 8)),
+        GgmlType::IQ3_XXS
+        | GgmlType::IQ3_S
+        | GgmlType::IQ2_XXS
+        | GgmlType::IQ2_XS
+        | GgmlType::IQ2_S
+        | GgmlType::IQ1_S
+        | GgmlType::IQ1_M => None,
     }
 }
 
@@ -1223,14 +1378,30 @@ mod tests {
         assert_eq!(record_span(GgmlType::Q4_K), Some((0, 16)));
         assert_eq!(record_span(GgmlType::Q5_K), Some((0, 16)));
         assert_eq!(record_span(GgmlType::Q3_K), Some((96, 14)));
+        // Card-A2.4 verbatim records: IQ4_NL carries [d] at 0..2 and
+        // IQ4_XS carries [d][scales_h][scales_l] at 0..8.
+        assert_eq!(record_span(GgmlType::IQ4_NL), Some((0, 2)));
+        assert_eq!(record_span(GgmlType::IQ4_XS), Some((0, 8)));
         // No single wire span holds these records: Q6_K stores
         // [d][sc16] reordered from wire d@208..210 + sc@192..208, Q2_K
-        // gathers wire 0..16 + 80..84, halves carry no scales. A span
-        // here would be a lie that copy_block_record could misuse.
+        // gathers wire 0..16 + 80..84, halves carry no scales, and the
+        // grid IQ families gather non-contiguous fields. A span here
+        // would be a lie that copy_block_record could misuse.
         assert_eq!(record_span(GgmlType::Q6_K), None);
         assert_eq!(record_span(GgmlType::Q2_K), None);
         assert_eq!(record_span(GgmlType::F16), None);
         assert_eq!(record_span(GgmlType::BF16), None);
+        for ggml in [
+            GgmlType::IQ2_XXS,
+            GgmlType::IQ2_XS,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ1_S,
+            GgmlType::IQ3_S,
+            GgmlType::IQ2_S,
+            GgmlType::IQ1_M,
+        ] {
+            assert_eq!(record_span(ggml), None, "{ggml} gathers its record");
+        }
     }
 
     #[test]
@@ -1254,6 +1425,15 @@ mod tests {
             GgmlType::Q4_K,
             GgmlType::Q5_K,
             GgmlType::Q6_K,
+            GgmlType::IQ4_NL,
+            GgmlType::IQ4_XS,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_S,
+            GgmlType::IQ2_XXS,
+            GgmlType::IQ2_XS,
+            GgmlType::IQ2_S,
+            GgmlType::IQ1_S,
+            GgmlType::IQ1_M,
         ] {
             assert_eq!(
                 dequant_simple(ggml, 1.0, 0.0, 0),

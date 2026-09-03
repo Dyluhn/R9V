@@ -22,12 +22,20 @@
 //! surface stays native-only by design: its value/record algebra is
 //! the §3.2 one, while repack types decode through
 //! [`ggml_dequantize`] and [`repack_dequantize`].
+//!
+//! Card A2.4 owns the nine IQ codebook families of §3.3: the LUTs as
+//! auditable data ([`iq_lut`]) and the index-preserving repack rules
+//! with their independent source/repacked dequant paths.
+//! [`mod@repack`], [`ggml_dequantize`] and [`repack_dequantize`] route
+//! IQ types there; the A2.2 native surface is unchanged.
 
 pub mod decode;
 pub mod encode;
 pub mod error;
 pub mod geometry;
 pub mod ggml;
+pub mod iq;
+pub mod iq_lut;
 pub mod layout;
 pub mod permute;
 pub mod records;
@@ -44,6 +52,10 @@ pub use encode::{encode_e4m3_block128, encode_i4k_superblock, encode_i8_block128
 pub use error::FormatError;
 pub use geometry::{outer_block, scale_geometry, scale_record_bytes, ScaleGeometry};
 pub use ggml::{bf16_to_f32, ggml_dequantize, unpack_k4_scales, unpack_q3_scales, GgmlType};
+pub use iq_lut::{
+    IQ1_GRID, IQ2_S_GRID, IQ2_XS_GRID, IQ2_XXS_GRID, IQ3_S_GRID, IQ3_XXS_GRID, IQ4_KVALUES,
+    IQ_SIGN_LUT,
+};
 pub use layout::{
     l0_region_bytes, l0_row_offset_bytes, l0_row_stride_bytes, l0_row_values_bytes, l1_elem,
     l1_forward_index, l1_inverse_index, l1_lane, row_block_tiles, scale_block_counts,

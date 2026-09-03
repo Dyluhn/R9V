@@ -1,4 +1,4 @@
-# gguf A2.3 reference fixtures (see gen provenance in card.md and tests/gguf.rs header).
+# gguf A2.3 reference fixtures (see gen provenance in phase-a-agent-breakdown.md card A2.3 and tests/gguf.rs header).
 # Q8_0/Q4_0/Q4_1/Q5_0/Q5_1/F16/BF16 wire: gguf-py 0.19.0 quantize of seeded tensors.
 # Q2_K/Q3_K/Q4_K/Q5_K/Q6_K wire: hand-built from the GGML block layout (no gguf-py quantize exists).
 # y for every case: gguf-py 0.19.0 dequantize of the wire bytes (f32LE hex).
