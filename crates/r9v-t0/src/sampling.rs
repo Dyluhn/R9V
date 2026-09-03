@@ -759,7 +759,10 @@ pub fn verify(
 
             if all_path_accepted {
                 // All tokens on path accepted: sample bonus token from target_probs[last_node + 1]
-                let last_node = *path.last().unwrap();
+                let last_node = path.last().copied().ok_or_else(|| T0Error::InvalidTree {
+                    seq: s_idx,
+                    detail: "internal root-to-leaf path is empty".to_string(),
+                })?;
                 let bonus_dist = &t_probs_row[(last_node + 1) * v..(last_node + 2) * v];
                 terminal_token = match method {
                     VerifyMethod::Greedy => argmax_stable(bonus_dist) as u32,
