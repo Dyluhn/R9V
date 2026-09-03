@@ -17,6 +17,7 @@ members = [
     "crates/r9v-serve",
     "crates/r9v-obs",
     "crates/r9v-config",
+    "crates/r9v-config/macros",
     "crates/r9v-helper",
     "crates/r9v",
     "xtask",

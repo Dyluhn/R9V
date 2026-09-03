@@ -1,0 +1,560 @@
+{
+  "$id": "https://r9v.local/schema/config-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "patternProperties": {
+    "^x-": {
+      "type": "object"
+    }
+  },
+  "properties": {
+    "bench": {
+      "additionalProperties": false,
+      "properties": {
+        "repeats": {
+          "default": 5,
+          "description": "Measured repeats per benchmark.",
+          "maximum": 100.0,
+          "minimum": 1.0,
+          "type": "integer",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        },
+        "suites": {
+          "default": [
+            "decode",
+            "decode-spec",
+            "prefill",
+            "multi"
+          ],
+          "description": "Benchmark suites to run.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        },
+        "warmup": {
+          "default": 2,
+          "description": "Warmup runs before measurement.",
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "type": "integer",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "config_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "doctor": {
+      "additionalProperties": false,
+      "properties": {
+        "include_tokens": {
+          "default": false,
+          "description": "Include token text in the doctor bundle.",
+          "type": "boolean",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        },
+        "redact": {
+          "default": true,
+          "description": "Redact secrets in the doctor bundle.",
+          "type": "boolean",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "graph": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "auto",
+          "description": "Graph capture mode. auto = measured at warmup.",
+          "enum": [
+            "auto",
+            "list",
+            "hipgraph"
+          ],
+          "type": "string",
+          "x-r9v-mutability": "Reload",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "host": {
+      "additionalProperties": false,
+      "properties": {
+        "pinned_budget": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "const": "auto"
+            }
+          ],
+          "default": "auto",
+          "description": "Pinned host-memory budget. auto = min(free minus 4 GB, need).",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "bytes"
+        }
+      },
+      "type": "object"
+    },
+    "io": {
+      "additionalProperties": false,
+      "properties": {
+        "chunk_mb": {
+          "default": 16,
+          "description": "Read chunk size.",
+          "maximum": 1024.0,
+          "minimum": 1.0,
+          "type": "integer",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "MB"
+        },
+        "mode": {
+          "default": "auto",
+          "description": "IO mode for weight reads. auto = direct I/O when supported, otherwise mmap.",
+          "enum": [
+            "direct",
+            "mmap",
+            "auto"
+          ],
+          "type": "string",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "queue_depth": {
+          "default": 8,
+          "description": "IO queue depth.",
+          "maximum": 128.0,
+          "minimum": 1.0,
+          "type": "integer",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "repack_threads": {
+          "anyOf": [
+            {
+              "maximum": 256.0,
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            {
+              "const": "auto"
+            }
+          ],
+          "default": "auto",
+          "description": "Repack worker threads. auto = cores minus 2.",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "kernels": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_jit": {
+          "default": true,
+          "description": "Allow just-in-time kernel builds.",
+          "type": "boolean",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "allow_nondeterministic": {
+          "default": false,
+          "description": "Allow kernels that may be nondeterministic.",
+          "type": "boolean",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "tune_budget_ms": {
+          "default": 2000,
+          "description": "Autotune time budget.",
+          "maximum": 600000.0,
+          "minimum": 0.0,
+          "type": "integer",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "ms"
+        }
+      },
+      "type": "object"
+    },
+    "load": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "const": "auto"
+            }
+          ],
+          "default": "auto",
+          "description": "Cache directory. auto = beside the model.",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "draft_model": {
+          "default": "none",
+          "description": "Draft model artifact path, if any.",
+          "type": "string",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "eagle_head": {
+          "default": "none",
+          "description": "Eagle head artifact path, if any.",
+          "type": "string",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "model": {
+          "default": "(none)",
+          "description": "Primary model artifact path.",
+          "type": "string",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "require_fast_path": {
+          "default": false,
+          "description": "Require the fast execution path at load.",
+          "type": "boolean",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "log": {
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "default": "none",
+          "description": "Log file path; none disables file logging.",
+          "type": "string",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        },
+        "level": {
+          "default": "info",
+          "description": "Log level.",
+          "enum": [
+            "trace",
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "type": "string",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "profile": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "step",
+          "description": "Profiling mode.",
+          "enum": [
+            "step",
+            "kernel",
+            "off"
+          ],
+          "type": "string",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "scheduler": {
+      "additionalProperties": false,
+      "properties": {
+        "max_wait_ms": {
+          "default": 500,
+          "description": "Maximum time a request waits before a step starts.",
+          "maximum": 60000.0,
+          "minimum": 0.0,
+          "type": "integer",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "ms"
+        },
+        "prefill_max_chunk": {
+          "default": 2048,
+          "description": "Maximum prefill chunk.",
+          "maximum": 16384.0,
+          "minimum": 1.0,
+          "type": "integer",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "tokens"
+        },
+        "prefill_min_chunk": {
+          "default": 128,
+          "description": "Minimum prefill chunk.",
+          "maximum": 16384.0,
+          "minimum": 1.0,
+          "type": "integer",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "tokens"
+        },
+        "step_budget_ms": {
+          "anyOf": [
+            {
+              "maximum": 1000.0,
+              "minimum": 1.0,
+              "type": "number"
+            },
+            {
+              "const": "auto"
+            }
+          ],
+          "default": "auto",
+          "description": "Target wall time per step in milliseconds. Prefill chunks and speculative depth are sized so the step fits. auto = 1.25 x measured single-sequence step time (latency) or 8 x (throughput), resolved at warmup on the loaded plan.",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "ms"
+        }
+      },
+      "type": "object"
+    },
+    "spec": {
+      "additionalProperties": false,
+      "properties": {
+        "k_max": {
+          "default": 8,
+          "description": "Maximum speculative draft depth; k + 1 verified positions must fit the decode-class limit.",
+          "maximum": 15.0,
+          "minimum": 0.0,
+          "type": "integer",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        },
+        "lossy": {
+          "default": false,
+          "description": "Permit opt-in lossy Typical acceptance.",
+          "type": "boolean",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        },
+        "min_accept": {
+          "default": 0.3,
+          "description": "Disable speculation temporarily when the recent acceptance EMA is below this value.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        },
+        "ngram": {
+          "additionalProperties": false,
+          "properties": {
+            "min_match": {
+              "default": 2,
+              "description": "Minimum match length to propose.",
+              "maximum": 16.0,
+              "minimum": 1.0,
+              "type": "integer",
+              "x-r9v-mutability": "Runtime",
+              "x-r9v-since": 1
+            },
+            "n": {
+              "default": 3,
+              "description": "N-gram width.",
+              "maximum": 16.0,
+              "minimum": 1.0,
+              "type": "integer",
+              "x-r9v-mutability": "Runtime",
+              "x-r9v-since": 1
+            }
+          },
+          "type": "object"
+        },
+        "proposer": {
+          "default": "auto",
+          "description": "Speculative proposer. auto = MTP, Eagle, draft, then n-gram according to loaded artifacts.",
+          "enum": [
+            "auto",
+            "none",
+            "ngram",
+            "mtp",
+            "draft",
+            "eagle"
+          ],
+          "type": "string",
+          "x-r9v-mutability": "Reload",
+          "x-r9v-since": 1
+        },
+        "tree_max": {
+          "default": 16,
+          "description": "Maximum speculative tree size.",
+          "maximum": 16.0,
+          "minimum": 1.0,
+          "type": "integer",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "state": {
+      "additionalProperties": false,
+      "properties": {
+        "cache_dtype": {
+          "default": "e4m3",
+          "description": "KV cache dtype.",
+          "enum": [
+            "e4m3",
+            "i8",
+            "f16"
+          ],
+          "type": "string",
+          "x-r9v-mutability": "Reload",
+          "x-r9v-since": 1
+        },
+        "host_block_budget": {
+          "default": "0",
+          "description": "Host block spill budget; 0 disables spilling.",
+          "type": "string",
+          "x-r9v-mutability": "Reload",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "bytes"
+        },
+        "max_ctx": {
+          "default": 32768,
+          "description": "Maximum context length; must be a multiple of 32.",
+          "maximum": 1048576.0,
+          "minimum": 32.0,
+          "type": "integer",
+          "x-r9v-mutability": "Reload",
+          "x-r9v-since": 1
+        },
+        "max_seqs": {
+          "default": 8,
+          "description": "Maximum concurrent sequences.",
+          "maximum": 1024.0,
+          "minimum": 1.0,
+          "type": "integer",
+          "x-r9v-mutability": "Reload",
+          "x-r9v-since": 1
+        },
+        "reserve_bytes": {
+          "default": "512 MB",
+          "description": "Bytes reserved outside the state pool.",
+          "type": "string",
+          "x-r9v-mutability": "Reload",
+          "x-r9v-since": 1,
+          "x-r9v-unit": "bytes"
+        },
+        "session_cache": {
+          "default": 2,
+          "description": "Retained sessions per GB of cache.",
+          "maximum": 64.0,
+          "minimum": 0.0,
+          "type": "integer",
+          "x-r9v-mutability": "Runtime",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    },
+    "warmup": {
+      "additionalProperties": false,
+      "properties": {
+        "buckets": {
+          "additionalProperties": false,
+          "default": {
+            "S": [
+              1,
+              2,
+              4
+            ],
+            "T_dec": [
+              1,
+              2,
+              4,
+              8,
+              16,
+              32
+            ],
+            "T_pre": [
+              0,
+              128,
+              512,
+              2048
+            ]
+          },
+          "description": "Warmup buckets over S, T_dec and T_pre.",
+          "properties": {
+            "S": {
+              "items": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "T_dec": {
+              "items": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "T_pre": {
+              "items": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "S",
+            "T_dec",
+            "T_pre"
+          ],
+          "type": "object",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        },
+        "enabled": {
+          "default": true,
+          "description": "Run warmup over the bucket set at load.",
+          "type": "boolean",
+          "x-r9v-mutability": "Load",
+          "x-r9v-since": 1
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "config_version"
+  ],
+  "title": "R9V configuration v1",
+  "type": "object"
+}
