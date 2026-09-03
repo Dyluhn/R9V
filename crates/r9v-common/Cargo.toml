@@ -8,3 +8,5 @@ repository.workspace = true
 description = "Shared types, error handling, ids, hashing, and byte-size helpers for R9V (Spec 14 §2)"
 
 [dependencies]
+thiserror = "2.0"
+twox-hash = { version = "2.1", default-features = false, features = ["xxhash3_64", "xxhash3_128", "alloc"] }

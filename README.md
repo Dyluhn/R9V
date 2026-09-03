@@ -28,7 +28,9 @@ in the benchmarks below was built separately and enabled only its TP2 BF16
 all-reduce.
 
 If you are pointing an AI assistant at this repository, hand it
-[LLM_SETUP_GUIDE.md](LLM_SETUP_GUIDE.md).
+[LLM_SETUP_GUIDE.md](LLM_SETUP_GUIDE.md). Repository coding conventions, error
+types, logging fields, and test layouts are defined in
+[CONVENTIONS.md](CONVENTIONS.md).
 
 ## Profiles
 

@@ -8,3 +8,4 @@ repository.workspace = true
 description = "R9V Op IR, graph, types, and sharding tables (Spec 1, Spec 14 §2)"
 
 [dependencies]
+r9v-common = { path = "../r9v-common" }

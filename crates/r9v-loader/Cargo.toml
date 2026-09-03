@@ -8,3 +8,4 @@ repository.workspace = true
 description = "R9V model loading pipeline, memory budgeting, and repack cache (Spec 9, Spec 14 §2)"
 
 [dependencies]
+r9v-common = { path = "../r9v-common" }

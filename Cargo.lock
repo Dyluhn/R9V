@@ -3,77 +3,196 @@
 version = 4
 
 [[package]]
+name = "proc-macro2"
+version = "1.0.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
+name = "quote"
+version = "1.0.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
+dependencies = [
+ "proc-macro2",
+]
+
+[[package]]
 name = "r9v"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-common"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "twox-hash",
+]
 
 [[package]]
 name = "r9v-config"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-format"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-helper"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-hip"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-ir"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-kgen"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-loader"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-models"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-obs"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-part"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-registry"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-sched"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-serve"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-spec"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-state"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
 
 [[package]]
 name = "r9v-t0"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
+
+[[package]]
+name = "syn"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5283634e518fe9e82c7b20520bb4bc209009fd16c82077c802f8111ecbb0117a"
+
+[[package]]
+name = "unicode-ident"
+version = "1.0.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "r9v-common",
+]
