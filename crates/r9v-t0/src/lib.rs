@@ -13,14 +13,18 @@ pub mod cast;
 pub mod concat;
 pub mod copy;
 pub mod dtype;
+pub mod embed_gather;
 pub mod error;
+pub mod gather_rows;
 pub mod logit_softcap;
+pub mod matmul;
 pub mod norm;
 pub mod philox;
 pub mod quant_act;
 pub mod residual_add;
 pub mod rope;
 pub mod sampling;
+pub mod scatter_add_rows;
 pub mod split;
 pub mod tolerance;
 
@@ -37,14 +41,18 @@ pub use dtype::{
     bf16_to_f32, dtype_element_size, f16_to_f32, f32_to_bf16, f32_to_f16, fp8_e4m3_decode,
     fp8_e4m3_encode, fp8_e5m2_decode, fp8_e5m2_encode, read_f32_at, read_f64_at, write_f32_at,
 };
+pub use embed_gather::{embed_gather, embed_gather_f64_reference, embed_gather_with_scales};
 pub use error::T0Error;
+pub use gather_rows::{gather_rows, gather_rows_f64_reference};
 pub use logit_softcap::{logit_softcap, logit_softcap_f64_reference};
+pub use matmul::{matmul, matmul_f64_reference, matmul_with_scales};
 pub use norm::{norm, norm_f64_reference};
 pub use philox::{philox4x32_10, u32_to_unit_f32, RngState};
 pub use quant_act::{fp8_e4m3_encode_f64_oracle, quant_act, quant_act_f64_reference};
 pub use residual_add::{residual_add, residual_add_f64_reference};
 pub use rope::{rope, rope_f64_reference};
 pub use sampling::{logits_postprocess, sample, verify, VerifyOutput};
+pub use scatter_add_rows::{scatter_add_rows, scatter_add_rows_f64_reference};
 pub use split::{split, split_f64_reference};
 pub use tolerance::Tolerance;
 
@@ -229,6 +237,139 @@ pub fn execute_elementwise_op(
                 "op `{}` is not in the A1.5 elementwise group",
                 other.op_name()
             ),
+        }),
+    }
+}
+
+/// Dispatches and executes a matmul op using scalar T0 reference implementation (Spec 1 §4.C, §6.1, §6.2, Card A1.6).
+pub fn execute_matmul_op(
+    op: &r9v_ir::MatmulOp,
+    inputs: &[TensorView<'_>],
+    outputs: &mut [TensorViewMut<'_>],
+) -> Result<(), T0Error> {
+    if outputs.len() != 1 {
+        return Err(T0Error::InvalidAttribute {
+            op: "matmul",
+            attribute: "outputs",
+            reason: format!("matmul requires 1 output, got {}", outputs.len()),
+        });
+    }
+
+    match op.epilogue {
+        r9v_ir::Epilogue::None | r9v_ir::Epilogue::Act(_) => {
+            if inputs.len() != 2 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "matmul",
+                    attribute: "inputs",
+                    reason: format!(
+                        "matmul requires 2 inputs for None/Act epilogue, got {}",
+                        inputs.len()
+                    ),
+                });
+            }
+            matmul(op, &inputs[0], &inputs[1], None, None, &mut outputs[0])
+        }
+        r9v_ir::Epilogue::Bias => {
+            if inputs.len() != 3 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "matmul",
+                    attribute: "inputs",
+                    reason: format!(
+                        "matmul requires 3 inputs for Bias epilogue, got {}",
+                        inputs.len()
+                    ),
+                });
+            }
+            matmul(
+                op,
+                &inputs[0],
+                &inputs[1],
+                Some(&inputs[2]),
+                None,
+                &mut outputs[0],
+            )
+        }
+        r9v_ir::Epilogue::Residual => {
+            if inputs.len() != 3 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "matmul",
+                    attribute: "inputs",
+                    reason: format!(
+                        "matmul requires 3 inputs for Residual epilogue, got {}",
+                        inputs.len()
+                    ),
+                });
+            }
+            matmul(
+                op,
+                &inputs[0],
+                &inputs[1],
+                None,
+                Some(&inputs[2]),
+                &mut outputs[0],
+            )
+        }
+    }
+}
+
+/// Dispatches and executes a lookup or scatter op using scalar T0 reference implementation (Spec 1 §4.A, Card A1.6).
+pub fn execute_lookup_op(
+    op: &Op,
+    inputs: &[TensorView<'_>],
+    outputs: &mut [TensorViewMut<'_>],
+) -> Result<(), T0Error> {
+    match op {
+        Op::EmbedGather(embed_op) => {
+            if inputs.len() != 2 || outputs.len() != 1 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "embed_gather",
+                    attribute: "inputs/outputs",
+                    reason: format!(
+                        "embed_gather requires 2 inputs and 1 output, got {} inputs and {} outputs",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                });
+            }
+            embed_gather(embed_op, &inputs[0], &inputs[1], &mut outputs[0])
+        }
+        Op::GatherRows(gather_op) => {
+            if inputs.len() != 2 || outputs.len() != 1 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "gather_rows",
+                    attribute: "inputs/outputs",
+                    reason: format!(
+                        "gather_rows requires 2 inputs and 1 output, got {} inputs and {} outputs",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                });
+            }
+            gather_rows(gather_op, &inputs[0], &inputs[1], &mut outputs[0])
+        }
+        Op::ScatterAddRows(scatter_op) => {
+            if (inputs.len() != 2 && inputs.len() != 3) || outputs.len() != 1 {
+                return Err(T0Error::InvalidAttribute {
+                    op: "scatter_add_rows",
+                    attribute: "inputs/outputs",
+                    reason: format!(
+                        "scatter_add_rows requires 2 or 3 inputs and 1 output, got {} inputs and {} outputs",
+                        inputs.len(),
+                        outputs.len()
+                    ),
+                });
+            }
+            let dest = if inputs.len() == 3 {
+                Some(&inputs[2])
+            } else {
+                None
+            };
+            scatter_add_rows(scatter_op, &inputs[0], &inputs[1], dest, &mut outputs[0])
+        }
+        other => Err(T0Error::InvalidAttribute {
+            op: other.op_name(),
+            attribute: "op",
+            reason: format!("op `{}` is not a lookup/scatter op", other.op_name()),
         }),
     }
 }

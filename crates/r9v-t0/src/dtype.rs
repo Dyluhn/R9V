@@ -225,24 +225,22 @@ pub fn read_f32_at(dtype: DType, slice: &[u8], index: usize) -> f32 {
     match dtype {
         DType::F32 => {
             let offset = index * 4;
-            let bytes = [
+            let bits = u32::from_le_bytes([
                 slice[offset],
                 slice[offset + 1],
                 slice[offset + 2],
                 slice[offset + 3],
-            ];
-            f32::from_ne_bytes(bytes)
+            ]);
+            f32::from_bits(bits)
         }
         DType::F16 => {
             let offset = index * 2;
-            let bytes = [slice[offset], slice[offset + 1]];
-            let bits = u16::from_ne_bytes(bytes);
+            let bits = u16::from_le_bytes([slice[offset], slice[offset + 1]]);
             f16_to_f32(bits)
         }
         DType::Bf16 => {
             let offset = index * 2;
-            let bytes = [slice[offset], slice[offset + 1]];
-            let bits = u16::from_ne_bytes(bytes);
+            let bits = u16::from_le_bytes([slice[offset], slice[offset + 1]]);
             bf16_to_f32(bits)
         }
         DType::E4m3 => fp8_e4m3_decode(slice[index]),
@@ -250,23 +248,21 @@ pub fn read_f32_at(dtype: DType, slice: &[u8], index: usize) -> f32 {
         DType::I8 => slice[index] as i8 as f32,
         DType::I32 => {
             let offset = index * 4;
-            let bytes = [
+            i32::from_le_bytes([
                 slice[offset],
                 slice[offset + 1],
                 slice[offset + 2],
                 slice[offset + 3],
-            ];
-            i32::from_ne_bytes(bytes) as f32
+            ]) as f32
         }
         DType::U32 => {
             let offset = index * 4;
-            let bytes = [
+            u32::from_le_bytes([
                 slice[offset],
                 slice[offset + 1],
                 slice[offset + 2],
                 slice[offset + 3],
-            ];
-            u32::from_ne_bytes(bytes) as f32
+            ]) as f32
         }
         DType::Bool => {
             if slice[index] != 0 {
@@ -282,7 +278,6 @@ pub fn read_f32_at(dtype: DType, slice: &[u8], index: usize) -> f32 {
             } else {
                 (byte >> 4) & 0x0F
             };
-            // Sign extend 4-bit signed int
             let val = if nibble >= 8 {
                 (nibble as i8) - 16
             } else {
@@ -303,18 +298,18 @@ pub fn write_f32_at(dtype: DType, slice: &mut [u8], index: usize, val: f32) {
     match dtype {
         DType::F32 => {
             let offset = index * 4;
-            let bytes = val.to_ne_bytes();
+            let bytes = val.to_le_bytes();
             slice[offset..offset + 4].copy_from_slice(&bytes);
         }
         DType::F16 => {
             let offset = index * 2;
             let bits = f32_to_f16(val);
-            slice[offset..offset + 2].copy_from_slice(&bits.to_ne_bytes());
+            slice[offset..offset + 2].copy_from_slice(&bits.to_le_bytes());
         }
         DType::Bf16 => {
             let offset = index * 2;
             let bits = f32_to_bf16(val);
-            slice[offset..offset + 2].copy_from_slice(&bits.to_ne_bytes());
+            slice[offset..offset + 2].copy_from_slice(&bits.to_le_bytes());
         }
         DType::E4m3 => {
             slice[index] = fp8_e4m3_encode(val);
@@ -331,13 +326,13 @@ pub fn write_f32_at(dtype: DType, slice: &mut [u8], index: usize, val: f32) {
             let offset = index * 4;
             let rounded = val.round_ties_even();
             let clamped = rounded.clamp(i32::MIN as f32, i32::MAX as f32) as i32;
-            slice[offset..offset + 4].copy_from_slice(&clamped.to_ne_bytes());
+            slice[offset..offset + 4].copy_from_slice(&clamped.to_le_bytes());
         }
         DType::U32 => {
             let offset = index * 4;
             let rounded = val.round_ties_even();
             let clamped = rounded.clamp(0.0, u32::MAX as f32) as u32;
-            slice[offset..offset + 4].copy_from_slice(&clamped.to_ne_bytes());
+            slice[offset..offset + 4].copy_from_slice(&clamped.to_le_bytes());
         }
         DType::Bool => {
             slice[index] = if val != 0.0 && !val.is_nan() { 1 } else { 0 };
@@ -347,10 +342,11 @@ pub fn write_f32_at(dtype: DType, slice: &mut [u8], index: usize, val: f32) {
             let clamped = rounded.clamp(-8.0, 7.0) as i8;
             let nibble = (clamped as u8) & 0x0F;
             let byte_idx = index / 2;
+            let slot = &mut slice[byte_idx];
             if index.is_multiple_of(2) {
-                slice[byte_idx] = (slice[byte_idx] & 0xF0) | nibble;
+                *slot = (*slot & 0xF0) | nibble;
             } else {
-                slice[byte_idx] = (slice[byte_idx] & 0x0F) | (nibble << 4);
+                *slot = (*slot & 0x0F) | (nibble << 4);
             }
         }
     }

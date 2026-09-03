@@ -60,42 +60,42 @@ pub fn copy(_op: &CopyOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resu
         }
         (TensorData::U32(src), TensorDataMut::Bytes(_, dst)) => {
             for (i, &val) in src[..num_elem].iter().enumerate() {
-                dst[i * 4..(i + 1) * 4].copy_from_slice(&val.to_ne_bytes());
+                dst[i * 4..(i + 1) * 4].copy_from_slice(&val.to_le_bytes());
             }
         }
         (TensorData::Bytes(_, src), TensorDataMut::U32(dst)) => {
             for (i, item) in dst[..num_elem].iter_mut().enumerate() {
-                *item = u32::from_ne_bytes(src[i * 4..(i + 1) * 4].try_into().unwrap());
+                *item = u32::from_le_bytes(src[i * 4..(i + 1) * 4].try_into().unwrap());
             }
         }
         (TensorData::F32(src), TensorDataMut::Bytes(_, dst)) => {
             for (i, &val) in src[..num_elem].iter().enumerate() {
-                dst[i * 4..(i + 1) * 4].copy_from_slice(&val.to_ne_bytes());
+                dst[i * 4..(i + 1) * 4].copy_from_slice(&val.to_le_bytes());
             }
         }
         (TensorData::Bytes(_, src), TensorDataMut::F32(dst)) => {
             for (i, item) in dst[..num_elem].iter_mut().enumerate() {
-                *item = f32::from_ne_bytes(src[i * 4..(i + 1) * 4].try_into().unwrap());
+                *item = f32::from_le_bytes(src[i * 4..(i + 1) * 4].try_into().unwrap());
             }
         }
         (TensorData::F16(src), TensorDataMut::Bytes(_, dst)) => {
             for (i, &val) in src[..num_elem].iter().enumerate() {
-                dst[i * 2..(i + 1) * 2].copy_from_slice(&val.to_ne_bytes());
+                dst[i * 2..(i + 1) * 2].copy_from_slice(&val.to_le_bytes());
             }
         }
         (TensorData::Bytes(_, src), TensorDataMut::F16(dst)) => {
             for (i, item) in dst[..num_elem].iter_mut().enumerate() {
-                *item = u16::from_ne_bytes(src[i * 2..(i + 1) * 2].try_into().unwrap());
+                *item = u16::from_le_bytes(src[i * 2..(i + 1) * 2].try_into().unwrap());
             }
         }
         (TensorData::Bf16(src), TensorDataMut::Bytes(_, dst)) => {
             for (i, &val) in src[..num_elem].iter().enumerate() {
-                dst[i * 2..(i + 1) * 2].copy_from_slice(&val.to_ne_bytes());
+                dst[i * 2..(i + 1) * 2].copy_from_slice(&val.to_le_bytes());
             }
         }
         (TensorData::Bytes(_, src), TensorDataMut::Bf16(dst)) => {
             for (i, item) in dst[..num_elem].iter_mut().enumerate() {
-                *item = u16::from_ne_bytes(src[i * 2..(i + 1) * 2].try_into().unwrap());
+                *item = u16::from_le_bytes(src[i * 2..(i + 1) * 2].try_into().unwrap());
             }
         }
         (TensorData::I8(src), TensorDataMut::Bytes(_, dst)) => {
