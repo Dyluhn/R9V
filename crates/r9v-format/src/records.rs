@@ -146,6 +146,11 @@ pub struct I4KSuperblock {
 impl I4KSuperblock {
     /// Wire size of the record: `d` + `dmin` + 12 packed scale bytes
     /// (Spec 2 §3.2; the "12 B packed" is the `sc`/`mn` sub-field).
+    // DECISION(A2.2): I4_K scale record wire geometry is 16 bytes total
+    // (d: f16 + dmin: f16 [4 B] plus sc/mn packed payload [12 B]), matching
+    // field-identical GGUF Q4_K layout and 4.5 bpw; rejected a 12-byte total
+    // record (which would yield 4.375 bpw and break Q4_K bit compatibility).
+    // Spec 2 §3.2, DECISIONS.md D-004, SI-24.
     pub const RECORD_BYTES: usize = 16;
     /// The owning scheme.
     pub const SCHEME: SchemeId = SchemeId::I4K;

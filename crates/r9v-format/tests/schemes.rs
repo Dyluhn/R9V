@@ -254,7 +254,7 @@ fn bits_per_weight_matches_spec_section_8() {
         bits_per_weight(SchemeId::E4M3B128, 384).unwrap(),
         (3120, 384)
     );
-    // I8_R: 8 bits per weight plus one f16 per row (§8 prints 8.0).
+    // I8_R: 8 bits per weight plus one f16 per row ((8K+16)/K; SI-25; §8 prints 8.0).
     assert_eq!(bits_per_weight(SchemeId::I8R, 16).unwrap(), (144, 16));
     let (bits, weights) = bits_per_weight(SchemeId::I8R, 4096).unwrap();
     assert_eq!((bits, weights), (8 * 4096 + 16, 4096));

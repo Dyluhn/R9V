@@ -79,7 +79,11 @@ pub enum SchemeId {
 // (§3.2 natives 1-4, then §3.3 repacks 5-22); rejected reusing GGUF
 // upstream type ids because repack-only ids share GGUF's space while
 // native ids need R9V-owned codes, and one contiguous table keeps the
-// IR-handle mapping total. Spec 2 §3 assigns no numeric codes.
+// IR-handle mapping total; SchemeId is the closed set of 22 quantized
+// schemes and excludes unquantized dtypes (F16/BF16), which are represented
+// as DType plus QuantScheme::None per Spec 1 §2.2 and Spec 2 §3 (rejected
+// mapping them through SchemeId despite phase A2.3 deliverable phrasing).
+// Spec 2 §3, SI-26.
 impl SchemeId {
     /// All ids in code order (Spec 2 §3.2 then §3.3).
     pub const ALL: [SchemeId; 22] = [
@@ -375,6 +379,10 @@ pub fn bits_per_weight(scheme: SchemeId, k: u32) -> Result<(u64, u64), FormatErr
                     reason: "must be at least 1",
                 });
             }
+            // DECISION(A2.2): I8_R bits-per-weight uses the exact finite-row
+            // formula (8*K + 16) / K accounting for the 16-bit row scale;
+            // rejected fixed 8.0 bpw because finite rows carry dimensional scale
+            // overhead. Spec 2 §8, SI-25.
             let bits = (k as u64)
                 .checked_mul(8)
                 .and_then(|v| v.checked_add(16))
