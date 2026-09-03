@@ -4,7 +4,7 @@
 
 use r9v_common::rng::SeededRng;
 use r9v_ir::{ActivationKind, ActivationOp, DType};
-use r9v_t0::{activation, activation_f64_reference, Tolerance, TypedBuffer};
+use r9v_t0::{activation, activation_f64_reference, T0Error, Tolerance, TypedBuffer};
 
 fn generate_f32_data(rng: &mut SeededRng, len: usize, scale: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(len);
@@ -186,10 +186,22 @@ fn activation_rejects_malformed_operands() {
     let mut y_buf = TypedBuffer::zeros(&[2, 128], DType::F32); // shape mismatch
 
     let err = activation(&op, &x_buf.as_view(), &mut y_buf.as_view_mut()).unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("validation error(s)"));
-    assert!(msg.contains("clamp must be finite and > 0"));
-    assert!(msg.contains("does not match"));
+    let T0Error::Multiple { problems } = err else {
+        panic!("expected aggregated Multiple, got {err:?}");
+    };
+    assert_eq!(problems.len(), 2);
+    assert!(
+        problems.iter().any(
+            |e| matches!(e, T0Error::InvalidAttribute { attribute, .. } if *attribute == "clamp")
+        ),
+        "missing clamp problem: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|e| matches!(e, T0Error::DimensionMismatch { tensor, .. } if *tensor == "y")),
+        "missing shape problem: {problems:?}"
+    );
 }
 
 #[test]

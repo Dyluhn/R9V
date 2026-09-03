@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! 100,000-draw distribution tests for speculative rejection sampling (Spec 1 §4.F, Spec 7 §4, Card A1.8).
 
+use r9v_common::StepId;
 use r9v_ir::VerifyMethod;
 use r9v_t0::{sample, verify, RngState};
 
@@ -27,9 +28,9 @@ fn rejection_sampling_output_frequency_matches_target_sampling_1e5_draws() {
     let mut rejection_counts = vec![0usize; vocab_size];
     let mut direct_counts = vec![0usize; vocab_size];
 
-    let mut rng_rej = RngState::new(123456789, 1, 0);
-    let mut rng_direct = RngState::new(987654321, 2, 0);
-    let mut rng_draft = RngState::new(555555555, 3, 0);
+    let mut rng_rej = RngState::from_u64(123456789, 1, 0).unwrap();
+    let mut rng_direct = RngState::from_u64(987654321, 2, 0).unwrap();
+    let mut rng_draft = RngState::from_u64(555555555, 3, 0).unwrap();
 
     // Target probs array for verify [S=1, k+1=2, V=4]
     let mut target_probs = Vec::with_capacity(vocab_size * 2);
@@ -44,10 +45,10 @@ fn rejection_sampling_output_frequency_matches_target_sampling_1e5_draws() {
     for step in 0..draws {
         // 1. Draw a draft token from draft distribution Q
         let draft_tok = sample(&draft_q, 1, vocab_size, &mut [rng_draft.clone()]).unwrap()[0];
-        rng_draft.advance(1);
+        rng_draft.advance(1).unwrap();
 
         // 2. Perform speculative rejection sampling verification
-        rng_rej.set_step(step as u64);
+        rng_rej.set_step(StepId::new(step as u64));
         let mut rng_slice = [rng_rej.clone()];
         let out = verify(
             &[draft_tok],
@@ -68,7 +69,7 @@ fn rejection_sampling_output_frequency_matches_target_sampling_1e5_draws() {
         rejection_counts[emitted_token] += 1;
 
         // 3. Perform direct sampling from target distribution P
-        rng_direct.set_step(step as u64);
+        rng_direct.set_step(StepId::new(step as u64));
         let mut rng_dir_slice = [rng_direct.clone()];
         let dir_token = sample(&target_p, 1, vocab_size, &mut rng_dir_slice).unwrap()[0] as usize;
         rng_direct = rng_dir_slice[0].clone();
@@ -112,7 +113,7 @@ fn rejection_sampling_matches_target_sampling_within_statistical_tolerance_on_sy
     let draws = 100_000;
 
     let mut rejection_counts = vec![0usize; vocab_size];
-    let mut rng_rej = RngState::new(777, 10, 0);
+    let mut rng_rej = RngState::from_u64(777, 10, 0).unwrap();
 
     let mut target_probs = Vec::with_capacity(vocab_size * 2);
     target_probs.extend_from_slice(&target_p);
@@ -124,7 +125,7 @@ fn rejection_sampling_matches_target_sampling_within_statistical_tolerance_on_sy
     let draft_tok = 2u32;
 
     for step in 0..draws {
-        rng_rej.set_step(step as u64);
+        rng_rej.set_step(StepId::new(step as u64));
         let mut rng_slice = [rng_rej.clone()];
         let out = verify(
             &[draft_tok],

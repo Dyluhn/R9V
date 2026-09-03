@@ -79,9 +79,9 @@ fn determinism_sample_run_to_run_bit_identical() {
     ];
 
     let mut rng1 = vec![
-        RngState::new(100, 1, 5),
-        RngState::new(200, 2, 5),
-        RngState::new(300, 3, 5),
+        RngState::from_u64(100, 1, 5).unwrap(),
+        RngState::from_u64(200, 2, 5).unwrap(),
+        RngState::from_u64(300, 3, 5).unwrap(),
     ];
     let mut rng2 = rng1.clone();
 
@@ -117,7 +117,10 @@ fn determinism_verify_run_to_run_bit_identical() {
             delta: 0.8,
         },
     ] {
-        let mut rng1 = vec![RngState::new(42, 1, 10), RngState::new(43, 2, 10)];
+        let mut rng1 = vec![
+            RngState::from_u64(42, 1, 10).unwrap(),
+            RngState::from_u64(43, 2, 10).unwrap(),
+        ];
         let mut rng2 = rng1.clone();
 
         let out1 = verify(
@@ -178,7 +181,7 @@ fn determinism_batch_invariance_sequence_alone_vs_batched() {
     )
     .unwrap();
 
-    let mut rng_alone = vec![RngState::new(999, 101, 1)];
+    let mut rng_alone = vec![RngState::from_u64(999, 101, 1).unwrap()];
     let token_alone = sample(&out_alone, 1, v, &mut rng_alone).unwrap()[0];
 
     // 2. Run batched with sequence 1 and sequence 2
@@ -201,9 +204,9 @@ fn determinism_batch_invariance_sequence_alone_vs_batched() {
     .unwrap();
 
     let mut rng_batched = vec![
-        RngState::new(999, 101, 1),
-        RngState::new(888, 102, 1),
-        RngState::new(777, 103, 1),
+        RngState::from_u64(999, 101, 1).unwrap(),
+        RngState::from_u64(888, 102, 1).unwrap(),
+        RngState::from_u64(777, 103, 1).unwrap(),
     ];
     let tokens_batched = sample(&out_batched, 3, v, &mut rng_batched).unwrap();
 

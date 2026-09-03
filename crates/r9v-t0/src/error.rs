@@ -155,22 +155,7 @@ pub enum T0Error {
         dtype: DType,
     },
 
-    /// Multiple validation errors collected together (CONVENTIONS.md §1.4).
-    #[error("{count} validation error(s) in op `{op}`: {problems:?}")]
-    Multiple {
-        /// Name of the failing op.
-        op: &'static str,
-        /// Count of collected problems.
-        count: usize,
-        /// Vector of formatted problem descriptions.
-        problems: Vec<String>,
-    },
-
     /// Flat-slice length mismatch for sampling ops (Spec 1 §4.F).
-    ///
-    /// Renamed from the A1.8 `DimensionMismatch` so it cannot collide with the
-    /// A1.5 symbolic-dimension `DimensionMismatch` above, which carries
-    /// `(dim_name, expected_from, ...)` instead of `(op, detail)`.
     #[error("shape length mismatch in {op}: tensor {tensor} expected length {expected}, got {got}; detail: {detail}")]
     ShapeLengthMismatch {
         /// Op name.
@@ -194,7 +179,7 @@ pub enum T0Error {
         tensor: &'static str,
     },
 
-    /// All tokens masked out by grammar mask.
+    /// All tokens masked out by grammar mask or invalid logits.
     #[error("all tokens masked out by grammar mask in sequence {seq}, query {query}; vocabulary size was {vocab_size}")]
     AllTokensMasked {
         /// Sequence index.
@@ -252,6 +237,55 @@ pub enum T0Error {
         value: f32,
     },
 
+    /// A logit value is NaN or +Inf (Spec 1 §4.F).
+    ///
+    /// `-Inf` is never reported through this variant: it is the intentional
+    /// encoding of masked or impossible tokens (grammar mask, `logit_bias`
+    /// to `-Inf`). NaN and `+Inf` can never be intentional and are rejected
+    /// with their exact `(seq, query, token)` location, both on the raw input
+    /// and after bias/penalty/temperature transforms (overflow).
+    #[error("invalid logit {value} at sequence {seq}, query {query}, token {token} in op `{op}`")]
+    InvalidLogit {
+        /// Op name.
+        op: &'static str,
+        /// Sequence index.
+        seq: usize,
+        /// Query index.
+        query: usize,
+        /// Token index within the vocabulary.
+        token: usize,
+        /// Invalid logit value.
+        value: f32,
+    },
+
+    /// An RNG sequence id exceeds the canonical u32 Philox counter word (Spec 1 §4.F).
+    ///
+    /// The 128-bit Philox counter carries the sequence id in one 32-bit word,
+    /// so ids above `u32::MAX` cannot be represented without truncation
+    /// collision. RNG construction rejects it before a usable state exists.
+    #[error("rng seq_id {seq_id} exceeds the canonical u32 Philox counter word (max {max}) in op `{op}`")]
+    SeqIdOutOfRange {
+        /// Op name.
+        op: &'static str,
+        /// Offending 64-bit sequence id.
+        seq_id: u64,
+        /// Maximum representable sequence id.
+        max: u64,
+    },
+
+    /// Advancing an RNG state would wrap its per-step draw counter (Spec 1 §4.F).
+    #[error(
+        "rng draw index {draw_index} cannot advance by {advance} without overflow in op `{op}`"
+    )]
+    DrawIndexOverflow {
+        /// Operation that requested the advance.
+        op: &'static str,
+        /// Current draw index.
+        draw_index: u32,
+        /// Requested advance.
+        advance: u32,
+    },
+
     /// Invalid tree structure.
     #[error("invalid tree draft structure for sequence {seq}: {detail}")]
     InvalidTree {
@@ -261,46 +295,68 @@ pub enum T0Error {
         detail: String,
     },
 
-    /// Multiple coexisting typed validation problems (Spec 1 §4.F).
-    ///
-    /// Renamed from the A1.8 `Multiple` so it cannot collide with the A1.5
-    /// `Multiple` above, which carries `(op, count, problems: Vec<String>)`.
-    #[error("multiple T0 validation problems ({} failures): {problems:?}", problems.len())]
-    MultipleErrors {
-        /// Accumulated problems.
+    /// Multiple coexisting typed validation problems (Spec 1 §4.F, CONVENTIONS.md §1.4).
+    #[error("multiple validation error(s) ({} failures): {problems:?}", problems.len())]
+    Multiple {
+        /// Accumulated typed problems.
         problems: Box<[T0Error]>,
     },
 }
 
 impl T0Error {
-    /// Helper to produce a `Multiple` error if problems were collected (Spec 4 §2, CONVENTIONS.md §1.4).
-    pub fn from_problems(op: &'static str, problems: Vec<String>) -> Result<(), Self> {
-        if problems.is_empty() {
-            Ok(())
-        } else {
-            Err(Self::Multiple {
-                op,
-                count: problems.len(),
-                problems,
-            })
+    /// Aggregates typed problems: `Ok(())` if empty, the single error if one,
+    /// or `Multiple` otherwise (CONVENTIONS.md §1.4).
+    pub fn from_problems(mut problems: Vec<T0Error>) -> Result<(), Self> {
+        match problems.len() {
+            0 => Ok(()),
+            1 => {
+                if let Some(problem) = problems.pop() {
+                    Err(problem)
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(Self::Multiple {
+                problems: problems.into_boxed_slice(),
+            }),
         }
     }
+}
 
-    /// Aggregates typed problems: `Ok(())` if empty, the single error if one,
-    /// or `MultipleErrors` otherwise (Spec 1 §4.F).
-    ///
-    /// Renamed from the A1.8 `from_problems` so it cannot collide with the
-    /// A1.5 `from_problems(op, problems: Vec<String>)` above.
-    pub fn from_typed_problems(mut problems: Vec<T0Error>) -> Result<(), Self> {
-        if problems.is_empty() {
-            Ok(())
-        } else if problems.len() == 1 {
-            // Invariant: length was just checked to be exactly 1, so pop cannot fail.
-            Err(problems.pop().expect("exactly one problem"))
-        } else {
-            Err(Self::MultipleErrors {
-                problems: problems.into_boxed_slice(),
-            })
+/// Positional dimension names for shape-agreement checks on ops whose dimensions
+/// carry no symbolic name (Spec 4 §2).
+const POS_DIM_NAMES: [&str; 8] = ["d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"];
+
+/// Pushes typed shape-agreement problems between two shapes (Spec 4 §2, CONVENTIONS.md §1.4).
+///
+/// Pushes `RankMismatch` when the ranks differ, otherwise one
+/// `DimensionMismatch` per disagreeing dimension. Used by elementwise ops to
+/// replace stringly formatted shape problems with typed errors.
+pub fn push_shape_agreement(
+    problems: &mut Vec<T0Error>,
+    tensor: &'static str,
+    expected_from: &'static str,
+    actual_shape: &[usize],
+    expected_shape: &[usize],
+) {
+    if actual_shape.len() != expected_shape.len() {
+        problems.push(T0Error::RankMismatch {
+            tensor,
+            expected: expected_shape.len(),
+            got: actual_shape.len(),
+            shape: actual_shape.to_vec(),
+        });
+        return;
+    }
+    for (i, (&got, &expected)) in actual_shape.iter().zip(expected_shape.iter()).enumerate() {
+        if got != expected {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: POS_DIM_NAMES.get(i).copied().unwrap_or("dim"),
+                expected_from,
+                expected,
+                tensor,
+                got,
+            });
         }
     }
 }

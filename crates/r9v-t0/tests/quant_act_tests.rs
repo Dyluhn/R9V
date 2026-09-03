@@ -6,7 +6,7 @@ use r9v_common::rng::SeededRng;
 use r9v_ir::{DType, QuantActOp, QuantScheme, Smoothing};
 use r9v_t0::{
     fp8_e4m3_decode, fp8_e4m3_encode, fp8_e4m3_encode_f64_oracle, quant_act,
-    quant_act_f64_reference, Tolerance, TypedBuffer,
+    quant_act_f64_reference, T0Error, Tolerance, TypedBuffer,
 };
 
 fn generate_f32_data(rng: &mut SeededRng, len: usize, scale: f32) -> Vec<f32> {
@@ -321,9 +321,18 @@ fn quant_act_rejects_non_divisible_block_size_and_mismatches() {
         &mut scale_buf.as_view_mut(),
     )
     .unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("validation error(s)"));
-    assert!(msg.contains("divisible by 32"));
+    assert!(
+        matches!(
+            err,
+            T0Error::InvalidAttribute {
+                op: "quant_act",
+                attribute: "scheme",
+                ..
+            }
+        ),
+        "expected scheme attribute error, got {err:?}"
+    );
+    assert!(err.to_string().contains("divisible by 32"), "{err:?}");
 }
 
 #[test]

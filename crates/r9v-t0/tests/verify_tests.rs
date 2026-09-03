@@ -15,7 +15,7 @@ fn test_verify_rejection_all_accepted_samples_bonus() {
         0.0, 0.0, 0.0, 1.0, // pos 1 -> token 3 prob 1.0
         0.5, 0.5, 0.0, 0.0, // pos 2 (bonus) -> uniform over 0 and 1
     ];
-    let mut rng = vec![RngState::new(42, 1, 0)];
+    let mut rng = vec![RngState::from_u64(42, 1, 0).unwrap()];
 
     let out = verify(
         &draft_tokens,
@@ -48,7 +48,7 @@ fn test_verify_rejection_first_rejected_samples_replacement() {
         0.0, 0.0, 1.0, 0.0, // pos 1
         1.0, 0.0, 0.0, 0.0, // pos 2
     ];
-    let mut rng = vec![RngState::new(123, 1, 0)];
+    let mut rng = vec![RngState::from_u64(123, 1, 0).unwrap()];
 
     let out = verify(
         &draft_tokens,
@@ -76,7 +76,7 @@ fn test_verify_typical_acceptance_threshold() {
     let target_probs = vec![
         0.05, 0.80, 0.10, 0.05, 1.0, 0.0, 0.0, 0.0, // bonus
     ];
-    let mut rng = vec![RngState::new(42, 1, 0)];
+    let mut rng = vec![RngState::from_u64(42, 1, 0).unwrap()];
 
     // 1. With eps = 0.5, p[1] = 0.80 > min(0.5, ...) -> should accept!
     let method_accept = VerifyMethod::TypicalAcceptance {
@@ -159,7 +159,7 @@ fn test_verify_tree_walk_longest_path_and_tie_breaking() {
     // Node 3 output: valid bonus distribution for Path B
     target_probs[4 * v] = 1.0;
 
-    let mut rng = vec![RngState::new(42, 1, 0)];
+    let mut rng = vec![RngState::from_u64(42, 1, 0).unwrap()];
     let out = verify(
         &draft_tokens,
         None,
@@ -190,7 +190,7 @@ fn test_verify_tree_walk_longest_path_and_tie_breaking() {
     target_probs[2 * v + 4] = 1.0; // Now node 1 output also matches node 3!
     let tie_draft_tokens = vec![1, 1, 3, 4];
 
-    let mut rng_tie = vec![RngState::new(42, 1, 0)];
+    let mut rng_tie = vec![RngState::from_u64(42, 1, 0).unwrap()];
     let out_tie = verify(
         &tie_draft_tokens,
         None,
@@ -214,7 +214,7 @@ fn test_verify_tree_walk_longest_path_and_tie_breaking() {
 #[test]
 fn test_verify_degenerate_k_zero() {
     let target_probs = vec![0.2, 0.6, 0.2];
-    let mut rng = vec![RngState::new(1, 1, 0)];
+    let mut rng = vec![RngState::from_u64(1, 1, 0).unwrap()];
     let out = verify(
         &[],
         None,
@@ -234,7 +234,7 @@ fn test_verify_degenerate_k_zero() {
 
 #[test]
 fn verify_rejects_out_of_range_tokens_and_dimension_overflow_without_panicking() {
-    let mut rng = vec![RngState::new(1, 1, 0)];
+    let mut rng = vec![RngState::from_u64(1, 1, 0).unwrap()];
     let err = verify(
         &[3],
         None,

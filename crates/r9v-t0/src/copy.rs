@@ -5,7 +5,7 @@ use r9v_ir::{CopyOp, DType};
 
 use crate::buffer::{TensorData, TensorDataMut, TensorView, TensorViewMut};
 use crate::dtype::dtype_element_size;
-use crate::error::T0Error;
+use crate::error::{push_shape_agreement, T0Error};
 
 /// Executes scalar T0 tensor copy / contiguization (Spec 1 §4.A, Spec 4 §2).
 ///
@@ -17,21 +17,17 @@ pub fn copy(_op: &CopyOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resu
     let mut problems = Vec::new();
 
     if x.shape() != y.shape() {
-        problems.push(format!(
-            "output y shape {:?} does not match input x shape {:?}",
-            y.shape(),
-            x.shape()
-        ));
+        push_shape_agreement(&mut problems, "y", "x", y.shape(), x.shape());
     }
     if y.dtype() != x.dtype() {
-        problems.push(format!(
-            "output y dtype {:?} does not match input x dtype {:?}",
-            y.dtype(),
-            x.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "y",
+            expected: vec![x.dtype()],
+            got: y.dtype(),
+        });
     }
 
-    T0Error::from_problems("copy", problems)?;
+    T0Error::from_problems(problems)?;
 
     let num_elem = x.num_elements();
     match (&x.data, &mut y.data) {

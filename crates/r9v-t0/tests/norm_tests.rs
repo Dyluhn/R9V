@@ -4,7 +4,7 @@
 
 use r9v_common::rng::SeededRng;
 use r9v_ir::{DType, NormAxis, NormKind, NormOp};
-use r9v_t0::{norm, norm_f64_reference, Tolerance, TypedBuffer};
+use r9v_t0::{norm, norm_f64_reference, T0Error, Tolerance, TypedBuffer};
 
 fn generate_f32_data(rng: &mut SeededRng, len: usize, scale: f32) -> Vec<f32> {
     let mut out = Vec::with_capacity(len);
@@ -424,10 +424,39 @@ fn norm_rejects_malformed_inputs_with_complete_error() {
         &mut y_buf.as_view_mut(),
     )
     .unwrap_err();
-    let msg = err.to_string();
-    assert!(msg.contains("validation error(s)"));
-    assert!(msg.contains("not divisible"));
-    assert!(msg.contains("does not match"));
+    let T0Error::Multiple { problems } = err else {
+        panic!("expected aggregated Multiple, got {err:?}");
+    };
+    assert_eq!(problems.len(), 3);
+    assert!(
+        problems.iter().any(|e| matches!(
+            e,
+            T0Error::DimensionMismatch {
+                tensor: "weight",
+                dim_name: "N",
+                expected: 128,
+                got: 100,
+                ..
+            }
+        )),
+        "missing weight problem: {problems:?}"
+    );
+    assert!(
+        problems
+            .iter()
+            .any(|e| matches!(e, T0Error::DimensionMismatch { tensor: "y", .. })),
+        "missing y shape problem: {problems:?}"
+    );
+    assert!(
+        problems.iter().any(|e| matches!(
+            e,
+            T0Error::InvalidAttribute {
+                attribute: "axis",
+                ..
+            }
+        )),
+        "missing axis problem: {problems:?}"
+    );
 }
 
 #[test]
@@ -453,10 +482,16 @@ fn norm_rejects_invalid_attributes() {
     )
     .unwrap_err();
 
-    let msg = err.to_string();
-    assert!(msg.contains("validation error(s)"));
-    assert!(msg.contains("eps must be finite and > 0"));
-    assert!(msg.contains("out_dtype must be f16, bf16, or f32"));
-    assert!(msg.contains("weight_offset must be finite"));
-    assert!(msg.contains("NormAxis::Head(d): d must be > 0"));
+    let T0Error::Multiple { problems } = err else {
+        panic!("expected aggregated Multiple, got {err:?}");
+    };
+    for attribute in ["eps", "out_dtype", "weight_offset", "axis"] {
+        assert!(
+            problems.iter().any(|e| matches!(
+                e,
+                T0Error::InvalidAttribute { attribute: a, .. } if *a == attribute
+            )),
+            "missing {attribute} problem: {problems:?}"
+        );
+    }
 }

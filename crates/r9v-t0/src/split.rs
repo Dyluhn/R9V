@@ -22,83 +22,123 @@ pub fn split(
     let mut problems = Vec::new();
 
     if op.first == 0 {
-        problems.push("attribute first: split width must be > 0".to_string());
+        problems.push(T0Error::InvalidAttribute {
+            op: "split",
+            attribute: "first",
+            reason: "split width must be > 0".to_string(),
+        });
     }
     if x.rank() != 3 {
-        problems.push(format!(
-            "input x: expected rank 3 [T, H, D], got rank {} with shape {:?}",
-            x.rank(),
-            x.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "x",
+            expected: 3,
+            got: x.rank(),
+            shape: x.shape().to_vec(),
+        });
     }
     if a.rank() != 3 {
-        problems.push(format!(
-            "output a: expected rank 3 [T, H, first], got rank {} with shape {:?}",
-            a.rank(),
-            a.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "a",
+            expected: 3,
+            got: a.rank(),
+            shape: a.shape().to_vec(),
+        });
     }
     if b.rank() != 3 {
-        problems.push(format!(
-            "output b: expected rank 3 [T, H, D - first], got rank {} with shape {:?}",
-            b.rank(),
-            b.shape()
-        ));
+        problems.push(T0Error::RankMismatch {
+            tensor: "b",
+            expected: 3,
+            got: b.rank(),
+            shape: b.shape().to_vec(),
+        });
     }
     for (name, view) in [("x", x.dtype()), ("a", a.dtype()), ("b", b.dtype())] {
         if !matches!(view, DType::F16 | DType::Bf16 | DType::F32) {
-            problems.push(format!(
-                "tensor {name}: expected f16, bf16, or f32, got {view:?}"
-            ));
+            problems.push(T0Error::DTypeMismatch {
+                tensor: name,
+                expected: vec![DType::F16, DType::Bf16, DType::F32],
+                got: view,
+            });
         }
     }
     if a.dtype() != x.dtype() {
-        problems.push(format!(
-            "output a: expected input x dtype {:?}, got {:?}",
-            x.dtype(),
-            a.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "a",
+            expected: vec![x.dtype()],
+            got: a.dtype(),
+        });
     }
     if b.dtype() != x.dtype() {
-        problems.push(format!(
-            "output b: expected input x dtype {:?}, got {:?}",
-            x.dtype(),
-            b.dtype()
-        ));
+        problems.push(T0Error::DTypeMismatch {
+            tensor: "b",
+            expected: vec![x.dtype()],
+            got: b.dtype(),
+        });
     }
     if x.rank() == 3 && a.rank() == 3 && b.rank() == 3 {
         let (t, h, d) = (x.shape()[0], x.shape()[1], x.shape()[2]);
-        if a.shape()[0] != t || a.shape()[1] != h {
-            problems.push(format!(
-                "output a shape {:?} does not share input [T, H] = [{t}, {h}]",
-                a.shape()
-            ));
+        if a.shape()[0] != t {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "T",
+                expected_from: "x",
+                expected: t,
+                tensor: "a",
+                got: a.shape()[0],
+            });
         }
-        if b.shape()[0] != t || b.shape()[1] != h {
-            problems.push(format!(
-                "output b shape {:?} does not share input [T, H] = [{t}, {h}]",
-                b.shape()
-            ));
+        if a.shape()[1] != h {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "H",
+                expected_from: "x",
+                expected: h,
+                tensor: "a",
+                got: a.shape()[1],
+            });
+        }
+        if b.shape()[0] != t {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "T",
+                expected_from: "x",
+                expected: t,
+                tensor: "b",
+                got: b.shape()[0],
+            });
+        }
+        if b.shape()[1] != h {
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "H",
+                expected_from: "x",
+                expected: h,
+                tensor: "b",
+                got: b.shape()[1],
+            });
         }
         if a.shape()[2] != op.first as usize {
-            problems.push(format!(
-                "output a width {} does not match split attr first={}",
-                a.shape()[2],
-                op.first
-            ));
+            problems.push(T0Error::DimensionMismatch {
+                dim_name: "first",
+                expected_from: "op",
+                expected: op.first as usize,
+                tensor: "a",
+                got: a.shape()[2],
+            });
         }
         match (op.first as usize).checked_add(b.shape()[2]) {
             Some(sum) if sum == d => {}
-            Some(sum) => problems.push(format!(
-                "output widths {} + {} = {sum} do not reconstruct input dim {d}",
-                op.first,
-                b.shape()[2]
-            )),
-            None => problems.push("output widths overflow usize".to_string()),
+            Some(sum) => problems.push(T0Error::DimensionMismatch {
+                dim_name: "D",
+                expected_from: "x",
+                expected: d,
+                tensor: "b",
+                got: sum,
+            }),
+            None => problems.push(T0Error::ArithmeticOverflow {
+                op: "split",
+                detail: "output widths overflow usize".to_string(),
+            }),
         }
     }
 
-    T0Error::from_problems("split", problems)?;
+    T0Error::from_problems(problems)?;
 
     let (t, h, d) = (x.shape()[0], x.shape()[1], x.shape()[2]);
     let first = op.first as usize;

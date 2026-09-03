@@ -41,7 +41,7 @@ fn greedy_equivalence_at_temperature_zero() {
 
     // 2. Sample on temperature 0 distribution must deterministically return argmax
     for seed in [1, 42, 999, 123456] {
-        let mut rng = vec![RngState::new(seed, 1, 0)];
+        let mut rng = vec![RngState::from_u64(seed, 1, 0).unwrap()];
         let token = sample(&probs, 1, v, &mut rng).unwrap()[0];
         assert_eq!(
             token, 1,
@@ -80,8 +80,8 @@ fn greedy_equivalence_temperature_zero_rejection_matches_greedy() {
 
     // Scenario A: all draft tokens match greedy argmax [2, 4, 0]
     let matching_draft = vec![2u32, 4, 0];
-    let mut rng_greedy = vec![RngState::new(42, 1, 0)];
-    let mut rng_rejection = vec![RngState::new(42, 1, 0)];
+    let mut rng_greedy = vec![RngState::from_u64(42, 1, 0).unwrap()];
+    let mut rng_rejection = vec![RngState::from_u64(42, 1, 0).unwrap()];
 
     let out_greedy = verify(
         &matching_draft,
@@ -116,8 +116,8 @@ fn greedy_equivalence_temperature_zero_rejection_matches_greedy() {
 
     // Scenario B: partial match - second draft token mismatches: [2, 1 (instead of 4), 0]
     let partial_draft = vec![2u32, 1, 0];
-    let mut rng_g2 = vec![RngState::new(100, 2, 0)];
-    let mut rng_r2 = vec![RngState::new(100, 2, 0)];
+    let mut rng_g2 = vec![RngState::from_u64(100, 2, 0).unwrap()];
+    let mut rng_r2 = vec![RngState::from_u64(100, 2, 0).unwrap()];
 
     let out_g2 = verify(
         &partial_draft,

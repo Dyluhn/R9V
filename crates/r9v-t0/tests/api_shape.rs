@@ -2,6 +2,7 @@
 #![allow(clippy::needless_range_loop)]
 //! API shape verification for r9v-t0 crate (CONVENTIONS.md §3, Cards A1.5 and A1.8).
 
+use r9v_common::{SeqId, StepId};
 use r9v_ir::{DType, SamplingParams, VerifyMethod};
 use r9v_t0::*;
 
@@ -271,13 +272,14 @@ fn test_type_markers_and_traits() {
     assert_sync::<T0Error>();
 
     // Check trait implementations
-    let rng = RngState::new(42, 1, 0);
+    let rng = RngState::from_u64(42, 1, 0).unwrap();
     let rng_clone = rng.clone();
     assert_eq!(rng, rng_clone);
     assert_eq!(rng.seed(), 42);
-    assert_eq!(rng.seq_id(), 1);
-    assert_eq!(rng.step(), 0);
+    assert_eq!(rng.seq_id(), SeqId::new(1));
+    assert_eq!(rng.step(), StepId::new(0));
     assert_eq!(rng.draw_index(), 0);
+    assert_eq!(rng.seq_id_u32(), 1);
 
     let output = VerifyOutput {
         accepted: vec![1, 2, 3],
@@ -313,7 +315,7 @@ fn test_public_function_signatures() {
     assert!(res.is_ok());
 
     // Verify sample signature
-    let mut rng_states = vec![RngState::new(1, 0, 0)];
+    let mut rng_states = vec![RngState::from_u64(1, 0, 0).unwrap()];
     let res_sample = sample(&probs, 1, 2, &mut rng_states);
     assert!(res_sample.is_ok());
 
