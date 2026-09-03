@@ -15,6 +15,7 @@ pub mod meta;
 pub mod spec;
 pub mod summary;
 
+// DECISION(A1.15): r9v-models depends downward on both r9v-state and r9v-ir, preserving Spec 14 §2 crate layering; rejected duplicating state types or bypassing r9v-state. Spec 14 §2, card A1.15.
 pub use builder::{
     BoundWeight, FusionDecl, Graph, GraphBuilder, ModelGraph, SchemeClass, SealedGraphBuilder,
     SubgraphCapture, TiedDecl, Value, WeightRole,

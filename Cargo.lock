@@ -142,6 +142,7 @@ version = "0.1.0"
 dependencies = [
  "r9v-common",
  "r9v-ir",
+ "r9v-state",
  "thiserror",
 ]
 
@@ -192,6 +193,7 @@ name = "r9v-state"
 version = "0.1.0"
 dependencies = [
  "r9v-common",
+ "r9v-ir",
  "thiserror",
 ]
 

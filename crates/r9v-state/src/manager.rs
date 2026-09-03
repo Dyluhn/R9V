@@ -17,11 +17,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use r9v_common::SeqId;
+use r9v_ir::{BatchMeta, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
 
 use crate::error::{InvalidItem, StateError, StateResult};
 use crate::spec::{
-    group_layers, LayerGroup, StateSpec, BLOCK_SENTINEL, BLOCK_TOKENS, MAX_BATCH_TOKENS_HARD,
-    MAX_CTX_HARD, MAX_GROUPS_HARD, MAX_LAYERS_HARD, MAX_RESERVE_HARD, MAX_SEQS_HARD,
+    group_layers, LayerGroup, StateSpec, BLOCK_TOKENS, MAX_BATCH_TOKENS_HARD, MAX_CTX_HARD,
+    MAX_GROUPS_HARD, MAX_LAYERS_HARD, MAX_RESERVE_HARD, MAX_SEQS_HARD,
 };
 
 /// Slot value for layer-groups with no per-token slots (recurrent/conv).
@@ -167,52 +168,6 @@ pub struct CompactOp {
     pub dst_start: u32,
     /// Accepted token count.
     pub len: u32,
-}
-
-/// Batch metadata shared by ops (Spec 1 §2.5, Spec 3 §3.3, §5).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BatchMeta {
-    /// Sequence ids in call order, `[S]`.
-    pub seq_ids: Vec<SeqId>,
-    /// Query lengths, `[S]`.
-    pub query_len: Vec<u32>,
-    /// Verified lengths before this step, `[S]`.
-    pub ctx_len: Vec<u32>,
-    /// Absolute positions of the step's tokens, `[T]`.
-    pub positions: Vec<u32>,
-    /// Per-token slots per group, `[G, T]` (flattened; `SLOT_NONE` for
-    /// recurrent/conv groups).
-    pub slot_map: Vec<Vec<u32>>,
-    /// Block ids per group per sequence, `[G, S, max_blocks]`, padded with
-    /// [`BLOCK_SENTINEL`].
-    pub block_table: Vec<Vec<Vec<u32>>>,
-    /// First retained position per group per sequence, `[G, S]` (Spec 3 §3.5).
-    pub window_start: Vec<Vec<u32>>,
-}
-
-impl BatchMeta {
-    /// Number of layer-groups (`G`).
-    pub fn num_groups(&self) -> usize {
-        self.slot_map.len()
-    }
-
-    /// Number of sequences (`S`).
-    pub fn num_seqs(&self) -> usize {
-        self.seq_ids.len()
-    }
-
-    /// Total step tokens (`T`).
-    pub fn total_tokens(&self) -> usize {
-        self.positions.len()
-    }
-
-    /// Table width (`max_blocks = ceil(max_ctx / 32)`).
-    pub fn max_blocks(&self) -> usize {
-        self.block_table
-            .first()
-            .and_then(|g| g.first())
-            .map_or(0, Vec::len)
-    }
 }
 
 /// Free/total pool state per group (Spec 3 §5 `budget`).
@@ -618,6 +573,13 @@ impl StateManager {
             .ok_or_else(|| StateError::Overflow {
                 what: "live sequence count".to_owned(),
             })?;
+        // DECISION(A1.15): sequence allocation checks that next_seq <= u32::MAX before mutating state; rejected lossy as-casts, rollover, batch-local indexing that breaks Philox batch invariance, and unbounded host-to-device ID maps. Spec 1 §2.5, §4.F, Spec 3 §5, SI-40.
+        if self.next_seq > u32::MAX as u64 {
+            return Err(StateError::SeqIdOverflow {
+                seq: self.next_seq,
+                max: u32::MAX,
+            });
+        }
         let next_id = self
             .next_seq
             .checked_add(1)
@@ -1512,7 +1474,30 @@ impl StateManager {
     /// Order follows the input slices. Each `query_len` must be covered by
     /// that sequence's outstanding reservation. Problems across sequences are
     /// collected into one typed error.
+    // DECISION(A1.15): StateManager produces canonical r9v_ir::BatchMeta directly, preserving row-major flattened [G,T], [G,S,max_blocks], [G,S] tensors, exact block-table sentinel holes, and optional TreeMask; rejected maintaining a duplicate parallel BatchMeta struct in r9v-state. Spec 1 §2.5, Spec 3 §3.3, §5, card A1.15.
     pub fn batch_meta(&self, seqs: &[SeqId], query_lens: &[u32]) -> StateResult<BatchMeta> {
+        self.batch_meta_with_options(seqs, query_lens, None, None)
+    }
+
+    /// Builds canonical [`r9v_ir::BatchMeta`] with optional speculative [`TreeMask`] (Spec 1 §4.D.1, Spec 3 §5).
+    pub fn batch_meta_with_tree(
+        &self,
+        seqs: &[SeqId],
+        query_lens: &[u32],
+        tree: Option<TreeMask>,
+    ) -> StateResult<BatchMeta> {
+        self.batch_meta_with_options(seqs, query_lens, None, tree)
+    }
+
+    /// Builds canonical [`r9v_ir::BatchMeta`] with explicit positions (scalar or MRoPE) and optional [`TreeMask`].
+    // DECISION(A1.15): device seq_ids are checked global u32 identifiers validated with u32::try_from; sequence allocation checks that next_seq <= u32::MAX before mutating state; rejected lossy as-casts, rollover, batch-local indexing that breaks Philox batch invariance, and unbounded host-to-device ID maps. Spec 1 §2.5, §4.F, Spec 3 §5, SI-40.
+    pub fn batch_meta_with_options(
+        &self,
+        seqs: &[SeqId],
+        query_lens: &[u32],
+        positions: Option<Positions>,
+        tree: Option<TreeMask>,
+    ) -> StateResult<BatchMeta> {
         if seqs.len() != query_lens.len() {
             return Err(StateError::InvalidBatch {
                 detail: format!("seqs={} query_lens={}", seqs.len(), query_lens.len()),
@@ -1528,6 +1513,12 @@ impl StateManager {
         for (i, seq) in seqs.iter().enumerate() {
             if !seen.insert(seq.as_u64()) {
                 problems.push(format!("batch[{i}]: duplicate sequence {}", seq.as_u64()));
+            }
+            if seq.as_u64() > u32::MAX as u64 {
+                problems.push(format!(
+                    "batch[{i}]: sequence id {} exceeds device u32 width (SI-40)",
+                    seq.as_u64()
+                ));
             }
         }
         let mut total: u64 = 0;
@@ -1560,39 +1551,85 @@ impl StateManager {
                 "batch tokens={total} exceed cap {MAX_BATCH_TOKENS_HARD}"
             ));
         }
+        let total_tokens = total as usize;
+        if let Some(ref pos) = positions {
+            if pos.len() != total_tokens {
+                problems.push(format!(
+                    "positions len {} != total tokens {total_tokens}",
+                    pos.len()
+                ));
+            }
+        }
+        if let Some(ref tr) = tree {
+            if tr.t() != total_tokens {
+                problems.push(format!(
+                    "tree token count {} != total tokens {total_tokens}",
+                    tr.t()
+                ));
+            }
+        }
         if !problems.is_empty() {
             return Err(StateError::InvalidBatch {
                 detail: problems.join("; "),
             });
         }
 
+        let mut seq_ids = Vec::with_capacity(seqs.len());
+        for seq in seqs {
+            let dev_id = u32::try_from(seq.as_u64()).map_err(|_| StateError::SeqIdOverflow {
+                seq: seq.as_u64(),
+                max: u32::MAX,
+            })?;
+            seq_ids.push(dev_id);
+        }
+
         let mut ctx_len = Vec::with_capacity(seqs.len());
-        let mut positions: Vec<u32> = Vec::new();
+        let mut default_positions: Vec<u32> = Vec::with_capacity(total_tokens);
         for (seq, q) in seqs.iter().zip(query_lens.iter()) {
             let s = self.seq(*seq).map_err(|_| StateError::InvalidBatch {
                 detail: "sequence vanished during batch build".to_owned(),
             })?;
             ctx_len.push(s.ctx_len);
             for k in 0..*q {
-                positions.push(
-                    s.ctx_len
-                        .checked_add(k)
-                        .ok_or_else(|| StateError::Overflow {
-                            what: "batch position".to_owned(),
-                        })?,
-                );
+                default_positions.push(s.ctx_len.checked_add(k).ok_or_else(|| {
+                    StateError::Overflow {
+                        what: "batch position".to_owned(),
+                    }
+                })?);
             }
         }
+        let final_positions = positions.unwrap_or(Positions::PerToken(default_positions));
 
-        let mut slot_map: Vec<Vec<u32>> = Vec::with_capacity(self.groups.len());
-        let mut block_table: Vec<Vec<Vec<u32>>> = Vec::with_capacity(self.groups.len());
-        let mut window_start: Vec<Vec<u32>> = Vec::with_capacity(self.groups.len());
+        let total_slots =
+            self.groups
+                .len()
+                .checked_mul(total_tokens)
+                .ok_or_else(|| StateError::Overflow {
+                    what: "flat slot map size".to_owned(),
+                })?;
+        let mut flat_slot_map = Vec::with_capacity(total_slots);
+
+        let total_blocks = (self.groups.len() * seqs.len())
+            .checked_mul(self.max_blocks as usize)
+            .ok_or_else(|| StateError::Overflow {
+                what: "flat block table size".to_owned(),
+            })?;
+        let mut flat_block_table = vec![BLOCK_TABLE_SENTINEL; total_blocks];
+
+        let total_windows =
+            self.groups
+                .len()
+                .checked_mul(seqs.len())
+                .ok_or_else(|| StateError::Overflow {
+                    what: "flat window start size".to_owned(),
+                })?;
+        let mut flat_window_start = Vec::with_capacity(total_windows);
+
         for (gi, g) in self.groups.iter().enumerate() {
-            // slot_map row
+            // slot_map [G, T] row-major
             if !g.spec.is_paged() {
-                slot_map.push(vec![SLOT_NONE; positions.len()]);
+                flat_slot_map.extend(std::iter::repeat_n(SLOT_NONE, total_tokens));
             } else {
-                let mut row = Vec::with_capacity(positions.len());
                 for (si, (seq, q)) in seqs.iter().zip(query_lens.iter()).enumerate() {
                     let s = self.seq(*seq).map_err(|_| StateError::InvalidBatch {
                         detail: "sequence vanished during batch build".to_owned(),
@@ -1609,12 +1646,12 @@ impl StateManager {
                                 .ok_or_else(|| StateError::Overflow {
                                     what: "batch position".to_owned(),
                                 })?;
-                        row.push(flatten_slot(s, gi, pos, end)?);
+                        flat_slot_map.push(flatten_slot(s, gi, pos, end)?);
                     }
                 }
-                slot_map.push(row);
             }
-            // block_table + window_start rows.
+
+            // block_table [G, S, max_blocks] row-major & window_start [G, S] row-major
             //
             // DECISION(A1.11) per SI-17: the §3.5 ring sentence describes the
             // eviction policy, not the storage shape. Every row stays width
@@ -1622,13 +1659,10 @@ impl StateManager {
             // index and sentinel holes where window eviction released blocks;
             // rejected: compacting live ids to the front (destroys the
             // position-to-index mapping the slot formula relies on).
-            let mut table_rows = Vec::with_capacity(seqs.len());
-            let mut ws_rows = Vec::with_capacity(seqs.len());
-            for seq in seqs {
+            for (si, seq) in seqs.iter().enumerate() {
                 let s = self.seq(*seq).map_err(|_| StateError::InvalidBatch {
                     detail: "sequence vanished during batch build".to_owned(),
                 })?;
-                let mut row = vec![BLOCK_SENTINEL; self.max_blocks as usize];
                 if g.spec.is_paged() {
                     let indices = s.indices.get(gi).ok_or_else(|| StateError::InvalidBatch {
                         detail: format!("sequence {} has no table", seq.as_u64()),
@@ -1648,12 +1682,12 @@ impl StateManager {
                             usize::try_from(*idx).map_err(|_| StateError::Overflow {
                                 what: "block table index".to_owned(),
                             })?;
-                        *row.get_mut(cell).ok_or_else(|| StateError::Overflow {
-                            what: "block table index".to_owned(),
-                        })? = id;
+                        if cell < self.max_blocks as usize {
+                            let offset = (gi * seqs.len() + si) * self.max_blocks as usize + cell;
+                            flat_block_table[offset] = id;
+                        }
                     }
                 }
-                table_rows.push(row);
                 let ws = match g.spec.retain() {
                     None | Some(crate::spec::Retain::All) => 0,
                     Some(crate::spec::Retain::Window { w })
@@ -1661,21 +1695,26 @@ impl StateManager {
                         window_start_of(s.ctx_len, w)
                     }
                 };
-                ws_rows.push(ws);
+                flat_window_start.push(ws);
             }
-            block_table.push(table_rows);
-            window_start.push(ws_rows);
         }
 
-        Ok(BatchMeta {
-            seq_ids: seqs.to_vec(),
-            query_len: query_lens.to_vec(),
-            ctx_len,
-            positions,
-            slot_map,
-            block_table,
-            window_start,
-        })
+        BatchMeta::builder(
+            self.groups.len() as u32,
+            seqs.len() as u32,
+            total_tokens as u32,
+            self.max_blocks,
+        )
+        .seq_ids(seq_ids)
+        .query_len(query_lens.to_vec())
+        .ctx_len(ctx_len)
+        .positions(final_positions)
+        .slot_map(flat_slot_map)
+        .block_table(flat_block_table)
+        .window_start(flat_window_start)
+        .tree(tree)
+        .build()
+        .map_err(StateError::Ir)
     }
 
     /// Pool budget snapshot (Spec 3 §5 `budget`).
@@ -1764,6 +1803,16 @@ impl StateManager {
                 alloc as f32 / total as f32
             },
         }
+    }
+
+    /// Sets `next_seq` to support testing sequence ID overflow and boundary conditions (SI-40).
+    pub fn set_next_seq_for_test(&mut self, next: u64) {
+        self.next_seq = next;
+    }
+
+    /// Reports current `next_seq` counter to support boundary testing.
+    pub fn next_seq_for_test(&self) -> u64 {
+        self.next_seq
     }
 }
 
@@ -2123,7 +2172,13 @@ mod tests {
         let before_seqs_len = m.seqs.len();
 
         let err = m.new_seq(&[]).unwrap_err();
-        assert!(matches!(err, StateError::Overflow { .. }), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                StateError::Overflow { .. } | StateError::SeqIdOverflow { .. }
+            ),
+            "got {err:?}"
+        );
 
         assert_eq!(m.next_seq, u64::MAX);
         assert_eq!(m.live_count, before_live);

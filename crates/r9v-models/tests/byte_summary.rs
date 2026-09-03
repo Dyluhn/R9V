@@ -159,8 +159,8 @@ fn test_synthetic_model_byte_summary() {
     let l2 = &summary.layers[2];
     assert_eq!(l2.mixer_kind, Some(MixerKind::LinearAttention));
     assert_eq!(l2.state_per_token_bytes, 0);
-    // state_per_seq_bytes: conv ((4-1)*256*2 = 1,536) + recurrent (4 * 16 * 16 * 4 * 2 = 8,192) = 9,728 bytes
-    assert_eq!(l2.state_per_seq_bytes, 9_728);
+    // state_per_seq_bytes: conv ((4-1)*256*2*2 = 3,072) + recurrent (4 * 16 * 16 * 4 * 2 = 8,192) = 11,264 bytes
+    assert_eq!(l2.state_per_seq_bytes, 11_264);
 
     // 5. Total model state memory budgets
     assert_eq!(
@@ -169,7 +169,7 @@ fn test_synthetic_model_byte_summary() {
     );
     assert_eq!(
         summary.total_state_per_seq_bytes().expect("state totals"),
-        9_728
+        11_264
     );
 
     // 6. Total weight bytes is > 0 and bucketed schemes are valid

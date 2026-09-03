@@ -11,8 +11,9 @@ use crate::error::{InvalidItem, StateError, StateResult};
 /// Tokens per block (Spec 3 §3.1: one lane per token in a wave32 QK pass).
 pub const BLOCK_TOKENS: u32 = 32;
 
-/// Padding sentinel for unused `block_table` entries (Spec 3 §3.3).
-pub const BLOCK_SENTINEL: u32 = u32::MAX;
+// DECISION(A1.15): BLOCK_SENTINEL in r9v-state is a compatibility re-export of r9v_ir::BLOCK_TABLE_SENTINEL (u32::MAX); rejected independent sentinel definitions across crates. Spec 1 §2.5, Spec 3 §3.3, card A1.15.
+pub use r9v_ir::BLOCK_TABLE_SENTINEL;
+pub use r9v_ir::BLOCK_TABLE_SENTINEL as BLOCK_SENTINEL;
 
 // DECISION(A1.11): hard caps below bound every untrusted size before any
 // allocation so oversized requests fail as typed errors instead of
@@ -38,9 +39,10 @@ pub const MAX_RESERVE_HARD: u32 = 1 << 20;
 ///
 /// Scale granularity is per token-head for `E4M3` and `I8` (spec default);
 /// `F16` carries no scales.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CacheDtype {
     /// 8-bit float with per-token-head f16 scales (spec default).
+    #[default]
     E4M3,
     /// 8-bit int with per-token-head f16 scales.
     I8,
@@ -49,8 +51,20 @@ pub enum CacheDtype {
 }
 
 impl CacheDtype {
+    /// Compatibility alias matching casing in `r9v-models`.
+    #[allow(non_upper_case_globals)]
+    pub const E4m3: CacheDtype = CacheDtype::E4M3;
+
     /// Cache value bytes per element (Spec 3 §3.2).
     pub const fn bytes(self) -> u64 {
+        match self {
+            Self::E4M3 | Self::I8 => 1,
+            Self::F16 => 2,
+        }
+    }
+
+    /// Cache value bytes per element as `usize` (Spec 3 §3.2).
+    pub const fn element_bytes(self) -> usize {
         match self {
             Self::E4M3 | Self::I8 => 1,
             Self::F16 => 2,
@@ -68,9 +82,10 @@ impl CacheDtype {
 }
 
 /// Retention policy (Spec 3 §2, §3.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Retain {
     /// Blocks retained until the sequence is freed (Spec 3 §3.5).
+    #[default]
     All,
     /// Sliding window of `w` tokens (Spec 3 §3.5).
     Window {
@@ -99,6 +114,21 @@ impl Retain {
     /// Whether this policy ever releases blocks before `free_seq`.
     pub const fn is_windowed(self) -> bool {
         !matches!(self, Self::All)
+    }
+
+    /// Constructs a retention policy from optional sliding window and sink count (Spec 3 §2).
+    pub fn from_window_sinks(window: Option<u32>, sinks: u32) -> Result<Self, StateError> {
+        match (window, sinks) {
+            (None, 0) => Ok(Self::All),
+            (Some(w), 0) => Ok(Self::Window { w }),
+            (Some(w), n) => Ok(Self::SinkWindow { n, w }),
+            (None, s) => Err(StateError::invalid(vec![InvalidItem {
+                index: 0,
+                reason: format!(
+                    "attention sinks ({s}) require a sliding window (window is None); Spec 3 §2 has no sink-only Retain form"
+                ),
+            }])),
+        }
     }
 }
 
@@ -299,6 +329,42 @@ impl StateSpec {
             Self::KvPaged { .. } | Self::KvLatent { .. } => Ok(0),
         }
     }
+
+    /// Associated state kind in Op IR (Spec 1 §2.6).
+    pub const fn kind(self) -> r9v_ir::StateKind {
+        match self {
+            Self::KvPaged { .. } => r9v_ir::StateKind::KvPaged,
+            Self::KvLatent { .. } => r9v_ir::StateKind::KvLatent,
+            Self::Recurrent { .. } => r9v_ir::StateKind::Recurrent,
+            Self::ConvWindow { .. } => r9v_ir::StateKind::ConvWindow,
+        }
+    }
+
+    /// Fixed bytes per sequence for one layer across both double-buffered slots (Spec 3 §4.2, §6.2).
+    ///
+    /// `Recurrent`: `h * d * dv * 4 * 2`. `ConvWindow`: `(w - 1) * c * 2 * 2`.
+    /// Paged specs return 0 (they page per token instead).
+    // DECISION(A1.15): StateSpec::per_seq_bytes reports exact double-buffered per-sequence allocation bytes for both recurrent (h*d*dv*4*2) and conv ((w-1)*c*2*2), aligning ModelSummary totals with StateManager pool sizing; rejected single-buffer conv accounting in model summaries which caused budget divergence. Spec 3 §4.2, §6.2, Spec 8 §7, card A1.15.
+    pub fn per_seq_bytes(self) -> StateResult<u64> {
+        let single = self.slot_bytes()?;
+        if self.is_recurrent() {
+            single.checked_mul(2).ok_or_else(|| StateError::Overflow {
+                what: "double-buffer per-sequence bytes".to_owned(),
+            })
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Compatibility alias for [`Self::per_token_bytes`] (Spec 8 §7).
+    pub fn state_per_token_bytes(self) -> StateResult<u64> {
+        self.per_token_bytes()
+    }
+
+    /// Compatibility alias for [`Self::per_seq_bytes`] (Spec 8 §7).
+    pub fn state_per_seq_bytes(self) -> StateResult<u64> {
+        self.per_seq_bytes()
+    }
 }
 
 fn check_dim(name: &str, v: u32, index: u32, out: &mut Vec<InvalidItem>) {
@@ -372,19 +438,12 @@ impl LayerGroup {
     /// Fixed slot bytes per sequence across all layers (double-buffered
     /// recurrent/conv groups count both A and B slots, Spec 3 §6.2).
     pub fn slots_bytes_per_seq(&self) -> StateResult<u64> {
-        let per_layer = self.spec.slot_bytes()?;
-        let layers = per_layer
+        let per_layer = self.spec.per_seq_bytes()?;
+        per_layer
             .checked_mul(self.layers.len() as u64)
             .ok_or_else(|| StateError::Overflow {
                 what: "group slot bytes".to_owned(),
-            })?;
-        if self.spec.is_recurrent() {
-            layers.checked_mul(2).ok_or_else(|| StateError::Overflow {
-                what: "double-buffer slots".to_owned(),
             })
-        } else {
-            Ok(layers)
-        }
     }
 }
 

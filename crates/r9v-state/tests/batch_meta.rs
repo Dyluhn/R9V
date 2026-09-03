@@ -58,45 +58,55 @@ fn multi_group_batch_meta_shapes_and_values() {
     assert_eq!(meta.num_seqs(), 2);
     assert_eq!(meta.total_tokens(), 50);
     assert_eq!(meta.max_blocks(), 4);
-    assert_eq!(meta.query_len, vec![40, 10]);
-    assert_eq!(meta.ctx_len, vec![0, 0]);
-    assert_eq!(meta.positions, (0..40).chain(0..10).collect::<Vec<u32>>());
+    assert_eq!(meta.query_len(), &[40, 10]);
+    assert_eq!(meta.ctx_len(), &[0, 0]);
+    assert_eq!(
+        meta.positions(),
+        &r9v_state::Positions::PerToken((0..40).chain(0..10).collect::<Vec<u32>>())
+    );
 
     // slot_map is [G, T].
-    assert_eq!(meta.slot_map.len(), 4);
-    for row in &meta.slot_map {
-        assert_eq!(row.len(), 50);
-    }
+    assert_eq!(meta.slot_map().len(), 4 * 50);
     // Dense group: first token of `a` sits in block 0 lane 0; token 32 of
     // `a` sits in block 1 lane 0; first token of `b` sits in block 2 lane 0.
-    assert_eq!(meta.slot_map[0][0], 0);
-    assert_eq!(meta.slot_map[0][32], 32);
-    assert_eq!(meta.slot_map[0][40], 2 * 32);
+    assert_eq!(meta.slot(0, 0), 0);
+    assert_eq!(meta.slot(0, 32), 32);
+    assert_eq!(meta.slot(0, 40), 2 * 32);
     // Windowed group (index 3) allocates its own pool: same layout.
-    assert_eq!(meta.slot_map[3][0], 0);
-    assert_eq!(meta.slot_map[3][40], 2 * 32);
+    assert_eq!(meta.slot(3, 0), 0);
+    assert_eq!(meta.slot(3, 40), 2 * 32);
     // Recurrent/conv groups carry SLOT_NONE (no per-token slots, §4.2).
-    assert!(meta.slot_map[1].iter().all(|s| *s == SLOT_NONE));
-    assert!(meta.slot_map[2].iter().all(|s| *s == SLOT_NONE));
+    for t in 0..50 {
+        assert_eq!(meta.slot(1, t), SLOT_NONE);
+        assert_eq!(meta.slot(2, t), SLOT_NONE);
+    }
 
     // block_table is [G, S, max_blocks], ascending ids then sentinel.
-    assert_eq!(meta.block_table.len(), 4);
-    assert_eq!(
-        meta.block_table[0][0],
-        vec![0, 1, BLOCK_SENTINEL, BLOCK_SENTINEL]
-    );
-    assert_eq!(
-        meta.block_table[0][1],
-        vec![2, BLOCK_SENTINEL, BLOCK_SENTINEL, BLOCK_SENTINEL]
-    );
-    for row in meta.block_table[1].iter().chain(meta.block_table[2].iter()) {
-        assert!(row.iter().all(|id| *id == BLOCK_SENTINEL));
+    assert_eq!(meta.block_table().len(), 4 * 2 * 4);
+    assert_eq!(meta.block(0, 0, 0), 0);
+    assert_eq!(meta.block(0, 0, 1), 1);
+    assert_eq!(meta.block(0, 0, 2), BLOCK_SENTINEL);
+    assert_eq!(meta.block(0, 0, 3), BLOCK_SENTINEL);
+
+    assert_eq!(meta.block(0, 1, 0), 2);
+    assert_eq!(meta.block(0, 1, 1), BLOCK_SENTINEL);
+    assert_eq!(meta.block(0, 1, 2), BLOCK_SENTINEL);
+    assert_eq!(meta.block(0, 1, 3), BLOCK_SENTINEL);
+
+    for g in [1, 2] {
+        for s in [0, 1] {
+            for b in 0..4 {
+                assert_eq!(meta.block(g, s, b), BLOCK_SENTINEL);
+            }
+        }
     }
 
     // window_start is [G, S]: 0 everywhere at ctx 0.
-    assert_eq!(meta.window_start.len(), 4);
-    for row in &meta.window_start {
-        assert_eq!(*row, vec![0, 0]);
+    assert_eq!(meta.window_start().len(), 4 * 2);
+    for g in 0..4 {
+        for s in 0..2 {
+            assert_eq!(meta.window(g, s), 0);
+        }
     }
 }
 
@@ -132,23 +142,28 @@ fn block_table_uses_absolute_indices_with_sentinel_holes() {
     m.reserve(a, 8).unwrap();
     let meta = m.batch_meta(&[a], &[8]).unwrap();
     assert_eq!(meta.max_blocks(), 8);
-    assert_eq!(
-        meta.block_table[0][0],
-        vec![
-            BLOCK_SENTINEL,
-            BLOCK_SENTINEL,
-            2,
-            0,
-            1,
-            BLOCK_SENTINEL,
-            BLOCK_SENTINEL,
-            BLOCK_SENTINEL,
-        ]
-    );
+    let expected_row = [
+        BLOCK_SENTINEL,
+        BLOCK_SENTINEL,
+        2,
+        0,
+        1,
+        BLOCK_SENTINEL,
+        BLOCK_SENTINEL,
+        BLOCK_SENTINEL,
+    ];
+    for (b, &expected) in expected_row.iter().enumerate() {
+        assert_eq!(meta.block(0, 0, b as u32), expected);
+    }
     // Slots follow the absolute ids, not table positions: positions 128..136
     // sit in pool block 1, so the flattened slots are 32..40.
-    assert_eq!(meta.slot_map[0], (32..40).collect::<Vec<u32>>());
-    assert_eq!(meta.positions, (128..136).collect::<Vec<u32>>());
+    for t in 0..8 {
+        assert_eq!(meta.slot(0, t), 32 + t);
+    }
+    assert_eq!(
+        meta.positions(),
+        &r9v_state::Positions::PerToken((128..136).collect())
+    );
     m.commit(a, 8).unwrap();
 }
 
@@ -173,9 +188,9 @@ fn window_start_advances_only_for_windowed_groups() {
     m.reserve(a, 1).unwrap();
     let meta = m.batch_meta(&[a], &[1]).unwrap();
     // Groups: 0 dense All, 1 recurrent, 2 conv, 3 windowed w=64.
-    assert_eq!(meta.window_start[0], vec![0]);
-    assert_eq!(meta.window_start[1], vec![0]);
-    assert_eq!(meta.window_start[2], vec![0]);
-    assert_eq!(meta.window_start[3], vec![96 - 64]);
+    assert_eq!(meta.window(0, 0), 0);
+    assert_eq!(meta.window(1, 0), 0);
+    assert_eq!(meta.window(2, 0), 0);
+    assert_eq!(meta.window(3, 0), 96 - 64);
     m.commit(a, 1).unwrap();
 }

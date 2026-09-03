@@ -1413,6 +1413,16 @@ impl ModelGraph {
 
             for (layer, spec, _) in &self.state_specs {
                 if *layer == l {
+                    if let StateSpec::KvPaged { hkv, .. } = spec {
+                        if *hkv > crate::spec::MAX_KV_HEADS {
+                            return Err(ModelsError::InvalidModelSpec {
+                                reason: format!(
+                                    "summary hkv {hkv} exceeds implementation limit {}",
+                                    crate::spec::MAX_KV_HEADS
+                                ),
+                            });
+                        }
+                    }
                     state_per_token_bytes =
                         checked_add_u64(state_per_token_bytes, spec.state_per_token_bytes()?, CTX)?;
                     state_per_seq_bytes =

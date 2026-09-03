@@ -16,11 +16,13 @@ pub mod error;
 pub mod manager;
 pub mod spec;
 
+// DECISION(A1.15): r9v-state depends downward on r9v-ir, preserving Spec 14 §2 crate layering; rejected cyclic dependencies or embedding state semantics in r9v-ir. Spec 14 §2, card A1.15.
 pub use error::{InvalidItem, StateError, StateResult};
 pub use manager::{
-    block_offset, required_pool_bytes, BatchMeta, Budget, CompactOp, GroupBudget, SlotRange,
-    StateConfig, StateManager, Stats, MAX_SLOT_BLOCKS, SLOT_NONE,
+    block_offset, required_pool_bytes, Budget, CompactOp, GroupBudget, SlotRange, StateConfig,
+    StateManager, Stats, MAX_SLOT_BLOCKS, SLOT_NONE,
 };
+pub use r9v_ir::{BatchMeta, BatchMetaBuilder, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
 pub use spec::{
     group_layers, CacheDtype, LayerGroup, Retain, StateSpec, BLOCK_SENTINEL, BLOCK_TOKENS,
     MAX_BATCH_TOKENS_HARD, MAX_CTX_HARD, MAX_GROUPS_HARD, MAX_LAYERS_HARD, MAX_RESERVE_HARD,

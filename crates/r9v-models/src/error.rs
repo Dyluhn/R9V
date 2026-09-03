@@ -17,6 +17,10 @@ pub enum ModelsError {
     #[error(transparent)]
     Common(#[from] r9v_common::R9vError),
 
+    /// Underlying sequence-state error (CONVENTIONS.md §1.1).
+    #[error(transparent)]
+    State(#[from] r9v_state::StateError),
+
     /// Missing required metadata key.
     #[error("missing metadata key '{key}'; expected type {expected_type}")]
     MissingMetaKey {

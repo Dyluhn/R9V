@@ -19,7 +19,7 @@ pub struct InvalidItem {
 }
 
 /// Errors from the sequence-state manager (Spec 3 §5).
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum StateError {
     /// Config, layer specs, or pool sizing failed validation.
     ///
@@ -158,6 +158,19 @@ pub enum StateError {
         /// The quantity being computed.
         what: String,
     },
+
+    /// Sequence ID exceeds 32-bit device address space (Spec 1 §2.5, SI-40).
+    #[error("sequence id {seq} exceeds device u32 width {max}")]
+    SeqIdOverflow {
+        /// 64-bit host sequence id.
+        seq: u64,
+        /// Maximum 32-bit device id (`u32::MAX`).
+        max: u32,
+    },
+
+    /// Underlying Op IR error (CONVENTIONS.md §1.1).
+    #[error(transparent)]
+    Ir(#[from] r9v_ir::IrError),
 }
 
 impl StateError {
