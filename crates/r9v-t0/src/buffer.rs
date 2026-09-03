@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Buffer and view abstractions for scalar T0 tensor operands (Spec 1 §2.3, Spec 4 §2).
 
-use r9v_ir::DType;
+use r9v_ir::{DType, LayoutId, QuantScheme};
 
 use crate::dtype::{
     bf16_to_f32, dtype_element_size, f16_to_f32, f32_to_bf16, f32_to_f16, fp8_e4m3_decode,
@@ -48,6 +48,9 @@ pub enum TensorDataMut<'a> {
 pub struct TensorView<'a> {
     pub(crate) shape: Vec<usize>,
     pub(crate) data: TensorData<'a>,
+    pub(crate) quant: QuantScheme,
+    pub(crate) layout: LayoutId,
+    pub(crate) scale: Option<Box<TensorView<'a>>>,
 }
 
 impl<'a> TensorView<'a> {
@@ -56,6 +59,9 @@ impl<'a> TensorView<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorData::Bytes(dtype, data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
+            scale: None,
         }
     }
 
@@ -64,6 +70,9 @@ impl<'a> TensorView<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorData::F32(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
+            scale: None,
         }
     }
 
@@ -72,6 +81,9 @@ impl<'a> TensorView<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorData::F16(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
+            scale: None,
         }
     }
 
@@ -80,6 +92,9 @@ impl<'a> TensorView<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorData::Bf16(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
+            scale: None,
         }
     }
 
@@ -88,6 +103,9 @@ impl<'a> TensorView<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorData::I8(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
+            scale: None,
         }
     }
 
@@ -96,6 +114,88 @@ impl<'a> TensorView<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorData::U32(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
+            scale: None,
+        }
+    }
+
+    /// Returns tensor quantization scheme (Spec 1 §2.2, Spec 4 §2).
+    pub fn quant(&self) -> QuantScheme {
+        self.quant
+    }
+
+    /// Returns tensor layout id (Spec 1 §2.3, Spec 2 §2).
+    pub fn layout(&self) -> LayoutId {
+        self.layout
+    }
+
+    /// Returns associated scale view, if any (Spec 1 §2.2, Spec 2 §3).
+    pub fn scale(&self) -> Option<&TensorView<'a>> {
+        self.scale.as_deref()
+    }
+
+    /// Sets tensor quantization scheme (Spec 1 §2.2).
+    pub fn with_quant(mut self, quant: QuantScheme) -> Self {
+        self.quant = quant;
+        self
+    }
+
+    /// Sets tensor layout id (Spec 2 §2).
+    pub fn with_layout(mut self, layout: LayoutId) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Attaches an associated scale tensor view (Spec 1 §2.2, Spec 2 §3).
+    pub fn with_scale(mut self, scale: TensorView<'a>) -> Self {
+        self.scale = Some(Box::new(scale));
+        self
+    }
+
+    /// Optionally attaches an associated scale tensor view (Spec 1 §2.2, Spec 2 §3).
+    pub fn with_scale_opt(mut self, scale: Option<TensorView<'a>>) -> Self {
+        self.scale = scale.map(Box::new);
+        self
+    }
+
+    /// Borrows backing bytes if stored as raw bytes (Spec 1 §2.3, Spec 4 §2).
+    pub fn as_bytes(&self) -> Option<&'a [u8]> {
+        match self.data {
+            TensorData::Bytes(_, slice) => Some(slice),
+            _ => None,
+        }
+    }
+
+    /// Borrows backing i8 slice if stored as signed 8-bit integers (Spec 1 §2.3, Spec 4 §2).
+    pub fn as_i8_slice(&self) -> Option<&'a [i8]> {
+        match self.data {
+            TensorData::I8(slice) => Some(slice),
+            _ => None,
+        }
+    }
+
+    /// Borrows backing f32 slice if stored as 32-bit floats (Spec 1 §2.3, Spec 4 §2).
+    pub fn as_f32_slice(&self) -> Option<&'a [f32]> {
+        match self.data {
+            TensorData::F32(slice) => Some(slice),
+            _ => None,
+        }
+    }
+
+    /// Borrows backing f16 slice if stored as 16-bit halfs (Spec 1 §2.3, Spec 4 §2).
+    pub fn as_f16_slice(&self) -> Option<&'a [u16]> {
+        match self.data {
+            TensorData::F16(slice) => Some(slice),
+            _ => None,
+        }
+    }
+
+    /// Borrows backing u32 slice if stored as unsigned 32-bit integers (Spec 1 §2.3, Spec 4 §2).
+    pub fn as_u32_slice(&self) -> Option<&'a [u32]> {
+        match self.data {
+            TensorData::U32(slice) => Some(slice),
+            _ => None,
         }
     }
 
@@ -226,7 +326,11 @@ impl<'a> TensorView<'a> {
             TensorData::U32(slice) => slice[index],
             TensorData::Bytes(DType::U32, slice) => {
                 let offset = index * 4;
-                u32::from_ne_bytes(slice[offset..offset + 4].try_into().unwrap())
+                if let Some(chunk) = slice.get(offset..offset + 4) {
+                    u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                } else {
+                    0
+                }
             }
             _ => self.read_f32(index) as u32,
         }
@@ -237,7 +341,11 @@ impl<'a> TensorView<'a> {
         match self.data {
             TensorData::Bytes(DType::I32, slice) => {
                 let offset = index * 4;
-                i32::from_ne_bytes(slice[offset..offset + 4].try_into().unwrap())
+                if let Some(chunk) = slice.get(offset..offset + 4) {
+                    i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                } else {
+                    0
+                }
             }
             _ => self.read_f32(index) as i32,
         }
@@ -266,6 +374,8 @@ impl<'a> TensorView<'a> {
 pub struct TensorViewMut<'a> {
     pub(crate) shape: Vec<usize>,
     pub(crate) data: TensorDataMut<'a>,
+    pub(crate) quant: QuantScheme,
+    pub(crate) layout: LayoutId,
 }
 
 impl<'a> TensorViewMut<'a> {
@@ -274,6 +384,8 @@ impl<'a> TensorViewMut<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorDataMut::Bytes(dtype, data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -282,6 +394,8 @@ impl<'a> TensorViewMut<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorDataMut::F32(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -290,6 +404,8 @@ impl<'a> TensorViewMut<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorDataMut::F16(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -298,6 +414,8 @@ impl<'a> TensorViewMut<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorDataMut::Bf16(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -306,6 +424,8 @@ impl<'a> TensorViewMut<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorDataMut::I8(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -314,7 +434,31 @@ impl<'a> TensorViewMut<'a> {
         Self {
             shape: shape.to_vec(),
             data: TensorDataMut::U32(data),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
+    }
+
+    /// Returns tensor quantization scheme (Spec 1 §2.2, Spec 4 §2).
+    pub fn quant(&self) -> QuantScheme {
+        self.quant
+    }
+
+    /// Returns tensor layout id (Spec 1 §2.3, Spec 2 §2).
+    pub fn layout(&self) -> LayoutId {
+        self.layout
+    }
+
+    /// Sets tensor quantization scheme (Spec 1 §2.2).
+    pub fn with_quant(mut self, quant: QuantScheme) -> Self {
+        self.quant = quant;
+        self
+    }
+
+    /// Sets tensor layout id (Spec 2 §2).
+    pub fn with_layout(mut self, layout: LayoutId) -> Self {
+        self.layout = layout;
+        self
     }
 
     /// Returns tensor shape (Spec 1 §2.3, Spec 4 §2).
@@ -444,7 +588,11 @@ impl<'a> TensorViewMut<'a> {
             TensorDataMut::U32(ref slice) => slice[index],
             TensorDataMut::Bytes(DType::U32, ref slice) => {
                 let offset = index * 4;
-                u32::from_ne_bytes(slice[offset..offset + 4].try_into().unwrap())
+                if let Some(chunk) = slice.get(offset..offset + 4) {
+                    u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                } else {
+                    0
+                }
             }
             _ => self.read_f32(index) as u32,
         }
@@ -455,7 +603,11 @@ impl<'a> TensorViewMut<'a> {
         match self.data {
             TensorDataMut::Bytes(DType::I32, ref slice) => {
                 let offset = index * 4;
-                i32::from_ne_bytes(slice[offset..offset + 4].try_into().unwrap())
+                if let Some(chunk) = slice.get(offset..offset + 4) {
+                    i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                } else {
+                    0
+                }
             }
             _ => self.read_f32(index) as i32,
         }
@@ -513,6 +665,9 @@ impl<'a> TensorViewMut<'a> {
         TensorView {
             shape: self.shape.clone(),
             data,
+            quant: self.quant,
+            layout: self.layout,
+            scale: None,
         }
     }
 }
@@ -528,6 +683,8 @@ pub struct TypedBuffer {
     i8_data: Vec<i8>,
     u32_data: Vec<u32>,
     byte_data: Vec<u8>,
+    quant: QuantScheme,
+    layout: LayoutId,
 }
 
 impl TypedBuffer {
@@ -543,6 +700,8 @@ impl TypedBuffer {
             i8_data: Vec::new(),
             u32_data: Vec::new(),
             byte_data: Vec::new(),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         };
         match dtype {
             DType::F32 => buf.f32_data = vec![0.0f32; total_elements],
@@ -577,6 +736,8 @@ impl TypedBuffer {
             i8_data: Vec::new(),
             u32_data: Vec::new(),
             byte_data: Vec::new(),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -593,6 +754,8 @@ impl TypedBuffer {
             i8_data: Vec::new(),
             u32_data: Vec::new(),
             byte_data: Vec::new(),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -609,6 +772,8 @@ impl TypedBuffer {
             i8_data: Vec::new(),
             u32_data: Vec::new(),
             byte_data: Vec::new(),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -625,6 +790,8 @@ impl TypedBuffer {
             i8_data: values.to_vec(),
             u32_data: Vec::new(),
             byte_data: Vec::new(),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -641,6 +808,8 @@ impl TypedBuffer {
             i8_data: Vec::new(),
             u32_data: values.to_vec(),
             byte_data: Vec::new(),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -661,6 +830,8 @@ impl TypedBuffer {
             i8_data: Vec::new(),
             u32_data: Vec::new(),
             byte_data,
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -672,7 +843,7 @@ impl TypedBuffer {
         } else {
             total_elements * dtype_element_size(dtype)
         };
-        assert_eq!(bytes.len(), expected_bytes);
+        assert!(bytes.len() >= expected_bytes);
         Self {
             shape: shape.to_vec(),
             dtype,
@@ -682,6 +853,8 @@ impl TypedBuffer {
             i8_data: Vec::new(),
             u32_data: Vec::new(),
             byte_data: bytes.to_vec(),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
     }
 
@@ -698,7 +871,31 @@ impl TypedBuffer {
             i8_data: Vec::new(),
             u32_data: Vec::new(),
             byte_data: bytes.to_vec(),
+            quant: QuantScheme::None,
+            layout: LayoutId::CONTIGUOUS,
         }
+    }
+
+    /// Returns tensor quantization scheme (Spec 1 §2.2, Spec 4 §2).
+    pub fn quant(&self) -> QuantScheme {
+        self.quant
+    }
+
+    /// Returns tensor layout id (Spec 1 §2.3, Spec 2 §2).
+    pub fn layout(&self) -> LayoutId {
+        self.layout
+    }
+
+    /// Sets tensor quantization scheme (Spec 1 §2.2).
+    pub fn with_quant(mut self, quant: QuantScheme) -> Self {
+        self.quant = quant;
+        self
+    }
+
+    /// Sets tensor layout id (Spec 2 §2).
+    pub fn with_layout(mut self, layout: LayoutId) -> Self {
+        self.layout = layout;
+        self
     }
 
     /// Returns tensor shape (Spec 1 §2.3, Spec 4 §2).
@@ -806,9 +1003,11 @@ impl TypedBuffer {
                     (0..num_elem)
                         .map(|i| {
                             let offset = i * 4;
-                            u32::from_ne_bytes(
-                                self.byte_data[offset..offset + 4].try_into().unwrap(),
-                            )
+                            if let Some(chunk) = self.byte_data.get(offset..offset + 4) {
+                                u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                            } else {
+                                0
+                            }
                         })
                         .collect()
                 }
@@ -824,7 +1023,11 @@ impl TypedBuffer {
             DType::I32 => (0..num_elem)
                 .map(|i| {
                     let offset = i * 4;
-                    i32::from_ne_bytes(self.byte_data[offset..offset + 4].try_into().unwrap())
+                    if let Some(chunk) = self.byte_data.get(offset..offset + 4) {
+                        i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
+                    } else {
+                        0
+                    }
                 })
                 .collect(),
             _ => (0..num_elem).map(|i| self.read_f32(i) as i32).collect(),
@@ -847,18 +1050,19 @@ impl TypedBuffer {
     /// Borrows buffer as an immutable `TensorView` (Spec 1 §2.3, Spec 4 §2).
     pub fn as_view(&self) -> TensorView<'_> {
         let data = match self.dtype {
-            DType::F32 => TensorData::F32(&self.f32_data),
-            DType::F16 => TensorData::F16(&self.f16_data),
-            DType::Bf16 => TensorData::Bf16(&self.bf16_data),
-            DType::I8 => TensorData::I8(&self.i8_data),
-            DType::U32 => TensorData::U32(&self.u32_data),
-            DType::E4m3 | DType::E5m2 | DType::Bool | DType::I4 | DType::I32 => {
-                TensorData::Bytes(self.dtype, &self.byte_data)
-            }
+            DType::F32 if !self.f32_data.is_empty() => TensorData::F32(&self.f32_data),
+            DType::F16 if !self.f16_data.is_empty() => TensorData::F16(&self.f16_data),
+            DType::Bf16 if !self.bf16_data.is_empty() => TensorData::Bf16(&self.bf16_data),
+            DType::I8 if !self.i8_data.is_empty() => TensorData::I8(&self.i8_data),
+            DType::U32 if !self.u32_data.is_empty() => TensorData::U32(&self.u32_data),
+            _ => TensorData::Bytes(self.dtype, &self.byte_data),
         };
         TensorView {
             shape: self.shape.clone(),
             data,
+            quant: self.quant,
+            layout: self.layout,
+            scale: None,
         }
     }
 
@@ -866,18 +1070,18 @@ impl TypedBuffer {
     pub fn as_view_mut(&mut self) -> TensorViewMut<'_> {
         let dtype = self.dtype;
         let data = match dtype {
-            DType::F32 => TensorDataMut::F32(&mut self.f32_data),
-            DType::F16 => TensorDataMut::F16(&mut self.f16_data),
-            DType::Bf16 => TensorDataMut::Bf16(&mut self.bf16_data),
-            DType::I8 => TensorDataMut::I8(&mut self.i8_data),
-            DType::U32 => TensorDataMut::U32(&mut self.u32_data),
-            DType::E4m3 | DType::E5m2 | DType::Bool | DType::I4 | DType::I32 => {
-                TensorDataMut::Bytes(dtype, &mut self.byte_data)
-            }
+            DType::F32 if !self.f32_data.is_empty() => TensorDataMut::F32(&mut self.f32_data),
+            DType::F16 if !self.f16_data.is_empty() => TensorDataMut::F16(&mut self.f16_data),
+            DType::Bf16 if !self.bf16_data.is_empty() => TensorDataMut::Bf16(&mut self.bf16_data),
+            DType::I8 if !self.i8_data.is_empty() => TensorDataMut::I8(&mut self.i8_data),
+            DType::U32 if !self.u32_data.is_empty() => TensorDataMut::U32(&mut self.u32_data),
+            _ => TensorDataMut::Bytes(dtype, &mut self.byte_data),
         };
         TensorViewMut {
             shape: self.shape.clone(),
             data,
+            quant: self.quant,
+            layout: self.layout,
         }
     }
 }

@@ -2,7 +2,7 @@
 #![allow(clippy::needless_range_loop)]
 //! API shape verification for r9v-t0 crate (CONVENTIONS.md §3, Cards A1.5 and A1.8).
 
-use r9v_ir::{SamplingParams, VerifyMethod};
+use r9v_ir::{DType, SamplingParams, VerifyMethod};
 use r9v_t0::*;
 
 fn assert_send<T: Send>() {}
@@ -338,4 +338,105 @@ fn test_public_function_signatures() {
     assert_eq!(words.len(), 4);
     let u = u32_to_unit_f32(words[0]);
     assert!(u > 0.0 && u < 1.0);
+
+    // Verify A1.6 op signatures
+    let x = TypedBuffer::from_f32(&[2, 4], &[1.0; 8]);
+    let w_bytes: Vec<u8> = vec![0u8; 4 * 4 * 2];
+    let w = TypedBuffer::from_bytes(&[4, 4], DType::F16, &w_bytes);
+    let mut y = TypedBuffer::zeros(&[2, 4], DType::F32);
+    let mat_op = r9v_ir::MatmulOp {
+        out_dtype: DType::F32,
+        epilogue: r9v_ir::Epilogue::None,
+        transpose_w: false,
+    };
+    assert!(matmul(
+        &mat_op,
+        &x.as_view(),
+        &w.as_view(),
+        None,
+        None,
+        &mut y.as_view_mut()
+    )
+    .is_ok());
+
+    let indices = TypedBuffer::from_u32(&[2], &[0u32, 1]);
+    let gather_op = r9v_ir::GatherRowsOp;
+    assert!(gather_rows(
+        &gather_op,
+        &x.as_view(),
+        &indices.as_view(),
+        &mut y.as_view_mut()
+    )
+    .is_ok());
+
+    let scatter_op = r9v_ir::ScatterAddRowsOp;
+    let mut y_scatter = TypedBuffer::zeros(&[2, 4], DType::F32);
+    assert!(scatter_add_rows(
+        &scatter_op,
+        &x.as_view(),
+        &indices.as_view(),
+        None,
+        &mut y_scatter.as_view_mut()
+    )
+    .is_ok());
+
+    let embed_op = r9v_ir::EmbedGatherOp {
+        scale: 1.0,
+        out_dtype: DType::F32,
+    };
+    let table = TypedBuffer::from_bytes(&[4, 4], DType::F16, &w_bytes);
+    let mut y_embed = TypedBuffer::zeros(&[2, 4], DType::F32);
+    assert!(embed_gather(
+        &embed_op,
+        &indices.as_view(),
+        &table.as_view(),
+        &mut y_embed.as_view_mut()
+    )
+    .is_ok());
+}
+
+#[test]
+fn test_execute_matmul_and_lookup_op_dispatch() {
+    use r9v_ir::{DType, EmbedGatherOp, Epilogue, GatherRowsOp, MatmulOp, Op, ScatterAddRowsOp};
+
+    let x = TypedBuffer::from_f32(&[2, 4], &[1.0; 8]);
+    let w_bytes: Vec<u8> = vec![0u8; 4 * 4 * 2];
+    let w = TypedBuffer::from_bytes(&[4, 4], DType::F16, &w_bytes);
+    let mut y = TypedBuffer::zeros(&[2, 4], DType::F32);
+
+    // execute_matmul_op
+    let mat_op = MatmulOp {
+        out_dtype: DType::F32,
+        epilogue: Epilogue::None,
+        transpose_w: false,
+    };
+    let inputs = [x.as_view(), w.as_view()];
+    let mut outputs = [y.as_view_mut()];
+    assert!(execute_matmul_op(&mat_op, &inputs, &mut outputs).is_ok());
+
+    // Arity mismatch for execute_matmul_op
+    assert!(execute_matmul_op(&mat_op, &[], &mut outputs).is_err());
+
+    // execute_lookup_op: GatherRows
+    let indices = TypedBuffer::from_u32(&[2], &[0u32, 1]);
+    let gather_op = Op::GatherRows(GatherRowsOp);
+    let gather_inputs = [x.as_view(), indices.as_view()];
+    let mut gather_outputs = [y.as_view_mut()];
+    assert!(execute_lookup_op(&gather_op, &gather_inputs, &mut gather_outputs).is_ok());
+
+    // execute_lookup_op: EmbedGather
+    let embed_op = Op::EmbedGather(EmbedGatherOp {
+        scale: 1.0,
+        out_dtype: DType::F32,
+    });
+    let table = TypedBuffer::from_bytes(&[4, 4], DType::F16, &w_bytes);
+    let embed_inputs = [indices.as_view(), table.as_view()];
+    let mut embed_outputs = [y.as_view_mut()];
+    assert!(execute_lookup_op(&embed_op, &embed_inputs, &mut embed_outputs).is_ok());
+
+    // execute_lookup_op: ScatterAddRows
+    let scatter_op = Op::ScatterAddRows(ScatterAddRowsOp);
+    let scatter_inputs = [x.as_view(), indices.as_view()];
+    let mut scatter_outputs = [y.as_view_mut()];
+    assert!(execute_lookup_op(&scatter_op, &scatter_inputs, &mut scatter_outputs).is_ok());
 }

@@ -11,6 +11,58 @@ pub enum T0Error {
     #[error(transparent)]
     Ir(#[from] r9v_ir::IrError),
 
+    /// Wrapping a format-level error from `r9v-format`.
+    #[error(transparent)]
+    Format(#[from] r9v_format::FormatError),
+
+    /// Tensor quantization scheme mismatch.
+    #[error("tensor `{tensor}`: expected quant scheme {expected:?}, got {got:?}")]
+    QuantMismatch {
+        /// Name of the affected tensor operand.
+        tensor: &'static str,
+        /// Expected legal quantization schemes.
+        expected: Vec<r9v_ir::QuantScheme>,
+        /// Observed quantization scheme.
+        got: r9v_ir::QuantScheme,
+    },
+
+    /// Tensor layout mismatch.
+    #[error("tensor `{tensor}`: expected layout {expected:?}, got {got:?}")]
+    LayoutMismatch {
+        /// Name of the affected tensor operand.
+        tensor: &'static str,
+        /// Expected legal layout ids.
+        expected: Vec<r9v_ir::LayoutId>,
+        /// Observed layout id.
+        got: r9v_ir::LayoutId,
+    },
+
+    /// A row or token index falls outside valid bounds.
+    #[error(
+        "index {index} at `{tensor}[{position}]` is outside bounds 0..{upper_bound} in op `{op}`"
+    )]
+    RowIndexOutOfRange {
+        /// Op name.
+        op: &'static str,
+        /// Tensor name.
+        tensor: &'static str,
+        /// Flat position of the invalid index.
+        position: usize,
+        /// Observed invalid index.
+        index: u32,
+        /// Upper bound.
+        upper_bound: usize,
+    },
+
+    /// Numeric or shape calculation overflow.
+    #[error("arithmetic overflow in op `{op}`: {detail}")]
+    ArithmeticOverflow {
+        /// Op name.
+        op: &'static str,
+        /// Detail of what overflowed.
+        detail: String,
+    },
+
     /// Tensor rank mismatch.
     #[error("tensor `{tensor}`: expected rank {expected}, got {got} with shape {shape:?}")]
     RankMismatch {
