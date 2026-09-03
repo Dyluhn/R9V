@@ -20,7 +20,7 @@
     "layers": [
       {
         "layer_index": 0,
-        "norm_placement": "sandwich",
+        "norm_placement": "post",
         "norm_kind": {
           "kind": "rms",
           "eps": 0.00001,
@@ -50,19 +50,21 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "silu",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       },
       {
         "layer_index": 1,
-        "norm_placement": "sandwich",
+        "norm_placement": "post",
         "norm_kind": {
           "kind": "rms",
           "eps": 0.00001,
@@ -92,46 +94,44 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "silu",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       }
     ]
   },
   "bound_weights": [
     "token_embd.weight",
-    "blk.0.attn_norm.weight",
     "blk.0.attn_q.weight",
     "blk.0.attn_k.weight",
     "blk.0.attn_v.weight",
     "blk.0.attn_q_norm.weight",
     "blk.0.attn_k_norm.weight",
     "blk.0.attn_output.weight",
-    "blk.0.post_attn_norm.weight",
-    "blk.0.ffn_norm.weight",
+    "blk.0.post_attention_norm.weight",
     "blk.0.ffn_gate.weight",
     "blk.0.ffn_up.weight",
     "blk.0.ffn_down.weight",
-    "blk.0.post_ffn_norm.weight",
-    "blk.1.attn_norm.weight",
+    "blk.0.post_ffw_norm.weight",
     "blk.1.attn_q.weight",
     "blk.1.attn_k.weight",
     "blk.1.attn_v.weight",
     "blk.1.attn_q_norm.weight",
     "blk.1.attn_k_norm.weight",
     "blk.1.attn_output.weight",
-    "blk.1.post_attn_norm.weight",
-    "blk.1.ffn_norm.weight",
+    "blk.1.post_attention_norm.weight",
     "blk.1.ffn_gate.weight",
     "blk.1.ffn_up.weight",
     "blk.1.ffn_down.weight",
-    "blk.1.post_ffn_norm.weight",
+    "blk.1.post_ffw_norm.weight",
     "output_norm.weight",
     "output.weight"
   ],
@@ -141,7 +141,7 @@
       "handle_layer": 0,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "all"
     },
     {
@@ -149,7 +149,7 @@
       "handle_layer": 1,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "all"
     }
   ],

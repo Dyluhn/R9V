@@ -43,6 +43,9 @@ pub trait GgufMeta {
     /// Reads a list of u32 values by key.
     fn u32_array(&self, key: &str) -> Result<Vec<u32>, ModelsError>;
 
+    /// Reads a list of boolean values by key (Spec 8 §4, §10; card A1.4).
+    fn bool_array(&self, key: &str) -> Result<Vec<bool>, ModelsError>;
+
     /// Reads an optional string value.
     fn get_str(&self, key: &str) -> Result<Option<&str>, ModelsError> {
         if self.has(key) {
@@ -78,6 +81,24 @@ pub trait GgufMeta {
             Ok(None)
         }
     }
+
+    /// Reads an optional list of u32 values.
+    fn get_u32_array(&self, key: &str) -> Result<Option<Vec<u32>>, ModelsError> {
+        if self.has(key) {
+            self.u32_array(key).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Reads an optional list of boolean values.
+    fn get_bool_array(&self, key: &str) -> Result<Option<Vec<bool>>, ModelsError> {
+        if self.has(key) {
+            self.bool_array(key).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
 }
 
 /// Dynamic value stored in [`SyntheticGgufMeta`] (Spec 8 §4; card A1.3).
@@ -99,6 +120,8 @@ pub enum MetaValue {
     StrArray(Vec<String>),
     /// List of u32 metadata values.
     U32Array(Vec<u32>),
+    /// List of boolean metadata values (Spec 8 §4; card A1.4).
+    BoolArray(Vec<bool>),
 }
 
 /// In-memory synthetic GGUF metadata implementation for testing and fixtures (Spec 8 §4, §8; card A1.3).
@@ -158,6 +181,12 @@ impl SyntheticGgufMeta {
     /// Inserts an array of u32 values.
     pub fn insert_u32_array(&mut self, key: impl Into<String>, val: Vec<u32>) -> &mut Self {
         self.entries.insert(key.into(), MetaValue::U32Array(val));
+        self
+    }
+
+    /// Inserts an array of boolean values (Spec 8 §4; card A1.4).
+    pub fn insert_bool_array(&mut self, key: impl Into<String>, val: Vec<bool>) -> &mut Self {
+        self.entries.insert(key.into(), MetaValue::BoolArray(val));
         self
     }
 
@@ -310,6 +339,21 @@ impl GgufMeta for SyntheticGgufMeta {
             None => Err(ModelsError::MissingMetaKey {
                 key: key.to_string(),
                 expected_type: "array of u32",
+            }),
+        }
+    }
+
+    fn bool_array(&self, key: &str) -> Result<Vec<bool>, ModelsError> {
+        match self.entries.get(key) {
+            Some(MetaValue::BoolArray(v)) => Ok(v.clone()),
+            Some(other) => Err(ModelsError::MetaTypeMismatch {
+                key: key.to_string(),
+                expected: "array of bool",
+                found: format!("{other:?}"),
+            }),
+            None => Err(ModelsError::MissingMetaKey {
+                key: key.to_string(),
+                expected_type: "array of bool",
             }),
         }
     }

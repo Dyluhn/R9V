@@ -19,7 +19,7 @@
 //! | FFN dim | `<arch>` | `<arch>.feed_forward_length` | u32 | yes | Feed-forward intermediate dimension `dff` (> 0) |
 //! | Query heads | `<arch>` | `<arch>.attention.head_count` | u32 | yes | Attention query heads `h` (> 0) |
 //! | KV heads | `<arch>` | `<arch>.attention.head_count_kv` | u32 | no | Key/value heads `hkv` (defaults to `h`) |
-//! | Key dimension | `<arch>` | `<arch>.attention.key_length` | u32 | no | Head key dimension `d` (defaults to `dm / h`) |
+//! | Key dimension | `<arch>` | `<arch>.attention.key_length` | u32 | no | Head key dimension `d` (required for gemma2/gemma3; defaults to `dm / h` for others) |
 //! | Value dimension | `<arch>` | `<arch>.attention.value_length` | u32 | no | Head value dimension `dv` (defaults to `d`) |
 //! | RMSNorm epsilon | `<arch>` | `<arch>.attention.layer_norm_rms_epsilon` | f32 | yes* | Epsilon floor (> 0); also accepts `layer_norm_epsilon`, `norm_epsilon` |
 //! | RoPE base theta | `<arch>` | `<arch>.rope.freq_base` | f32 | no | Base frequency (defaults per architecture) |
@@ -32,13 +32,13 @@
 //! | RoPE scaling beta fast | `<arch>` | `<arch>.rope.scaling.beta_fast` / `yarn_beta_fast` | f32 | no | YaRN fast beta (defaults to 32.0) |
 //! | RoPE scaling beta slow | `<arch>` | `<arch>.rope.scaling.beta_slow` / `yarn_beta_slow` | f32 | no | YaRN slow beta (defaults to 1.0) |
 //! | Sliding window size | `<arch>` | `<arch>.attention.sliding_window` | u32 | no | Sliding window size (or `sliding_window_size`) |
-//! | Sliding window pattern | `<arch>` | `<arch>.attention.sliding_window_pattern` | array of u32 | no | Per-layer window pattern override |
+//! | Sliding window pattern | `<arch>` | `<arch>.attention.sliding_window_pattern` | u32, array of u32, or array of bool | no | Per-layer pattern: scalar period, u32 array, or bool array (Muse form) |
 //! | Attention sinks | `<arch>` | `<arch>.attention.sinks` | u32 | no | Initial sinks (defaults to 0, requires window) |
-//! | Attention softcap | `<arch>` | `<arch>.attention.logit_softcapping` | f32 | no | Attention logits softcapping (defaults 50.0 on gemma2) |
+//! | Attention softcap | `<arch>` | `<arch>.attn_logit_softcapping` | f32 | no | Canonical attention softcap (defaults 50.0 on gemma2; legacy `attention.logit_softcapping` accepted) |
 //! | Final softcap | `<arch>` | `<arch>.final_logit_softcapping` | f32 | no | Output logits softcapping (defaults 30.0 on gemma2) |
 //! | Tied embeddings | `<arch>`/gen | `<arch>.tie_word_embeddings` / `general.tie_word_embeddings` | bool | no | Defaults true for gemma2/gemma3, false for others |
 //! | Embed scale | `<arch>` | `<arch>.embed_scale` | f32 | no | Defaults sqrt(dm) for gemma2/gemma3, 1.0 for others |
-//! | QKV bias | `<arch>` | `<arch>.attention.qkv_bias` | bool | no | Defaults true for qwen2/qwen3, false for others |
+//! | QKV bias | `<arch>` | `<arch>.attention.qkv_bias` | bool | no | Defaults true for qwen2, false for others |
 //! | Output bias | `<arch>` | `<arch>.attention.o_bias` | bool | no | Defaults false |
 //! | QK norm | `<arch>` | `<arch>.attention.qk_norm` | bool | no | Defaults true for qwen3/olmo2/gemma3, false for others |
 //! | Output gate | `<arch>` | `<arch>.attention.output_gate` | bool | no | Defaults false |
@@ -129,7 +129,7 @@ pub const ACCEPTED_METADATA_KEYS: &[AcceptedKeyDef] = &[
         key: "<arch>.attention.key_length",
         expected_type: "u32",
         required: false,
-        description: "Head key dimension d (defaults to dm / h)",
+        description: "Head key dimension d (required for gemma2 and gemma3; defaults to dm / h for others)",
     },
     AcceptedKeyDef {
         semantic: "value_length",
@@ -146,6 +146,22 @@ pub const ACCEPTED_METADATA_KEYS: &[AcceptedKeyDef] = &[
         expected_type: "f32",
         required: true,
         description: "RMSNorm variance epsilon; layer_norm_epsilon accepted as fallback",
+    },
+    AcceptedKeyDef {
+        semantic: "layer_norm_epsilon_legacy",
+        arch_scope: "<arch>",
+        key: "<arch>.attention.layer_norm_epsilon",
+        expected_type: "f32",
+        required: false,
+        description: "Legacy fallback epsilon when layer_norm_rms_epsilon is absent",
+    },
+    AcceptedKeyDef {
+        semantic: "norm_epsilon_legacy",
+        arch_scope: "<arch>",
+        key: "<arch>.norm_epsilon",
+        expected_type: "f32",
+        required: false,
+        description: "Legacy fallback epsilon when attention epsilon keys are absent",
     },
     AcceptedKeyDef {
         semantic: "rope_freq_base",
@@ -228,12 +244,28 @@ pub const ACCEPTED_METADATA_KEYS: &[AcceptedKeyDef] = &[
         description: "Sliding window attention size w (or sliding_window_size)",
     },
     AcceptedKeyDef {
+        semantic: "sliding_window_size_alt",
+        arch_scope: "<arch>",
+        key: "<arch>.attention.sliding_window_size",
+        expected_type: "u32",
+        required: false,
+        description: "Alternate sliding window size key when sliding_window is absent",
+    },
+    AcceptedKeyDef {
+        semantic: "context_length_fallback",
+        arch_scope: "<arch>",
+        key: "<arch>.context_length",
+        expected_type: "u32",
+        required: false,
+        description: "Model context length; fallback for YaRN original context",
+    },
+    AcceptedKeyDef {
         semantic: "sliding_window_pattern",
         arch_scope: "<arch>",
         key: "<arch>.attention.sliding_window_pattern",
-        expected_type: "array of u32",
+        expected_type: "u32, array of u32, or array of bool",
         required: false,
-        description: "Explicit per-layer sliding window pattern array override",
+        description: "Explicit per-layer sliding window pattern (scalar period, array of u32, or array of bool)",
     },
     AcceptedKeyDef {
         semantic: "attention_sinks",
@@ -244,12 +276,20 @@ pub const ACCEPTED_METADATA_KEYS: &[AcceptedKeyDef] = &[
         description: "Initial attention sink token count (requires sliding window)",
     },
     AcceptedKeyDef {
-        semantic: "logit_softcapping",
+        semantic: "attn_logit_softcapping",
+        arch_scope: "<arch>",
+        key: "<arch>.attn_logit_softcapping",
+        expected_type: "f32",
+        required: false,
+        description: "Canonical attention logit softcapping threshold (defaults to 50.0 for gemma2)",
+    },
+    AcceptedKeyDef {
+        semantic: "logit_softcapping_legacy",
         arch_scope: "<arch>",
         key: "<arch>.attention.logit_softcapping",
         expected_type: "f32",
         required: false,
-        description: "Attention logit softcapping threshold (defaults to 50.0 for gemma2)",
+        description: "Legacy fallback key for attention logit softcapping",
     },
     AcceptedKeyDef {
         semantic: "final_logit_softcapping",
@@ -602,6 +642,12 @@ pub fn build_for_arch(
                 None
             }
         }
+    } else if arch == "gemma2" || arch == "gemma3" {
+        problems.push(ModelsError::MissingMetaKey {
+            key: key_len_key.clone(),
+            expected_type: "u32",
+        });
+        None
     } else {
         // Derive from dm / h if both valid
         match (dm, h) {
@@ -1082,16 +1128,32 @@ pub fn build_for_arch(
     };
 
     // 16. Softcapping
-    // DECISION(A1.4): softcapping defaults: logit_softcap Some(50.0) and final_logit_softcap Some(30.0) for gemma2 per Spec 8 §3; None for all other seven families unless explicitly specified in metadata; rejected: applying softcapping to gemma3 where QK-norm proactively bounds logit growth. Spec 8 §3, §4. Documented in SI-52.
+    // DECISION(A1.4): softcapping defaults: logit_softcap Some(50.0) and final_logit_softcap Some(30.0) for gemma2 per Spec 8 §3; None for all other seven families unless explicitly specified in metadata; rejected: applying softcapping to gemma3 where QK-norm proactively bounds logit growth. Spec 8 §3, §4, SI-42.
     let default_attn_softcap = if arch == "gemma2" { Some(50.0) } else { None };
     let default_final_softcap = if arch == "gemma2" { Some(30.0) } else { None };
 
-    let attn_softcap_key = format!("{arch}.attention.logit_softcapping");
-    let attn_softcap = match meta.get_f32(&attn_softcap_key) {
+    // DECISION(A1.4): probe canonical {arch}.attn_logit_softcapping first; accept legacy {arch}.attention.logit_softcapping for backward compatibility per SI-42; rejected ignoring canonical GGUF key naming. Spec 8 §4, SI-42.
+    let canonical_attn_softcap_key = format!("{arch}.attn_logit_softcapping");
+    let legacy_attn_softcap_key = format!("{arch}.attention.logit_softcapping");
+    let (chosen_attn_softcap_key, raw_attn_softcap) = if meta.has(&canonical_attn_softcap_key) {
+        (
+            canonical_attn_softcap_key.clone(),
+            meta.get_f32(&canonical_attn_softcap_key),
+        )
+    } else if meta.has(&legacy_attn_softcap_key) {
+        (
+            legacy_attn_softcap_key.clone(),
+            meta.get_f32(&legacy_attn_softcap_key),
+        )
+    } else {
+        (canonical_attn_softcap_key.clone(), Ok(None))
+    };
+
+    let attn_softcap = match raw_attn_softcap {
         Ok(Some(cap)) => {
             if !cap.is_finite() || cap <= 0.0 {
                 problems.push(ModelsError::InvalidModelSpec {
-                    reason: format!("{attn_softcap_key} must be finite and > 0, got {cap}"),
+                    reason: format!("{chosen_attn_softcap_key} must be finite and > 0, got {cap}"),
                 });
                 None
             } else {
@@ -1125,8 +1187,8 @@ pub fn build_for_arch(
     };
 
     // 17. QKV Bias and Output Bias
-    // DECISION(A1.4): bias defaults: qkv_bias true for qwen2 and qwen3 (Qwen QKV bias contract); false for llama, mistral, gemma2, gemma3, phi3, olmo2, unless <arch>.attention.qkv_bias is present; o_bias is false across all eight families unless explicitly set; rejected: defaulting false for all because Qwen attention requires QKV projection biases. Spec 8 §3.
-    let default_qkv_bias = matches!(arch, "qwen2" | "qwen3");
+    // DECISION(A1.4): bias defaults: qkv_bias true for qwen2 only and false for llama, mistral, qwen3, gemma2, gemma3, phi3, and olmo2, unless <arch>.attention.qkv_bias is present; o_bias is false across all eight families unless explicitly set; rejected: treating qwen3 like qwen2 because production Qwen3 checkpoints omit Q/K/V bias tensors. Spec 8 §3, §4.
+    let default_qkv_bias = arch == "qwen2";
     let qkv_bias_key = format!("{arch}.attention.qkv_bias");
     let qkv_bias = match meta.get_bool(&qkv_bias_key) {
         Ok(Some(b)) => b,
@@ -1207,9 +1269,15 @@ pub fn build_for_arch(
     };
 
     // 21. Normalization placement and spec
-    // DECISION(A1.4): OLMo 2 normalization placement mapped to NormPlacement::Sandwich per Spec 8 §4 sandwich norm switch, with NormPlacement::Sandwich for gemma2, gemma3, olmo2, and Pre for llama, mistral, qwen2, qwen3, phi3; NormSpec weight_offset 1.0 (NormSpec::gemma(eps)) for gemma2 and gemma3, 0.0 for others; rejected: adding a dedicated Post variant to NormPlacement because NormPlacement is a closed set in Spec 8 §3. Documented in SI-50. Spec 8 §3, §4.
+    // DECISION(A1.4): OLMo 2 normalization placement maps to the honest
+    // NormPlacement::Post contract: no input pre-norm, then canonical
+    // post_attention_norm/post_ffw_norm on each sublayer branch before residual
+    // addition. Gemma 2/3 remain Sandwich; the other families remain Pre.
+    // Rejected mapping OLMo 2 to Sandwich because that binds nonexistent
+    // attn_norm/ffn_norm weights. Spec 8 §3, §4.
     let norm_placement = match arch {
-        "gemma2" | "gemma3" | "olmo2" => NormPlacement::Sandwich,
+        "olmo2" => NormPlacement::Post,
+        "gemma2" | "gemma3" => NormPlacement::Sandwich,
         _ => NormPlacement::Pre,
     };
 
@@ -1220,7 +1288,7 @@ pub fn build_for_arch(
     };
 
     // 22. Sliding window and heterogeneous window patterns
-    // DECISION(A1.4): Gemma 2 heterogeneous sliding window alternates 1:1 (even layers local with sliding window, odd layers global), and Gemma 3 uses 5:1 local-to-global ratio with 6-layer period (every 6th layer global, remaining local), unless overridden by explicit metadata; rejected: requiring explicit per-layer array metadata in every checkpoint file because GGUF checkpoints supply only scalar sliding_window. Spec 8 §4. Documented in SI-51.
+    // DECISION(A1.4): Gemma 2 heterogeneous sliding window alternates 1:1 (even layers local with sliding window, odd layers global), and Gemma 3 uses 5:1 local-to-global ratio with 6-layer period (every 6th layer global, remaining local), unless overridden by explicit metadata; rejected: requiring explicit per-layer array metadata in every checkpoint file because GGUF checkpoints supply only scalar sliding_window. Spec 8 §4, SI-41.
     let sw_primary_key = format!("{arch}.attention.sliding_window");
     let sw_alt_key = format!("{arch}.attention.sliding_window_size");
     let sliding_window_size = if meta.has(&sw_primary_key) {
@@ -1273,18 +1341,85 @@ pub fn build_for_arch(
         }
     };
 
+    #[derive(Debug, Clone, PartialEq)]
+    enum SlidingWindowPattern {
+        Period(u32),
+        BoolArray(Vec<bool>),
+        U32Array(Vec<u32>),
+    }
+
     let pattern_key = format!("{arch}.attention.sliding_window_pattern");
     let explicit_pattern = if meta.has(&pattern_key) {
-        match meta.u32_array(&pattern_key) {
-            Ok(arr) => Some(arr),
-            Err(e) => {
-                problems.push(e);
-                None
+        // Probe scalar u32 period first
+        match meta.u32(&pattern_key) {
+            Ok(period) => {
+                if period == 0 {
+                    problems.push(ModelsError::InvalidModelSpec {
+                        reason: format!("{pattern_key} period must be > 0, got 0"),
+                    });
+                    None
+                } else {
+                    Some(SlidingWindowPattern::Period(period))
+                }
+            }
+            Err(_) => {
+                // Probe bool array (e.g. Muse GGUF format: [True, True, True, False, ...])
+                match meta.bool_array(&pattern_key) {
+                    Ok(bools) => {
+                        if bools.is_empty() {
+                            problems.push(ModelsError::InvalidModelSpec {
+                                reason: format!("{pattern_key} array must not be empty"),
+                            });
+                            None
+                        } else {
+                            Some(SlidingWindowPattern::BoolArray(bools))
+                        }
+                    }
+                    Err(_) => {
+                        // Probe u32 array (e.g. [1, 1, 0, ...] or explicit window sizes)
+                        match meta.u32_array(&pattern_key) {
+                            Ok(u32s) => {
+                                if u32s.is_empty() {
+                                    problems.push(ModelsError::InvalidModelSpec {
+                                        reason: format!("{pattern_key} array must not be empty"),
+                                    });
+                                    None
+                                } else {
+                                    for &v in &u32s {
+                                        if v > MAX_WINDOW {
+                                            problems.push(ModelsError::InvalidModelSpec {
+                                                reason: format!(
+                                                    "{pattern_key} element ({v}) exceeds implementation limit {MAX_WINDOW}"
+                                                ),
+                                            });
+                                        }
+                                    }
+                                    Some(SlidingWindowPattern::U32Array(u32s))
+                                }
+                            }
+                            Err(_) => {
+                                problems.push(ModelsError::MetaTypeMismatch {
+                                    key: pattern_key.clone(),
+                                    expected: "u32, array of u32, or array of bool",
+                                    found: "unsupported or malformed sliding window pattern type"
+                                        .to_string(),
+                                });
+                                None
+                            }
+                        }
+                    }
+                }
             }
         }
     } else {
         None
     };
+
+    if explicit_pattern.is_some() && sliding_window_size.is_none() {
+        problems.push(ModelsError::InvalidModelSpec {
+            reason: format!("{pattern_key} requires a base sliding window size ({sw_primary_key})"),
+        });
+    }
 
     // 23. Attention sinks
     let sinks_key = format!("{arch}.attention.sinks");
@@ -1383,16 +1518,32 @@ pub fn build_for_arch(
     let mut layers = Vec::with_capacity(num_layers as usize);
     for i in 0..num_layers {
         let layer_window = if let Some(pattern) = &explicit_pattern {
-            if pattern.is_empty() {
-                sliding_window_size
-            } else {
-                let p = pattern[(i as usize) % pattern.len()];
-                if p == 0 {
-                    None
-                } else if p == 1 {
-                    sliding_window_size
-                } else {
-                    Some(p)
+            match pattern {
+                SlidingWindowPattern::Period(period) => {
+                    let is_local = (i % period) < (period - 1);
+                    if is_local {
+                        sliding_window_size
+                    } else {
+                        None
+                    }
+                }
+                SlidingWindowPattern::BoolArray(bools) => {
+                    let is_local = bools[(i as usize) % bools.len()];
+                    if is_local {
+                        sliding_window_size
+                    } else {
+                        None
+                    }
+                }
+                SlidingWindowPattern::U32Array(u32s) => {
+                    let p = u32s[(i as usize) % u32s.len()];
+                    if p == 0 {
+                        None
+                    } else if p == 1 {
+                        sliding_window_size
+                    } else {
+                        Some(p)
+                    }
                 }
             }
         } else if arch == "gemma2" {
@@ -1425,6 +1576,8 @@ pub fn build_for_arch(
             });
         }
 
+        let pre_fused = arch == "phi3";
+
         let mixer = Mixer::Attention {
             h: h_val,
             hkv: hkv_val,
@@ -1439,7 +1592,8 @@ pub fn build_for_arch(
             logit_softcap: attn_softcap,
             output_gate,
             mla: None,
-            cache: CacheDtype::E4m3,
+            cache: CacheDtype::E4M3,
+            pre_fused,
         };
 
         let ffn = Ffn::Dense {
@@ -1447,6 +1601,7 @@ pub fn build_for_arch(
             act,
             gated: true,
             bias: false,
+            pre_fused,
         };
 
         layers.push(LayerSpec {

@@ -46,14 +46,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": true
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "silu",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": true
         }
       },
       {
@@ -84,14 +86,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": true
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "silu",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": true
         }
       }
     ]
@@ -99,21 +103,15 @@
   "bound_weights": [
     "token_embd.weight",
     "blk.0.attn_norm.weight",
-    "blk.0.attn_q.weight",
-    "blk.0.attn_k.weight",
-    "blk.0.attn_v.weight",
+    "blk.0.attn_qkv.weight",
     "blk.0.attn_output.weight",
     "blk.0.ffn_norm.weight",
-    "blk.0.ffn_gate.weight",
     "blk.0.ffn_up.weight",
     "blk.0.ffn_down.weight",
     "blk.1.attn_norm.weight",
-    "blk.1.attn_q.weight",
-    "blk.1.attn_k.weight",
-    "blk.1.attn_v.weight",
+    "blk.1.attn_qkv.weight",
     "blk.1.attn_output.weight",
     "blk.1.ffn_norm.weight",
-    "blk.1.ffn_gate.weight",
     "blk.1.ffn_up.weight",
     "blk.1.ffn_down.weight",
     "output_norm.weight",
@@ -125,7 +123,7 @@
       "handle_layer": 0,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(2048)"
     },
     {
@@ -133,41 +131,10 @@
       "handle_layer": 1,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(2048)"
     }
   ],
-  "fusion_declarations": [
-    {
-      "kind": "qkv",
-      "tensors": [
-        "blk.0.attn_q.weight",
-        "blk.0.attn_k.weight",
-        "blk.0.attn_v.weight"
-      ]
-    },
-    {
-      "kind": "gate_up",
-      "tensors": [
-        "blk.0.ffn_gate.weight",
-        "blk.0.ffn_up.weight"
-      ]
-    },
-    {
-      "kind": "qkv",
-      "tensors": [
-        "blk.1.attn_q.weight",
-        "blk.1.attn_k.weight",
-        "blk.1.attn_v.weight"
-      ]
-    },
-    {
-      "kind": "gate_up",
-      "tensors": [
-        "blk.1.ffn_gate.weight",
-        "blk.1.ffn_up.weight"
-      ]
-    }
-  ],
+  "fusion_declarations": [],
   "tied_declarations": []
 }

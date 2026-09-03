@@ -159,6 +159,7 @@ fn test_synthetic_gguf_meta_typed_access() {
         vec!["<s>".to_string(), "</s>".to_string()],
     );
     meta.insert_u32_array("tokenizer.ggml.merges", vec![10, 20, 30]);
+    meta.insert_bool_array("test.pattern", vec![true, false, true]);
 
     assert!(meta.has("general.architecture"));
     assert!(!meta.has("nonexistent"));
@@ -176,12 +177,21 @@ fn test_synthetic_gguf_meta_typed_access() {
         meta.u32_array("tokenizer.ggml.merges").unwrap(),
         vec![10, 20, 30]
     );
+    assert_eq!(
+        meta.bool_array("test.pattern").unwrap(),
+        vec![true, false, true]
+    );
 
     // Optional getters
     assert_eq!(meta.get_str("general.architecture").unwrap(), Some("llama"));
     assert_eq!(meta.get_str("nonexistent").unwrap(), None);
     assert_eq!(meta.get_u32("llama.context_length").unwrap(), Some(8192));
     assert_eq!(meta.get_u32("nonexistent").unwrap(), None);
+    assert_eq!(
+        meta.get_bool_array("test.pattern").unwrap(),
+        Some(vec![true, false, true])
+    );
+    assert_eq!(meta.get_bool_array("nonexistent").unwrap(), None);
 
     // Missing key error
     let err = meta.str("missing.key").unwrap_err();
@@ -189,6 +199,8 @@ fn test_synthetic_gguf_meta_typed_access() {
 
     // Type mismatch error
     let err = meta.u32("general.architecture").unwrap_err();
+    assert!(matches!(err, ModelsError::MetaTypeMismatch { .. }));
+    let err = meta.bool_array("general.architecture").unwrap_err();
     assert!(matches!(err, ModelsError::MetaTypeMismatch { .. }));
 }
 

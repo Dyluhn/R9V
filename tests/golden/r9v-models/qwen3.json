@@ -33,7 +33,7 @@
           "hkv": 2,
           "d": 32,
           "dv": 32,
-          "qkv_bias": true,
+          "qkv_bias": false,
           "o_bias": false,
           "qk_norm": {
             "kind": "rms",
@@ -50,14 +50,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "silu",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       },
       {
@@ -75,7 +77,7 @@
           "hkv": 2,
           "d": 32,
           "dv": 32,
-          "qkv_bias": true,
+          "qkv_bias": false,
           "o_bias": false,
           "qk_norm": {
             "kind": "rms",
@@ -92,14 +94,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "silu",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       }
     ]
@@ -108,11 +112,8 @@
     "token_embd.weight",
     "blk.0.attn_norm.weight",
     "blk.0.attn_q.weight",
-    "blk.0.attn_q.bias",
     "blk.0.attn_k.weight",
-    "blk.0.attn_k.bias",
     "blk.0.attn_v.weight",
-    "blk.0.attn_v.bias",
     "blk.0.attn_q_norm.weight",
     "blk.0.attn_k_norm.weight",
     "blk.0.attn_output.weight",
@@ -122,11 +123,8 @@
     "blk.0.ffn_down.weight",
     "blk.1.attn_norm.weight",
     "blk.1.attn_q.weight",
-    "blk.1.attn_q.bias",
     "blk.1.attn_k.weight",
-    "blk.1.attn_k.bias",
     "blk.1.attn_v.weight",
-    "blk.1.attn_v.bias",
     "blk.1.attn_q_norm.weight",
     "blk.1.attn_k_norm.weight",
     "blk.1.attn_output.weight",
@@ -143,7 +141,7 @@
       "handle_layer": 0,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "all"
     },
     {
@@ -151,7 +149,7 @@
       "handle_layer": 1,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "all"
     }
   ],

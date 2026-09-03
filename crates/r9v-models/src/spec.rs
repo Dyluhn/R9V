@@ -90,6 +90,8 @@ pub enum NormPlacement {
     Sandwich,
     /// Parallel formulation: attention and FFN both compute from the same pre-norm input (GPT-J/Falcon).
     Parallel,
+    /// Post-normalization: `x = x + post_norm(sublayer(x))` (e.g. OLMo 2). Mixer and FFN receive raw stream before residual addition.
+    Post,
 }
 
 /// Parameterized normalization specification (Spec 8 §3; Spec 1 §4.B).
@@ -297,6 +299,8 @@ pub enum Mixer {
         mla: Option<MlaSpec>,
         /// Cache storage data type.
         cache: CacheDtype,
+        /// Whether QKV projections are pre-fused in checkpoint weights (e.g. Phi-3 `blk.N.attn_qkv.weight`).
+        pre_fused: bool,
     },
     /// Linear Attention or Structured State-Space Model scan (Spec 8 §3).
     LinearAttention {
@@ -352,6 +356,8 @@ pub enum Ffn {
         gated: bool,
         /// Whether projections include bias vectors.
         bias: bool,
+        /// Whether Gate and Up projections are pre-fused in checkpoint weights (e.g. Phi-3 `blk.N.ffn_up.weight`).
+        pre_fused: bool,
     },
     /// Mixture of Experts feed-forward network (Spec 8 §3).
     Moe {
@@ -428,6 +434,7 @@ impl LayerSpec {
                 sinks,
                 logit_softcap,
                 mla,
+                pre_fused,
                 ..
             } => {
                 if *h == 0 {
@@ -490,6 +497,13 @@ impl LayerSpec {
                     // rejecting it (per-side norms in the generic builder);
                     // nothing to refuse here beyond the norm's own validation
                     // above. SI-29.
+                }
+                if *pre_fused && mla.is_some() {
+                    problems.push(ModelsError::InvalidLayerSpec {
+                        layer: layer_idx,
+                        reason: "pre-fused QKV topology is incompatible with MLA compression"
+                            .to_string(),
+                    });
                 }
                 check_layer_dim(&mut problems, layer_idx, "h", *h, MAX_ATTENTION_HEADS);
                 check_layer_dim(&mut problems, layer_idx, "hkv", *hkv, MAX_KV_HEADS);
@@ -558,11 +572,22 @@ impl LayerSpec {
         }
 
         match &self.ffn {
-            Ffn::Dense { dff, .. } => {
+            Ffn::Dense {
+                dff,
+                gated,
+                pre_fused,
+                ..
+            } => {
                 if *dff == 0 {
                     problems.push(ModelsError::InvalidLayerSpec {
                         layer: layer_idx,
                         reason: "dense FFN intermediate dimension dff must be > 0".to_string(),
+                    });
+                }
+                if *pre_fused && !*gated {
+                    problems.push(ModelsError::InvalidLayerSpec {
+                        layer: layer_idx,
+                        reason: "pre-fused FFN topology requires gated formulation".to_string(),
                     });
                 }
                 check_layer_dim(&mut problems, layer_idx, "dff", *dff, MAX_FEATURE_DIM);

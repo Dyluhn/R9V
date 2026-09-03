@@ -46,14 +46,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "silu",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       },
       {
@@ -84,14 +86,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "silu",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       }
     ]
@@ -125,7 +129,7 @@
       "handle_layer": 0,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(4096)"
     },
     {
@@ -133,7 +137,7 @@
       "handle_layer": 1,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(4096)"
     }
   ],

@@ -47,6 +47,7 @@ fn tiny_mixer() -> Mixer {
         output_gate: false,
         mla: None,
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     }
 }
 
@@ -418,6 +419,7 @@ fn mla_mixer() -> Mixer {
             v_dim: 48,
         }),
         cache: CacheDtype::E4m3,
+        pre_fused: false,
     }
 }
 
@@ -555,6 +557,7 @@ fn residual_scale_lowers_exactly() {
         act: ActivationKind::Silu,
         gated: true,
         bias: false,
+        pre_fused: false,
     };
     let model = tiny_model(vec![layer]);
     let graph = build_model(Graph::new(IrVersion::CURRENT, "a114-scale"), &model)

@@ -50,14 +50,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "gelu_tanh",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       },
       {
@@ -92,14 +94,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "gelu_tanh",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       },
       {
@@ -134,14 +138,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "gelu_tanh",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       },
       {
@@ -176,14 +182,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "gelu_tanh",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       },
       {
@@ -218,14 +226,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "gelu_tanh",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       },
       {
@@ -260,14 +270,16 @@
           "sinks": 0,
           "logit_softcap": null,
           "output_gate": false,
-          "cache_dtype": "e4m3"
+          "cache_dtype": "e4m3",
+          "pre_fused": false
         },
         "ffn": {
           "kind": "dense",
           "dff": 256,
           "act": "gelu_tanh",
           "gated": true,
-          "bias": false
+          "bias": false,
+          "pre_fused": false
         }
       }
     ]
@@ -281,12 +293,12 @@
     "blk.0.attn_q_norm.weight",
     "blk.0.attn_k_norm.weight",
     "blk.0.attn_output.weight",
-    "blk.0.post_attn_norm.weight",
+    "blk.0.post_attention_norm.weight",
     "blk.0.ffn_norm.weight",
     "blk.0.ffn_gate.weight",
     "blk.0.ffn_up.weight",
     "blk.0.ffn_down.weight",
-    "blk.0.post_ffn_norm.weight",
+    "blk.0.post_ffw_norm.weight",
     "blk.1.attn_norm.weight",
     "blk.1.attn_q.weight",
     "blk.1.attn_k.weight",
@@ -294,12 +306,12 @@
     "blk.1.attn_q_norm.weight",
     "blk.1.attn_k_norm.weight",
     "blk.1.attn_output.weight",
-    "blk.1.post_attn_norm.weight",
+    "blk.1.post_attention_norm.weight",
     "blk.1.ffn_norm.weight",
     "blk.1.ffn_gate.weight",
     "blk.1.ffn_up.weight",
     "blk.1.ffn_down.weight",
-    "blk.1.post_ffn_norm.weight",
+    "blk.1.post_ffw_norm.weight",
     "blk.2.attn_norm.weight",
     "blk.2.attn_q.weight",
     "blk.2.attn_k.weight",
@@ -307,12 +319,12 @@
     "blk.2.attn_q_norm.weight",
     "blk.2.attn_k_norm.weight",
     "blk.2.attn_output.weight",
-    "blk.2.post_attn_norm.weight",
+    "blk.2.post_attention_norm.weight",
     "blk.2.ffn_norm.weight",
     "blk.2.ffn_gate.weight",
     "blk.2.ffn_up.weight",
     "blk.2.ffn_down.weight",
-    "blk.2.post_ffn_norm.weight",
+    "blk.2.post_ffw_norm.weight",
     "blk.3.attn_norm.weight",
     "blk.3.attn_q.weight",
     "blk.3.attn_k.weight",
@@ -320,12 +332,12 @@
     "blk.3.attn_q_norm.weight",
     "blk.3.attn_k_norm.weight",
     "blk.3.attn_output.weight",
-    "blk.3.post_attn_norm.weight",
+    "blk.3.post_attention_norm.weight",
     "blk.3.ffn_norm.weight",
     "blk.3.ffn_gate.weight",
     "blk.3.ffn_up.weight",
     "blk.3.ffn_down.weight",
-    "blk.3.post_ffn_norm.weight",
+    "blk.3.post_ffw_norm.weight",
     "blk.4.attn_norm.weight",
     "blk.4.attn_q.weight",
     "blk.4.attn_k.weight",
@@ -333,12 +345,12 @@
     "blk.4.attn_q_norm.weight",
     "blk.4.attn_k_norm.weight",
     "blk.4.attn_output.weight",
-    "blk.4.post_attn_norm.weight",
+    "blk.4.post_attention_norm.weight",
     "blk.4.ffn_norm.weight",
     "blk.4.ffn_gate.weight",
     "blk.4.ffn_up.weight",
     "blk.4.ffn_down.weight",
-    "blk.4.post_ffn_norm.weight",
+    "blk.4.post_ffw_norm.weight",
     "blk.5.attn_norm.weight",
     "blk.5.attn_q.weight",
     "blk.5.attn_k.weight",
@@ -346,12 +358,12 @@
     "blk.5.attn_q_norm.weight",
     "blk.5.attn_k_norm.weight",
     "blk.5.attn_output.weight",
-    "blk.5.post_attn_norm.weight",
+    "blk.5.post_attention_norm.weight",
     "blk.5.ffn_norm.weight",
     "blk.5.ffn_gate.weight",
     "blk.5.ffn_up.weight",
     "blk.5.ffn_down.weight",
-    "blk.5.post_ffn_norm.weight",
+    "blk.5.post_ffw_norm.weight",
     "output_norm.weight",
     "output.weight"
   ],
@@ -361,7 +373,7 @@
       "handle_layer": 0,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(1024)"
     },
     {
@@ -369,7 +381,7 @@
       "handle_layer": 1,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(1024)"
     },
     {
@@ -377,7 +389,7 @@
       "handle_layer": 2,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(1024)"
     },
     {
@@ -385,7 +397,7 @@
       "handle_layer": 3,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(1024)"
     },
     {
@@ -393,7 +405,7 @@
       "handle_layer": 4,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "window(1024)"
     },
     {
@@ -401,7 +413,7 @@
       "handle_layer": 5,
       "state_kind": "KvPaged",
       "dim": 32,
-      "cache": "E4m3",
+      "cache": "E4M3",
       "retain": "all"
     }
   ],

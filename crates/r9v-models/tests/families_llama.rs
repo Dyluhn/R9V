@@ -13,14 +13,15 @@
 use std::path::PathBuf;
 
 use r9v_ir::op::{ActivationKind, NormKind, RopeScaling, RopeStyle};
+use r9v_ir::tensor::Dim;
 use r9v_ir::version::IrVersion;
 use r9v_models::builder::{FusionDecl, Graph, ModelGraph};
 use r9v_models::families;
 use r9v_models::generic::build_model;
 use r9v_models::meta::SyntheticGgufMeta;
 use r9v_models::spec::{
-    CacheDtype, Ffn, LayerSpec, Mixer, ModelSpec, NormPlacement, NormSpec, PositionEncoding,
-    Retain, RopeSpec, StateSpec,
+    Ffn, LayerSpec, Mixer, ModelSpec, NormPlacement, NormSpec, PositionEncoding, Retain, RopeSpec,
+    StateSpec,
 };
 use r9v_models::ModelsError;
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,7 @@ struct GoldenMixer {
     logit_softcap: Option<f32>,
     output_gate: bool,
     cache_dtype: String,
+    pre_fused: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -89,6 +91,7 @@ struct GoldenFfn {
     act: String,
     gated: bool,
     bias: bool,
+    pre_fused: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -173,6 +176,7 @@ fn convert_layer_spec(index: usize, layer: &LayerSpec) -> GoldenLayerSpec {
         NormPlacement::Pre => "pre".to_string(),
         NormPlacement::Sandwich => "sandwich".to_string(),
         NormPlacement::Parallel => "parallel".to_string(),
+        NormPlacement::Post => "post".to_string(),
     };
 
     let mixer = match &layer.mixer {
@@ -196,6 +200,7 @@ fn convert_layer_spec(index: usize, layer: &LayerSpec) -> GoldenLayerSpec {
             logit_softcap: None,
             output_gate: false,
             cache_dtype: "".to_string(),
+            pre_fused: false,
         },
         Mixer::LinearAttention { .. } => unreachable!("linear attention not in llama family"),
         Mixer::Attention {
@@ -212,6 +217,7 @@ fn convert_layer_spec(index: usize, layer: &LayerSpec) -> GoldenLayerSpec {
             logit_softcap,
             output_gate,
             cache,
+            pre_fused,
             ..
         } => GoldenMixer {
             kind: "attention".to_string(),
@@ -227,11 +233,8 @@ fn convert_layer_spec(index: usize, layer: &LayerSpec) -> GoldenLayerSpec {
             sinks: *sinks,
             logit_softcap: *logit_softcap,
             output_gate: *output_gate,
-            cache_dtype: match cache {
-                CacheDtype::E4m3 => "e4m3".to_string(),
-                CacheDtype::I8 => "i8".to_string(),
-                CacheDtype::F16 => "f16".to_string(),
-            },
+            cache_dtype: cache.name().to_string(),
+            pre_fused: *pre_fused,
         },
     };
 
@@ -242,12 +245,15 @@ fn convert_layer_spec(index: usize, layer: &LayerSpec) -> GoldenLayerSpec {
             act: "".to_string(),
             gated: false,
             bias: false,
+            pre_fused: false,
         },
         Ffn::Dense {
             dff,
             act,
             gated,
             bias,
+            pre_fused,
+            ..
         } => GoldenFfn {
             kind: "dense".to_string(),
             dff: *dff,
@@ -260,6 +266,7 @@ fn convert_layer_spec(index: usize, layer: &LayerSpec) -> GoldenLayerSpec {
             },
             gated: *gated,
             bias: *bias,
+            pre_fused: *pre_fused,
         },
         Ffn::Moe { .. } => unreachable!("moe not in llama family"),
     };
@@ -326,16 +333,16 @@ fn generate_report(arch: &str, spec: &ModelSpec, graph: &ModelGraph) -> GoldenRe
             retain: match spec {
                 StateSpec::KvPaged { retain, .. } => match retain {
                     Retain::All => "all".to_string(),
-                    Retain::Window(w) => format!("window({w})"),
-                    Retain::SinkAndWindow { sinks, window } => {
-                        format!("window({window}, sinks={sinks})")
+                    Retain::Window { w } => format!("window({w})"),
+                    Retain::SinkWindow { n, w } => {
+                        format!("window({w}, sinks={n})")
                     }
                 },
                 StateSpec::KvLatent { retain, .. } => match retain {
                     Retain::All => "all".to_string(),
-                    Retain::Window(w) => format!("window({w})"),
-                    Retain::SinkAndWindow { sinks, window } => {
-                        format!("window({window}, sinks={sinks})")
+                    Retain::Window { w } => format!("window({w})"),
+                    Retain::SinkWindow { n, w } => {
+                        format!("window({w}, sinks={n})")
                     }
                 },
                 _ => "none".to_string(),
@@ -380,10 +387,10 @@ fn generate_report(arch: &str, spec: &ModelSpec, graph: &ModelGraph) -> GoldenRe
 fn assert_or_update_golden(name: &str, report: &GoldenReport) {
     let json_text =
         serde_json::to_string_pretty(report).expect("serialization must succeed") + "\n";
+    // CONVENTIONS.md §4.2: goldens live at workspace-root tests/golden/<crate>/.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let path = PathBuf::from(manifest_dir)
-        .join("tests")
-        .join("golden")
+        .join("../../tests/golden/r9v-models")
         .join(format!("{name}.json"));
 
     if std::env::var("R9V_UPDATE_GOLDEN").as_deref() == Ok("1") || !path.exists() {
@@ -719,7 +726,7 @@ fn test_qwen2_qkv_bias_and_no_qk_norm() {
 }
 
 #[test]
-fn test_qwen3_qkv_bias_and_qk_norm() {
+fn test_qwen3_no_qkv_bias_and_qk_norm() {
     let meta = fixture_qwen3();
     let spec = families::build(&meta).unwrap();
     for layer in &spec.layers {
@@ -727,7 +734,7 @@ fn test_qwen3_qkv_bias_and_qk_norm() {
             Mixer::Attention {
                 qkv_bias, qk_norm, ..
             } => {
-                assert!(*qkv_bias, "qwen3 must have qkv_bias");
+                assert!(!*qkv_bias, "qwen3 checkpoints omit QKV bias tensors");
                 assert!(qk_norm.is_some(), "qwen3 must have qk_norm");
             }
             _ => panic!("expected attention mixer"),
@@ -736,25 +743,57 @@ fn test_qwen3_qkv_bias_and_qk_norm() {
 }
 
 #[test]
-fn test_olmo2_sandwich_norm_and_qk_norm() {
+fn test_olmo2_post_norm_and_qk_norm() {
+    // OLMo 2 uses honest post-normalization: no pre-norm; mixer and
+    // FFN read the raw stream; post_attention_norm / post_ffw_norm normalize
+    // branch outputs before the residual add.
     let meta = fixture_olmo2();
     let spec = families::build(&meta).unwrap();
     for layer in &spec.layers {
-        assert_eq!(layer.norm, NormPlacement::Sandwich);
+        assert_eq!(layer.norm, NormPlacement::Post);
         assert_eq!(layer.norm_kind.weight_offset, 0.0);
         match &layer.mixer {
             Mixer::Attention {
                 qk_norm,
                 rope,
                 qkv_bias,
+                pre_fused,
                 ..
             } => {
                 assert!(qk_norm.is_some(), "olmo2 must have qk_norm");
                 assert_eq!(rope.theta, 500000.0, "olmo2 default theta is 500k");
                 assert!(!*qkv_bias, "olmo2 has no qkv bias");
+                assert!(!*pre_fused, "olmo2 uses split QKV projections");
             }
             _ => panic!("expected attention mixer"),
         }
+    }
+
+    // Graph bindings: post norms bound, pre-norms never bound.
+    let builder = Graph::new(IrVersion::CURRENT, "olmo2-post-norm");
+    let graph = build_model(builder, &spec).expect("olmo2 graph must build");
+    let names: Vec<&str> = graph
+        .bound_weights()
+        .iter()
+        .map(|w| w.name.as_str())
+        .collect();
+    for i in 0..spec.layers.len() {
+        assert!(
+            names.contains(&format!("blk.{i}.post_attention_norm.weight").as_str()),
+            "missing post_attention_norm for layer {i}"
+        );
+        assert!(
+            names.contains(&format!("blk.{i}.post_ffw_norm.weight").as_str()),
+            "missing post_ffw_norm for layer {i}"
+        );
+        assert!(
+            !names.contains(&format!("blk.{i}.attn_norm.weight").as_str()),
+            "olmo2 must not bind attn_norm for layer {i}"
+        );
+        assert!(
+            !names.contains(&format!("blk.{i}.ffn_norm.weight").as_str()),
+            "olmo2 must not bind ffn_norm for layer {i}"
+        );
     }
 }
 
@@ -1017,6 +1056,189 @@ fn test_explicit_sliding_window_pattern_override() {
     }
     match &spec.layers[2].mixer {
         Mixer::Attention { window, .. } => assert_eq!(*window, Some(1024)),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn test_phi3_prefused_qkv_ffn_bindings() {
+    // Phi-3 checkpoints pre-fuse QKV (blk.N.attn_qkv) and gate/up
+    // (blk.N.ffn_up); the graph must bind the fused weights with exact
+    // shapes and never the split projections.
+    let meta = fixture_phi3();
+    let spec = families::build(&meta).unwrap();
+    for layer in &spec.layers {
+        match &layer.mixer {
+            Mixer::Attention { pre_fused, .. } => assert!(*pre_fused),
+            _ => panic!("expected attention mixer"),
+        }
+        match &layer.ffn {
+            Ffn::Dense { pre_fused, .. } => assert!(*pre_fused),
+            _ => panic!("expected dense ffn"),
+        }
+    }
+    let builder = Graph::new(IrVersion::CURRENT, "phi3-prefused");
+    let graph = build_model(builder, &spec).expect("phi3 graph must build");
+    let weights = graph.bound_weights();
+    let shape_of = |name: &str| {
+        weights
+            .iter()
+            .find(|w| w.name == name)
+            .unwrap_or_else(|| panic!("missing bound weight {name}"))
+            .shape
+            .clone()
+    };
+    // Fixture: dm=128, h=4, hkv=2, d=dv=32 → q=128, k=64, v=64, qkv=256.
+    assert_eq!(
+        shape_of("blk.0.attn_qkv.weight"),
+        vec![Dim::Concrete(256), Dim::Concrete(128)]
+    );
+    // Fixture: dff=256 → fused gate/up rows 2*256=512.
+    assert_eq!(
+        shape_of("blk.0.ffn_up.weight"),
+        vec![Dim::Concrete(512), Dim::Concrete(128)]
+    );
+    for w in weights {
+        assert!(
+            !w.name.ends_with("attn_q.weight")
+                && !w.name.ends_with("attn_k.weight")
+                && !w.name.ends_with("attn_v.weight")
+                && !w.name.ends_with("ffn_gate.weight"),
+            "split projection must not be bound for pre-fused phi3: {}",
+            w.name
+        );
+    }
+}
+
+#[test]
+fn test_phi3_prefused_qkv_bias_binding() {
+    // With <arch>.attention.qkv_bias set, the fused bias binds with the
+    // full qkv width; the split biases must not appear.
+    let mut meta = fixture_phi3();
+    meta.insert_bool("phi3.attention.qkv_bias", true);
+    let spec = families::build(&meta).unwrap();
+    let builder = Graph::new(IrVersion::CURRENT, "phi3-prefused-bias");
+    let graph = build_model(builder, &spec).expect("phi3 graph must build");
+    let weights = graph.bound_weights();
+    let bias = weights
+        .iter()
+        .find(|w| w.name == "blk.0.attn_qkv.bias")
+        .expect("fused qkv bias must bind");
+    assert_eq!(bias.shape, vec![Dim::Concrete(256)]);
+    assert!(
+        weights.iter().all(|w| !w.name.ends_with("attn_q.bias")),
+        "split q bias must not bind for pre-fused phi3"
+    );
+}
+
+#[test]
+fn test_sliding_window_pattern_bool_array_musellama_form() {
+    // Actual Muse GGUF form: array of bool, e.g. [true, false].
+    let mut meta = fixture_llama();
+    meta.insert_u32("llama.block_count", 2);
+    meta.insert_u32("llama.attention.sliding_window", 2048);
+    meta.insert_bool_array("llama.attention.sliding_window_pattern", vec![true, false]);
+    let spec = families::build(&meta).unwrap();
+    match &spec.layers[0].mixer {
+        Mixer::Attention { window, .. } => assert_eq!(*window, Some(2048)),
+        _ => panic!(),
+    }
+    match &spec.layers[1].mixer {
+        Mixer::Attention { window, .. } => assert_eq!(*window, None),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn test_sliding_window_pattern_scalar_period() {
+    // Scalar u32 form: period N means layers (i % N) < N - 1 are local.
+    let mut meta = fixture_llama();
+    meta.insert_u32("llama.block_count", 3);
+    meta.insert_u32("llama.attention.sliding_window", 2048);
+    meta.insert_u32("llama.attention.sliding_window_pattern", 3);
+    let spec = families::build(&meta).unwrap();
+    for (i, layer) in spec.layers.iter().enumerate() {
+        match &layer.mixer {
+            Mixer::Attention { window, .. } => {
+                if i < 2 {
+                    assert_eq!(*window, Some(2048), "layer {i} should be local");
+                } else {
+                    assert_eq!(*window, None, "layer {i} should be global");
+                }
+            }
+            _ => panic!(),
+        }
+    }
+}
+
+#[test]
+fn test_sliding_window_pattern_requires_window() {
+    // An explicit pattern without a base sliding window size is refused.
+    let mut meta = fixture_llama();
+    meta.insert_u32("llama.block_count", 2);
+    meta.insert_bool_array("llama.attention.sliding_window_pattern", vec![true, false]);
+    let err = families::build(&meta).unwrap_err();
+    match err {
+        ModelsError::InvalidModelSpec { reason } => assert!(
+            reason.contains("requires a base sliding window size"),
+            "unexpected reason: {reason}"
+        ),
+        ModelsError::Multiple { problems } => assert!(problems.iter().any(|p| matches!(
+            p,
+            ModelsError::InvalidModelSpec { reason }
+            if reason.contains("requires a base sliding window size")
+        ))),
+        other => panic!("expected InvalidModelSpec, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_attn_logit_softcapping_canonical_key_first() {
+    // Canonical {arch}.attn_logit_softcapping wins (llama.cpp llama-arch
+    // LLM_KV_ATTN_LOGIT_SOFTCAPPING); legacy attention.logit_softcapping
+    // stays as fallback.
+    let mut meta = fixture_llama();
+    meta.insert_f32("llama.attn_logit_softcapping", 40.0);
+    meta.insert_f32("llama.attention.logit_softcapping", 20.0);
+    let spec = families::build(&meta).unwrap();
+    match &spec.layers[0].mixer {
+        Mixer::Attention { logit_softcap, .. } => assert_eq!(*logit_softcap, Some(40.0)),
+        _ => panic!(),
+    }
+
+    let mut meta = fixture_llama();
+    meta.insert_f32("llama.attention.logit_softcapping", 20.0);
+    let spec = families::build(&meta).unwrap();
+    match &spec.layers[0].mixer {
+        Mixer::Attention { logit_softcap, .. } => assert_eq!(*logit_softcap, Some(20.0)),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn test_gemma_key_length_required() {
+    // Gemma 2/3 refuse without an explicit key_length; other families
+    // default to dm / h.
+    let mut meta = fixture_gemma2();
+    meta.remove("gemma2.attention.key_length");
+    let err = families::build(&meta).unwrap_err();
+    match err {
+        ModelsError::MissingMetaKey { key, .. } => {
+            assert_eq!(key, "gemma2.attention.key_length")
+        }
+        ModelsError::Multiple { problems } => assert!(problems.iter().any(|p| matches!(
+            p,
+            ModelsError::MissingMetaKey { key, .. }
+            if key == "gemma2.attention.key_length"
+        ))),
+        other => panic!("expected MissingMetaKey, got {other:?}"),
+    }
+
+    let mut meta = fixture_llama();
+    meta.remove("llama.attention.key_length");
+    let spec = families::build(&meta).expect("llama defaults key_length to dm / h");
+    match &spec.layers[0].mixer {
+        Mixer::Attention { d, .. } => assert_eq!(*d, 32),
         _ => panic!(),
     }
 }
