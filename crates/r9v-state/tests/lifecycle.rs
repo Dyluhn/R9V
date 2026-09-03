@@ -27,7 +27,7 @@ fn long_create_free_history_reuses_everything_deterministically() {
             m.commit(a, 1).unwrap();
             meta
         };
-        assert_eq!(meta.block_table[0][0][0], 0);
+        assert_eq!(meta.block(0, 0, 0), 0);
         m.free_seq(a).unwrap();
         assert_eq!(m.free_blocks(0).unwrap(), total);
         // Freed ids are unknown immediately: no dead entries linger.

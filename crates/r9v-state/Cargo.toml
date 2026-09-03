@@ -9,4 +9,5 @@ description = "R9V KV cache sequence state, memory arenas, and block allocation 
 
 [dependencies]
 r9v-common = { path = "../r9v-common" }
+r9v-ir = { path = "../r9v-ir" }
 thiserror = "2.0"

@@ -211,6 +211,21 @@ impl BatchMeta {
         self.t
     }
 
+    /// Layer-group count as `usize` (`G`, Spec 3 §3.3).
+    pub fn num_groups(&self) -> usize {
+        self.g as usize
+    }
+
+    /// Sequence count as `usize` (`S`, Spec 1 §2.5).
+    pub fn num_seqs(&self) -> usize {
+        self.s as usize
+    }
+
+    /// Token count as `usize` (`T`, Spec 1 §2.5).
+    pub fn total_tokens(&self) -> usize {
+        self.t as usize
+    }
+
     /// Blocks per sequence per group, `ceil(max_ctx / 32)` (Spec 3 §3.3).
     pub fn max_blocks(&self) -> u32 {
         self.max_blocks

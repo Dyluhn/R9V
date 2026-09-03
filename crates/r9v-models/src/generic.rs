@@ -541,7 +541,11 @@ fn build_mixer_with_ns(
 
                 // Validated at the `LayerSpec` boundary; this `?` is the second
                 // line of defense for direct `build_mixer` callers.
-                let retain = Retain::from_window_sinks(*window, *sinks)?;
+                let retain = Retain::from_window_sinks(*window, *sinks).map_err(|e| {
+                    ModelsError::InvalidModelSpec {
+                        reason: e.to_string(),
+                    }
+                })?;
                 let handle = builder.state(
                     layer_idx,
                     StateSpec::KvLatent {
@@ -745,7 +749,11 @@ fn build_mixer_with_ns(
 
                 // Validated at the `LayerSpec` boundary; this `?` is the second
                 // line of defense for direct `build_mixer` callers.
-                let retain = Retain::from_window_sinks(*window, *sinks)?;
+                let retain = Retain::from_window_sinks(*window, *sinks).map_err(|e| {
+                    ModelsError::InvalidModelSpec {
+                        reason: e.to_string(),
+                    }
+                })?;
                 let handle = builder.state(
                     layer_idx,
                     StateSpec::KvPaged {

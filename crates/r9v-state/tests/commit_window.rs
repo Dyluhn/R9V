@@ -129,8 +129,8 @@ fn windowed_reserve_covers_full_range_when_n_exceeds_window() {
     assert_eq!(blocks.len(), 2);
     // The two blocks are distinct pool ids held by this sequence.
     let meta = m.batch_meta(&[a], &[64]).unwrap();
-    assert_eq!(meta.block_table[0][0][0], row[0] / 32);
-    assert_eq!(meta.block_table[0][0][1], row[32] / 32);
+    assert_eq!(meta.block(0, 0, 0), row[0] / 32);
+    assert_eq!(meta.block(0, 0, 1), row[32] / 32);
 
     let toks: Vec<u32> = (100..164).collect();
     m.write_tokens(a, 0, &toks).unwrap();

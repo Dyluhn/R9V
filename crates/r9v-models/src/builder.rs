@@ -24,7 +24,7 @@ use r9v_ir::version::IrVersion;
 use r9v_ir::{DType, LayoutId, QuantScheme};
 
 use crate::error::ModelsError;
-use crate::spec::{CacheDtype, NormSpec, PositionEncoding, RopeSpec, StateSpec};
+use crate::spec::{CacheDtype, NormSpec, PositionEncoding, RopeSpec, StateDecl, StateSpec};
 use crate::summary::{ExpertSummary, LayerSummary, MixerKind, ModelSummary, SchemeKey};
 
 mod sealed {
@@ -1301,6 +1301,14 @@ impl ModelGraph {
         &self.state_specs
     }
 
+    /// Emitted per-layer state declarations retaining declaring model layer indices (Spec 3 §2, Spec 8 §2).
+    pub fn state_declarations(&self) -> Vec<StateDecl> {
+        self.state_specs
+            .iter()
+            .map(|(l, s, _)| StateDecl::new(*l, *s))
+            .collect()
+    }
+
     /// Slices of all exported graph output values.
     pub fn exports(&self) -> &[(String, Value)] {
         &self.exports
@@ -1413,6 +1421,16 @@ impl ModelGraph {
 
             for (layer, spec, _) in &self.state_specs {
                 if *layer == l {
+                    if let StateSpec::KvPaged { hkv, .. } = spec {
+                        if *hkv > crate::spec::MAX_KV_HEADS {
+                            return Err(ModelsError::InvalidModelSpec {
+                                reason: format!(
+                                    "summary hkv {hkv} exceeds implementation limit {}",
+                                    crate::spec::MAX_KV_HEADS
+                                ),
+                            });
+                        }
+                    }
                     state_per_token_bytes =
                         checked_add_u64(state_per_token_bytes, spec.state_per_token_bytes()?, CTX)?;
                     state_per_seq_bytes =

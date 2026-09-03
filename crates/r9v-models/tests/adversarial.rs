@@ -257,7 +257,7 @@ fn state_spec_byte_overflow_returns_typed_error() {
     assert!(
         matches!(
             huge_paged.state_per_token_bytes().unwrap_err(),
-            ModelsError::ArithmeticOverflow { .. }
+            r9v_state::StateError::Overflow { .. } | r9v_state::StateError::InvalidConfig { .. }
         ),
         "paged KV overflow must be typed"
     );
@@ -270,7 +270,7 @@ fn state_spec_byte_overflow_returns_typed_error() {
     assert!(
         matches!(
             huge_recurrent.state_per_seq_bytes().unwrap_err(),
-            ModelsError::ArithmeticOverflow { .. }
+            r9v_state::StateError::Overflow { .. } | r9v_state::StateError::InvalidConfig { .. }
         ),
         "recurrent overflow must be typed"
     );
@@ -282,7 +282,7 @@ fn state_spec_byte_overflow_returns_typed_error() {
     assert!(
         matches!(
             huge_conv.state_per_seq_bytes().unwrap_err(),
-            ModelsError::ArithmeticOverflow { .. }
+            r9v_state::StateError::Overflow { .. } | r9v_state::StateError::InvalidConfig { .. }
         ),
         "conv window overflow must be typed"
     );
@@ -310,7 +310,8 @@ fn state_spec_byte_overflow_returns_typed_error() {
     };
     assert_eq!(recurrent.state_per_seq_bytes().expect("exact"), 8192);
     let conv = StateSpec::ConvWindow { c: 256, w: 4 };
-    assert_eq!(conv.state_per_seq_bytes().expect("exact"), 1536);
+    assert_eq!(conv.slot_bytes().expect("exact"), 1536);
+    assert_eq!(conv.state_per_seq_bytes().expect("exact"), 3072);
 }
 
 /// Summary totals that overflow `u64` report `ArithmeticOverflow`.
@@ -773,19 +774,16 @@ fn retain_sink_only_returns_typed_error_not_sentinel() {
     );
     assert_eq!(
         Retain::from_window_sinks(Some(128), 0).expect("window"),
-        Retain::Window(128)
+        Retain::Window { w: 128 }
     );
     assert_eq!(
         Retain::from_window_sinks(Some(128), 4).expect("sink plus window"),
-        Retain::SinkAndWindow {
-            sinks: 4,
-            window: 128
-        }
+        Retain::SinkWindow { n: 4, w: 128 }
     );
     let err = Retain::from_window_sinks(None, 4).unwrap_err();
     assert!(
-        matches!(err, ModelsError::InvalidModelSpec { .. }),
-        "sink-only retention is InvalidModelSpec: {err:?}"
+        matches!(err, r9v_state::StateError::InvalidConfig { .. }),
+        "sink-only retention is InvalidConfig: {err:?}"
     );
     let text = format!("{err:?}");
     assert!(
