@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! R9V CPU reference scalar T0 implementations
-//! (Spec 1 §4.B, §4.F, §6.4, §6.5, Spec 4 §2, Spec 7 §4, Cards A1.5 and A1.8).
+//! (Spec 1 §4.B, §4.D, §4.F, §6.3, §6.4, §6.5, Spec 3 §2, §3, Spec 4 §2,
+//! Spec 7 §4, Cards A1.5, A1.7 and A1.8).
 //!
 //! T0 serves as the primary ground-truth oracle for all engine operations.
 //! Implementations are scalar, strictly deterministic, accumulate in f32 (or i32),
@@ -8,6 +9,7 @@
 
 pub mod act_mul;
 pub mod activation;
+pub mod attention;
 pub mod buffer;
 pub mod cast;
 pub mod concat;
@@ -32,6 +34,11 @@ pub use act_mul::{act_mul, act_mul_f64_reference};
 pub use activation::{
     activation, activation_f64_reference, erf_f32, erf_f64, eval_activation_f32,
     eval_activation_f64,
+};
+pub use attention::{
+    attention, attention_mla, attention_paged, attention_row_f64_reference, mla_row_f64_reference,
+    state_write_kv, state_write_kv_latent, state_write_kv_paged, KvCache, KvLatentCache,
+    KvPagedCache,
 };
 pub use buffer::{TensorData, TensorDataMut, TensorView, TensorViewMut, TypedBuffer};
 pub use cast::{cast, cast_f64_reference};

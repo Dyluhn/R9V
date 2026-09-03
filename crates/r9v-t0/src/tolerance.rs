@@ -35,6 +35,22 @@ impl Tolerance {
         }
     }
 
+    /// Round-trip tolerance for e4m3 KV-cache rows (Spec 3 §2, Card A1.7).
+    ///
+    /// E4M3 carries 3 mantissa bits, so per-element rounding is bounded by
+    /// half a quantum (rel 1/16 at the bottom of each binade); the abs term
+    /// covers near-zero rows and subnormals. This bounds the cache grid only;
+    /// attention math against dequantized rows is checked at [`Self::f32`].
+    // DECISION(A1.7): new named tolerance entry rather than a literal in the
+    // test or a widened i8 entry; rejected reusing i8_weight (its rel 2e-2
+    // under-bounds the e4m3 grid) per CONVENTIONS.md §4.3.
+    pub const fn e4m3_cache() -> Self {
+        Self {
+            abs: 1e-2,
+            rel: 8e-2,
+        }
+    }
+
     /// Exact bitwise tolerance (L0 determinism, Spec 1 App. B).
     pub const fn exact() -> Self {
         Self { abs: 0.0, rel: 0.0 }

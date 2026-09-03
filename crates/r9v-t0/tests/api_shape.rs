@@ -25,6 +25,15 @@ fn test_trait_bounds_and_api_shapes() {
 
     assert_send::<TensorViewMut<'_>>();
     assert_sync::<TensorViewMut<'_>>();
+
+    assert_send::<KvPagedCache>();
+    assert_sync::<KvPagedCache>();
+
+    assert_send::<KvLatentCache>();
+    assert_sync::<KvLatentCache>();
+
+    assert_send::<KvCache>();
+    assert_sync::<KvCache>();
 }
 
 #[test]
