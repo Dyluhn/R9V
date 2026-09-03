@@ -66,3 +66,21 @@ fn double_reserve_without_commit_is_rejected() {
         "{err:?}"
     );
 }
+
+/// Allocation depends on request lengths alone: the token slice is only the
+/// future prefix-cache key, so different contents with the same lengths
+/// produce identical `BatchMeta` (Spec 3 §5).
+#[test]
+fn allocation_ignores_token_contents() {
+    let mut m1 = manager_for(config_128(), &[kv_all()]);
+    let mut m2 = manager_for(config_128(), &[kv_all()]);
+    let (a1, matched1) = m1.new_seq(&[1, 2, 3]).unwrap();
+    let (a2, matched2) = m2.new_seq(&[9, 9, 9]).unwrap();
+    assert_eq!(matched1, 0);
+    assert_eq!(matched2, 0);
+    m1.reserve(a1, 5).unwrap();
+    m2.reserve(a2, 5).unwrap();
+    let meta1 = m1.batch_meta(&[a1], &[5]).unwrap();
+    let meta2 = m2.batch_meta(&[a2], &[5]).unwrap();
+    assert_eq!(meta1, meta2);
+}

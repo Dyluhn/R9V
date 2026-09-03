@@ -95,6 +95,32 @@ pub enum StateError {
         tail: u32,
     },
 
+    /// `commit` refused: no outstanding reservation on this sequence.
+    ///
+    /// Every commit must pair with a prior `reserve` (Spec 3 §3.6); even a
+    /// zero accept with no open tail is a caller bug, not a no-op.
+    #[error("commit with no outstanding reservation on sequence {seq}")]
+    NoReservation {
+        /// The sequence id from the caller's `commit` argument.
+        seq: u64,
+    },
+
+    /// Slot lookup found no block for a retained position.
+    ///
+    /// `reserve` allocates every block touched by `ctx_len .. ctx_len + n`
+    /// before setting the tail, so a missing mapping here means the caller
+    /// asked for a position outside the reservation or the manager is
+    /// inconsistent; both fail closed instead of clamping to a neighbor.
+    #[error("no block mapped for group {group} position {pos} (reserved end {end})")]
+    UnmappedPosition {
+        /// Layer-group index (Spec 3 §6.1).
+        group: usize,
+        /// Absolute logical position with no mapped block.
+        pos: u32,
+        /// End of the reserved range (`ctx_len + tail_len`).
+        end: u32,
+    },
+
     /// `compact` refused: positions are out of range, duplicated, or there
     /// is no outstanding tail (Spec 3 §3.6 tree verify).
     #[error("invalid compact: len {len}, tail {tail}, detail {detail}")]

@@ -171,6 +171,25 @@ impl StateSpec {
 
     /// Validates one layer spec, collecting every problem (CONVENTIONS.md §1.4).
     pub(crate) fn validate(self, index: u32, out: &mut Vec<InvalidItem>) {
+        self.push_checks(index, out);
+    }
+
+    /// Rejects invalid dims/policies as a typed error instead of computing a
+    /// plausible value from them (e.g. a zero head count yielding zero bytes
+    /// that would silently size an empty pool).
+    fn check_dims(self) -> StateResult<()> {
+        let mut problems = Vec::new();
+        self.push_checks(u32::MAX, &mut problems);
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(StateError::invalid(problems))
+        }
+    }
+
+    /// Shared dimension/policy checks behind [`Self::validate`] and
+    /// [`Self::check_dims`].
+    fn push_checks(self, index: u32, out: &mut Vec<InvalidItem>) {
         match self {
             Self::KvPaged {
                 hkv, d, dv, retain, ..
@@ -211,7 +230,10 @@ impl StateSpec {
     ///
     /// `KvPaged`: `hkv * ((d + dv) * cache_bytes + 4)` (+4 for two f16
     /// scales). `KvLatent`: `latent * cache_bytes + 2 + rope * 2`.
+    /// Recurrent/conv layers page nothing, but their dims are still
+    /// validated: an invalid spec is a typed error, never `Ok(0)`.
     pub fn per_token_bytes(self) -> StateResult<u64> {
+        self.check_dims()?;
         let overflow = |what: &str| StateError::Overflow {
             what: what.to_owned(),
         };
@@ -254,7 +276,11 @@ impl StateSpec {
     ///
     /// `Recurrent`: `h * d * dv * 4`. `ConvWindow`: `(w - 1) * c * 2`.
     /// Paged specs return 0 (they page per token instead).
+    ///
+    /// Invalid dims are a typed error, never a plausible zero: `w = 0` must
+    /// not silently size an empty conv slot via a saturating subtract.
     pub fn slot_bytes(self) -> StateResult<u64> {
+        self.check_dims()?;
         let overflow = |what: &str| StateError::Overflow {
             what: what.to_owned(),
         };
@@ -264,10 +290,12 @@ impl StateSpec {
                 .and_then(|v| v.checked_mul(u64::from(dv)))
                 .and_then(|v| v.checked_mul(4))
                 .ok_or_else(|| overflow("recurrent slot")),
-            Self::ConvWindow { c, w } => u64::from(w.saturating_sub(1))
-                .checked_mul(u64::from(c))
-                .and_then(|v| v.checked_mul(2))
-                .ok_or_else(|| overflow("conv slot")),
+            Self::ConvWindow { c, w } => {
+                u64::from(w.checked_sub(1).ok_or_else(|| overflow("conv window"))?)
+                    .checked_mul(u64::from(c))
+                    .and_then(|v| v.checked_mul(2))
+                    .ok_or_else(|| overflow("conv slot"))
+            }
             Self::KvPaged { .. } | Self::KvLatent { .. } => Ok(0),
         }
     }

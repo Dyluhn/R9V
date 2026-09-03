@@ -100,6 +100,58 @@ fn multi_group_batch_meta_shapes_and_values() {
     }
 }
 
+/// After window eviction, each block id sits at its absolute logical block
+/// index with sentinel holes where eviction released blocks — never
+/// compacted to the front (Spec 3 §3.3, §3.5; SI-17).
+#[test]
+fn block_table_uses_absolute_indices_with_sentinel_holes() {
+    use common::{kv_window, manager_for};
+    use r9v_state::{StateConfig, BLOCK_SENTINEL};
+    // max_ctx 256: 8-wide rows; w = 64 so two blocks survive eviction.
+    let config = StateConfig {
+        max_ctx: 256,
+        max_seqs: 4,
+    };
+    let mut m = manager_for(config, &[kv_window(64)]);
+    let (a, _) = m.new_seq(&[]).unwrap();
+
+    // Four commits of 32 take pool ids 0, 1, 2, then reuse 0 at index 3;
+    // committing 128 with a 64 window evicts indices 0 and 1, holding
+    // index 2 (id 2) and index 3 (id 0).
+    for chunk in 0..4 {
+        let base = chunk * 32;
+        let toks: Vec<u32> = (base..base + 32).collect();
+        let ctx = m.ctx_len(a).unwrap();
+        m.reserve(a, 32).unwrap();
+        m.write_tokens(a, ctx, &toks).unwrap();
+        m.commit(a, 32).unwrap();
+    }
+    assert_eq!(m.ctx_len(a).unwrap(), 128);
+
+    // Reserve the next block: smallest free id (1) lands at absolute index 4.
+    m.reserve(a, 8).unwrap();
+    let meta = m.batch_meta(&[a], &[8]).unwrap();
+    assert_eq!(meta.max_blocks(), 8);
+    assert_eq!(
+        meta.block_table[0][0],
+        vec![
+            BLOCK_SENTINEL,
+            BLOCK_SENTINEL,
+            2,
+            0,
+            1,
+            BLOCK_SENTINEL,
+            BLOCK_SENTINEL,
+            BLOCK_SENTINEL,
+        ]
+    );
+    // Slots follow the absolute ids, not table positions: positions 128..136
+    // sit in pool block 1, so the flattened slots are 32..40.
+    assert_eq!(meta.slot_map[0], (32..40).collect::<Vec<u32>>());
+    assert_eq!(meta.positions, (128..136).collect::<Vec<u32>>());
+    m.commit(a, 8).unwrap();
+}
+
 /// After windowed commits, `BatchMeta.window_start` tracks the window while
 /// `All` groups still report 0 (Spec 3 §3.5).
 #[test]

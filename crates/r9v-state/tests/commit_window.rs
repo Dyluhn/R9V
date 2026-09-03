@@ -90,6 +90,70 @@ fn windowed_retention_releases_old_blocks_and_keeps_window() {
     assert_eq!(m.ctx_len(b).unwrap(), 64);
 }
 
+/// Windowed reserve allocates every block touched by the full new range even
+/// when `n` exceeds the window; retention releases only on commit
+/// (Spec 3 §3.5, §3.6). Reserving 64 tokens with a 32-token window maps 64
+/// unique logical positions through the correct two blocks — no clamp, no
+/// `debug_assert`, identical in debug and release.
+#[test]
+fn windowed_reserve_covers_full_range_when_n_exceeds_window() {
+    use std::collections::BTreeSet;
+    let mut m = manager_for(config_128(), &[kv_window(32)]);
+    let (a, _) = m.new_seq(&[]).unwrap();
+
+    let slots = m.reserve(a, 64).unwrap();
+    assert_eq!(slots.start, 0);
+    assert_eq!(slots.len, 64);
+    assert_eq!(slots.slots.len(), 1);
+    let row = &slots.slots[0];
+    assert_eq!(row.len(), 64);
+    // 64 unique flattened slots: two blocks times 32 lanes.
+    let unique: BTreeSet<u32> = row.iter().copied().collect();
+    assert_eq!(unique.len(), 64);
+    // Each logical position maps through its own block index and lane.
+    let mut blocks: BTreeSet<u32> = BTreeSet::new();
+    for (k, slot) in row.iter().enumerate() {
+        let block = slot / 32;
+        let lane = slot % 32;
+        assert_eq!(lane, k as u32 % 32, "lane for position {k}");
+        assert_eq!(
+            block,
+            if (k as u32) < 32 {
+                row[0] / 32
+            } else {
+                row[32] / 32
+            }
+        );
+        blocks.insert(block);
+    }
+    assert_eq!(blocks.len(), 2);
+    // The two blocks are distinct pool ids held by this sequence.
+    let meta = m.batch_meta(&[a], &[64]).unwrap();
+    assert_eq!(meta.block_table[0][0][0], row[0] / 32);
+    assert_eq!(meta.block_table[0][0][1], row[32] / 32);
+
+    let toks: Vec<u32> = (100..164).collect();
+    m.write_tokens(a, 0, &toks).unwrap();
+    m.commit(a, 64).unwrap();
+    assert_eq!(m.ctx_len(a).unwrap(), 64);
+    assert_eq!(m.window_start(a, 0).unwrap(), 32);
+    // Retention released the aged block only after commit: one block free.
+    assert_eq!(
+        m.free_blocks(0).unwrap(),
+        m.budget().groups[0].total_blocks - 1
+    );
+    // Evicted positions report absence; retained ones read back exactly.
+    assert_eq!(m.read_token(a, 0, 0).unwrap(), None);
+    assert_eq!(m.read_token(a, 0, 31).unwrap(), None);
+    for pos in 32..64 {
+        assert_eq!(
+            m.read_token(a, 0, pos).unwrap(),
+            Some(100 + pos),
+            "pos {pos}"
+        );
+    }
+}
+
 /// Sink + window pins the first blocks while the window slides (Spec 3 §3.5).
 #[test]
 fn sink_blocks_stay_pinned_while_window_slides() {

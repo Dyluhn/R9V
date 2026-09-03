@@ -262,3 +262,160 @@ fn free_seq_returns_blocks_to_the_pool() {
     assert_eq!(m.free_blocks(0).unwrap(), total);
     assert_eq!(m.stats().utilization, 0.0);
 }
+
+/// `commit` with no outstanding reservation is a typed error — even a zero
+/// accept with no open tail (Spec 3 §3.6 pairs every commit with a reserve).
+#[test]
+fn commit_without_reservation_is_typed() {
+    let mut m = tiny_manager();
+    let (a, _) = m.new_seq(&[]).unwrap();
+
+    let err = m.commit(a, 0).unwrap_err();
+    assert!(matches!(err, StateError::NoReservation { .. }), "{err:?}");
+
+    m.reserve(a, 4).unwrap();
+    m.commit(a, 4).unwrap();
+    let err = m.commit(a, 0).unwrap_err();
+    assert!(matches!(err, StateError::NoReservation { .. }), "{err:?}");
+    // The refused commits mutated nothing.
+    assert_eq!(m.ctx_len(a).unwrap(), 4);
+    assert_eq!(m.tail_len(a).unwrap(), 0);
+}
+
+/// `write_tokens` rejects writes before `ctx_len` (verified history) as well
+/// as writes past the reserved end.
+#[test]
+fn writes_before_ctx_len_are_rejected() {
+    let mut m = tiny_manager();
+    let (a, _) = m.new_seq(&[]).unwrap();
+    let toks = vec![1; 8];
+    m.reserve(a, 8).unwrap();
+    m.write_tokens(a, 0, &toks).unwrap();
+    m.commit(a, 8).unwrap();
+    assert_eq!(m.ctx_len(a).unwrap(), 8);
+
+    // Rewriting verified history is out of range.
+    let err = m.write_tokens(a, 0, &[9]).unwrap_err();
+    assert!(matches!(err, StateError::OutOfRange { .. }), "{err:?}");
+    let err = m.write_tokens(a, 7, &[9]).unwrap_err();
+    assert!(matches!(err, StateError::OutOfRange { .. }), "{err:?}");
+
+    // The open reservation is still writable exactly at `ctx_len`.
+    m.reserve(a, 4).unwrap();
+    m.write_tokens(a, 8, &[10, 11, 12, 13]).unwrap();
+    let err = m.write_tokens(a, 7, &[9]).unwrap_err();
+    assert!(matches!(err, StateError::OutOfRange { .. }), "{err:?}");
+    m.commit(a, 4).unwrap();
+    assert_eq!(m.read_token(a, 0, 8).unwrap(), Some(10));
+}
+
+/// The same sequence twice in one batch is a typed error, not a doubled row.
+#[test]
+fn duplicate_sequences_in_batch_are_rejected() {
+    let mut m = tiny_manager();
+    let (a, _) = m.new_seq(&[]).unwrap();
+    m.reserve(a, 4).unwrap();
+
+    let err = m.batch_meta(&[a, a], &[2, 2]).unwrap_err();
+    match err {
+        StateError::InvalidBatch { detail } => {
+            assert!(detail.contains("duplicate"), "{detail}");
+        }
+        other => panic!("expected InvalidBatch, got {other:?}"),
+    }
+}
+
+/// Public byte geometry rejects invalid dims/policies instead of computing a
+/// plausible value (a zero head count must not silently size an empty pool).
+#[test]
+fn byte_geometry_rejects_invalid_dims() {
+    use r9v_state::{CacheDtype, Retain, StateSpec};
+    let zero_hkv = StateSpec::KvPaged {
+        hkv: 0,
+        d: 16,
+        dv: 16,
+        cache: CacheDtype::E4M3,
+        retain: Retain::All,
+    };
+    assert!(matches!(
+        zero_hkv.per_token_bytes().unwrap_err(),
+        StateError::InvalidConfig { .. }
+    ));
+    let zero_h = StateSpec::Recurrent { h: 0, d: 8, dv: 8 };
+    assert!(matches!(
+        zero_h.slot_bytes().unwrap_err(),
+        StateError::InvalidConfig { .. }
+    ));
+    assert!(matches!(
+        zero_h.per_token_bytes().unwrap_err(),
+        StateError::InvalidConfig { .. }
+    ));
+    let zero_w = StateSpec::ConvWindow { c: 4, w: 0 };
+    assert!(matches!(
+        zero_w.slot_bytes().unwrap_err(),
+        StateError::InvalidConfig { .. }
+    ));
+    let bad_window = StateSpec::KvPaged {
+        hkv: 2,
+        d: 16,
+        dv: 16,
+        cache: CacheDtype::E4M3,
+        retain: Retain::Window { w: 0 },
+    };
+    assert!(matches!(
+        bad_window.per_token_bytes().unwrap_err(),
+        StateError::InvalidConfig { .. }
+    ));
+    // Valid specs still compute exact values.
+    assert_eq!(kv_all().per_token_bytes().unwrap(), 2 * (32 + 4));
+}
+
+/// Batch token totals are checked, not saturated: an oversized pool lets two
+/// large reservations coexist, and their combined total still hits the cap.
+#[test]
+fn batch_token_total_cap_is_checked() {
+    use r9v_state::{group_layers, required_pool_bytes};
+    let config = StateConfig {
+        max_ctx: 1 << 20,
+        max_seqs: 4,
+    };
+    let groups = group_layers(&[kv_all()]);
+    let required = required_pool_bytes(config, &groups).expect("pool math is exact");
+    let mut m = StateManager::new(config, vec![kv_all()], required * 2).expect("valid config");
+
+    let (a, _) = m.new_seq(&[]).unwrap();
+    let (b, _) = m.new_seq(&[]).unwrap();
+    m.reserve(a, 600_000).unwrap();
+    m.reserve(b, 600_000).unwrap();
+    let err = m.batch_meta(&[a, b], &[600_000, 600_000]).unwrap_err();
+    match err {
+        StateError::InvalidBatch { detail } => {
+            assert!(detail.contains("exceed cap"), "{detail}");
+        }
+        other => panic!("expected InvalidBatch, got {other:?}"),
+    }
+}
+
+/// Failed `new_seq` calls leave no trace: no slots taken, no id consumed.
+#[test]
+fn failed_new_seq_leaves_no_trace() {
+    use r9v_state::StateConfig;
+    let mut m = manager_for(
+        StateConfig {
+            max_ctx: 64,
+            max_seqs: 2,
+        },
+        &[kv_all()],
+    );
+    let big = vec![0; 65];
+    let err = m.new_seq(&big).unwrap_err();
+    assert!(matches!(err, StateError::ReserveTooLarge { .. }), "{err:?}");
+
+    // The refused prompt consumed no sequence id.
+    let (a, _) = m.new_seq(&[]).unwrap();
+    assert_eq!(a.as_u64(), 0);
+    let (b, _) = m.new_seq(&[]).unwrap();
+    assert_eq!(b.as_u64(), 1);
+    let err = m.new_seq(&[]).unwrap_err();
+    assert!(matches!(err, StateError::SeqLimit { .. }), "{err:?}");
+}

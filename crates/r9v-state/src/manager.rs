@@ -9,6 +9,8 @@
 //!
 //! Pools are offset arithmetic over an abstract arena: block `b` of layer
 //! group `g` lives at `base[g] + b * block_bytes[g]`; no per-block pointers.
+//! Fixed recurrent/conv pools are offset arithmetic the same way: buffer
+//! `2 * slot + parity` of group `g` lives at `base[g] + buffer * buf_bytes`.
 //! The in-memory mirror stores only token ids per reserved position so the
 //! Spec 3 §8 commit/window laws can be tested without a device.
 
@@ -30,6 +32,12 @@ use crate::spec::{
 // `block_table` rows carry `BLOCK_SENTINEL`; rejected: omitting the rows
 // (would break the fixed `[G, ...]` shape Spec 1 §2.5 requires).
 pub const SLOT_NONE: u32 = u32::MAX;
+
+/// Maximum blocks per paged pool: the largest count whose flattened slots
+/// (`block_id * 32 + lane`) still fit in the u32 `slot_map` (Spec 1 §2.5).
+/// `(134_217_728 - 1) * 32 + 31 == u32::MAX`. Pools that would need more
+/// blocks are refused at construction, before any mutation.
+const MAX_SLOT_BLOCKS: u32 = 134_217_728;
 
 /// Engine state configuration (Spec 3 §9 `[state]`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,10 +89,14 @@ impl StateConfig {
     }
 }
 
-/// Total pool bytes required to hold every sequence at full context plus the
-/// double-buffered recurrent/conv slots (Spec 3 §6.3).
+/// Minimum pool bytes: one aggregate `max_ctx` of blocks per paged group plus
+/// `max_seqs` double-buffered slots per recurrent/conv group (Spec 3 §6.3).
 ///
-/// The loader refuses with the numbers when the device pool is smaller.
+/// Paged groups each hold one aggregate pool of at least `max_ctx` tokens of
+/// blocks in total across all sequences — not `max_seqs` full sequences.
+/// Only recurrent/conv pools multiply by `max_seqs` (fixed-size state per
+/// sequence, not per token). The loader refuses with the numbers when the
+/// device pool is smaller.
 pub fn required_pool_bytes(config: StateConfig, groups: &[LayerGroup]) -> StateResult<u64> {
     let overflow = |what: &str| StateError::Overflow {
         what: what.to_owned(),
@@ -206,7 +218,7 @@ impl BatchMeta {
 pub struct GroupBudget {
     /// Layer-group index.
     pub index: usize,
-    /// Total blocks in the group pool.
+    /// Total blocks in the group pool (paged groups; 0 for fixed groups).
     pub total_blocks: u32,
     /// Free blocks in the group pool.
     pub free_blocks: u32,
@@ -214,6 +226,14 @@ pub struct GroupBudget {
     pub block_bytes: u64,
     /// Arena base offset of this group's pool.
     pub base_offset: u64,
+    /// Total sequence slots in the group pool (recurrent/conv groups sized
+    /// by `max_seqs`; 0 for paged groups).
+    pub total_slots: u32,
+    /// Free sequence slots in the group pool.
+    pub free_slots: u32,
+    /// Double-buffered (A+B) bytes per sequence slot (fixed groups; 0 for
+    /// paged groups).
+    pub slot_bytes_per_seq: u64,
 }
 
 /// Pool budget snapshot (Spec 3 §5 `budget`).
@@ -221,10 +241,22 @@ pub struct GroupBudget {
 pub struct Budget {
     /// Per-group budgets, in group order.
     pub groups: Vec<GroupBudget>,
-    /// Total arena bytes across paged pools.
+    /// Assigned arena bytes across paged pools.
     pub pool_bytes_total: u64,
     /// Free arena bytes across paged pools.
     pub pool_bytes_free: u64,
+    /// Assigned arena bytes across recurrent/conv fixed pools.
+    pub fixed_bytes_total: u64,
+    /// Free arena bytes across recurrent/conv fixed pools.
+    pub fixed_bytes_free: u64,
+    /// Free host-side block bytes (Spec 3 §3.7). Host swap is deferred to
+    /// roadmap B1 alongside the prefix cache, so this is always 0: an
+    /// explicit zero, not an omission.
+    pub host_free: u64,
+    /// Supplied pool bytes not assigned to any pool. The paged split only
+    /// deals whole blocks, so a sub-block remainder stays unusable and is
+    /// reported here rather than silently absorbed.
+    pub unusable_bytes: u64,
 }
 
 /// Manager statistics (Spec 3 §5 `stats`).
@@ -239,7 +271,8 @@ pub struct Stats {
     pub swaps: u64,
     /// Commits performed.
     pub commits: u64,
-    /// Fraction of paged blocks allocated, `0.0..=1.0`.
+    /// Fraction of paged blocks allocated, `0.0..=1.0`, from exact
+    /// allocated/total block counts (not an estimate).
     pub utilization: f32,
 }
 
@@ -267,6 +300,34 @@ impl BlockPool {
     }
 }
 
+/// One fixed pool of per-sequence recurrent/conv slots (Spec 3 §4.1, §6.3).
+///
+/// Each live sequence owns exactly one sequence slot per fixed group; the
+/// slot holds both the verified (A) and working (B) buffers contiguously.
+/// Allocation takes the smallest free slot id, so slot ids are a
+/// deterministic function of the request history alone (Spec 3 §5, §8).
+#[derive(Debug)]
+struct FixedPool {
+    total_slots: u32,
+    free: BTreeSet<u32>,
+    slot_bytes_per_seq: u64,
+    buffer_bytes: u64,
+    base_offset: u64,
+}
+
+impl FixedPool {
+    /// Byte offset of buffer `buffer` (`2 * slot + parity`) in the abstract
+    /// arena (Spec 3 §4.1). Fully checked: overflow is a typed error.
+    fn buffer_offset(&self, buffer: u32) -> StateResult<u64> {
+        u64::from(buffer)
+            .checked_mul(self.buffer_bytes)
+            .and_then(|v| v.checked_add(self.base_offset))
+            .ok_or_else(|| StateError::Overflow {
+                what: "fixed buffer offset".to_owned(),
+            })
+    }
+}
+
 /// Per-sequence state (Spec 3 §3.3).
 #[derive(Debug)]
 struct SeqState {
@@ -280,13 +341,14 @@ struct SeqState {
     mirror: BTreeMap<(usize, u32), u32>,
     /// Compacted length since the last reserve, if `compact` ran.
     compacted: Option<usize>,
-    /// Accepted tokens awaiting a recurrent re-run after a partial commit
-    /// (Spec 3 §4.2); cleared by the next `reserve`.
-    recompute_pending: u32,
-    /// Active A/B slot per group (`0 = A`, `1 = B`); meaningful only for
-    /// recurrent/conv groups.
+    /// Owned sequence slot per group for recurrent/conv groups (`None` for
+    /// paged groups). Taken from the group's [`FixedPool`] at `new_seq`,
+    /// released back at `free_seq`, reused smallest-first.
+    fixed_slots: Vec<Option<u32>>,
+    /// Active A/B buffer per group (`0 = A`, `1 = B`); meaningful only for
+    /// recurrent/conv groups, where it selects the buffer inside the owned
+    /// sequence slot (Spec 3 §4.2).
     parity: Vec<u8>,
-    live: bool,
 }
 
 /// Host-side sequence-state manager (Spec 3 §5).
@@ -298,8 +360,11 @@ pub struct StateManager {
     config: StateConfig,
     groups: Vec<LayerGroup>,
     pools: Vec<Option<BlockPool>>,
+    fixed: Vec<Option<FixedPool>>,
     max_blocks: u32,
     pool_bytes_total: u64,
+    fixed_bytes_total: u64,
+    unusable_bytes: u64,
     next_seq: u64,
     seqs: BTreeMap<u64, SeqState>,
     live_count: u32,
@@ -316,9 +381,12 @@ impl StateManager {
 
     /// Builds the manager, sizing pools from `pool_bytes` (Spec 3 §6.3).
     ///
-    /// Refuses with the numbers when `pool_bytes` cannot hold every sequence
-    /// at full context plus the double-buffered recurrent slots. All
-    /// validation is collected before any allocation.
+    /// Fixed recurrent/conv pools take `slots_bytes_per_seq * max_seqs`
+    /// first; the remaining paged bytes are split across paged groups in
+    /// proportion to their block costs so every paged group holds the same
+    /// aggregate block count of at least `max_ctx / 32`. Refuses with the
+    /// numbers when `pool_bytes` cannot cover that minimum. All validation
+    /// is collected before any allocation.
     pub fn new(
         config: StateConfig,
         layer_specs: Vec<StateSpec>,
@@ -350,52 +418,143 @@ impl StateManager {
             return Err(StateError::invalid(problems));
         }
 
-        let required = required_pool_bytes(config, &groups)?;
-        if pool_bytes < required {
+        let max_blocks = config.max_blocks();
+        let max_seqs = config.max_seqs;
+        let overflow = |what: &str| StateError::Overflow {
+            what: what.to_owned(),
+        };
+
+        // Fixed pools first: per-sequence double-buffered bytes times max_seqs
+        // (Spec 3 §6.3: only recurrent/conv pools multiply by max_seqs).
+        let mut fixed_total: u64 = 0;
+        for g in &groups {
+            if g.spec.is_paged() {
+                continue;
+            }
+            let per_seq = g.slots_bytes_per_seq()?;
+            let grp = per_seq
+                .checked_mul(u64::from(max_seqs))
+                .ok_or_else(|| overflow("fixed group pool"))?;
+            fixed_total = fixed_total
+                .checked_add(grp)
+                .ok_or_else(|| overflow("fixed pool total"))?;
+        }
+        if pool_bytes < fixed_total {
             return Err(StateError::invalid(vec![InvalidItem {
                 index: u32::MAX,
                 reason: format!(
-                    "pool_bytes={pool_bytes} below required={required}, shortfall={}",
-                    required - pool_bytes,
+                    "pool_bytes={pool_bytes} below fixed_pool={fixed_total}, shortfall={}",
+                    fixed_total - pool_bytes,
                 ),
             }]));
         }
+        // Safe: `pool_bytes >= fixed_total` was just established.
+        let usable = pool_bytes - fixed_total;
 
-        // DECISION(A1.11): each paged group holds exactly max_ctx/32 blocks
-        // (full context per sequence) with contiguous arena bases; rejected: a
-        // proportionally-shrunk pool (would make admission depend on group
-        // mix instead of failing loudly at construction). Spec 3 §6.3 is
-        // silent on sub-full pools.
-        let max_blocks = config.max_blocks();
+        // DECISION(A1.11): after fixed pools, split the usable paged bytes in
+        // proportion to group block costs so every paged group gets the same
+        // aggregate block capacity, at least max_ctx/32 per group (Spec 3
+        // §6.3 aggregate sizing); rejected: per-sequence full-context pools
+        // (max_seqs times max_ctx contradicts the aggregate minimum) and
+        // shrinking groups unevenly (would make admission depend on group
+        // mix instead of failing loudly at construction).
+        let mut sum_block: u64 = 0;
+        let mut paged_count: u64 = 0;
+        for g in &groups {
+            if !g.spec.is_paged() {
+                continue;
+            }
+            sum_block = sum_block
+                .checked_add(g.block_bytes()?)
+                .ok_or_else(|| overflow("paged block cost total"))?;
+            paged_count = paged_count
+                .checked_add(1)
+                .ok_or_else(|| overflow("paged group count"))?;
+        }
+        let blocks_per_group: u32 = if paged_count == 0 {
+            0
+        } else {
+            let Some(capacity) = usable.checked_div(sum_block) else {
+                return Err(StateError::invalid(vec![InvalidItem {
+                    index: u32::MAX,
+                    reason: "paged block cost is zero; cannot proportion the pool".to_owned(),
+                }]));
+            };
+            if capacity < u64::from(max_blocks) {
+                let need_paged = u64::from(max_blocks)
+                    .checked_mul(sum_block)
+                    .ok_or_else(|| overflow("minimum paged pool"))?;
+                let required = fixed_total
+                    .checked_add(need_paged)
+                    .ok_or_else(|| overflow("minimum pool"))?;
+                // Safe: this branch runs only when `pool_bytes < required`.
+                let shortfall = required - pool_bytes;
+                return Err(StateError::invalid(vec![InvalidItem {
+                    index: u32::MAX,
+                    reason: format!(
+                        "pool_bytes={pool_bytes} below required={required}, shortfall={shortfall}",
+                    ),
+                }]));
+            }
+            // Flattened slots are u32: refuse a capacity the `slot_map`
+            // cannot address, before any pool is built.
+            if capacity > u64::from(MAX_SLOT_BLOCKS) {
+                return Err(StateError::invalid(vec![InvalidItem {
+                    index: u32::MAX,
+                    reason: format!(
+                        "pool capacity {capacity} blocks exceeds u32 slot_map range {MAX_SLOT_BLOCKS}; supply a smaller pool",
+                    ),
+                }]));
+            }
+            // Safe: `capacity <= MAX_SLOT_BLOCKS <= u32::MAX`.
+            capacity as u32
+        };
+        let assigned_paged = u64::from(blocks_per_group)
+            .checked_mul(sum_block)
+            .ok_or_else(|| overflow("assigned paged pool"))?;
+        // Safe: `assigned_paged <= usable` by construction of the division.
+        let unusable = usable - assigned_paged;
+
         let mut pools: Vec<Option<BlockPool>> = Vec::with_capacity(groups.len());
+        let mut fixed: Vec<Option<FixedPool>> = Vec::with_capacity(groups.len());
         let mut base: u64 = 0;
-        let mut pool_bytes_total: u64 = 0;
         for g in &groups {
             if g.spec.is_paged() {
                 let block_bytes = g.block_bytes()?;
-                let bytes = block_bytes
-                    .checked_mul(u64::from(max_blocks))
-                    .ok_or_else(|| StateError::Overflow {
-                        what: "group pool bytes".to_owned(),
-                    })?;
+                let bytes = u64::from(blocks_per_group)
+                    .checked_mul(block_bytes)
+                    .ok_or_else(|| overflow("group pool bytes"))?;
+                let group_base = base;
                 base = base
                     .checked_add(bytes)
-                    .ok_or_else(|| StateError::Overflow {
-                        what: "arena base".to_owned(),
-                    })?;
-                pool_bytes_total =
-                    pool_bytes_total
-                        .checked_add(bytes)
-                        .ok_or_else(|| StateError::Overflow {
-                            what: "pool total".to_owned(),
-                        })?;
+                    .ok_or_else(|| overflow("arena base"))?;
                 pools.push(Some(BlockPool {
-                    total: max_blocks,
-                    free: (0..max_blocks).collect(),
-                    base_offset: base - bytes,
+                    total: blocks_per_group,
+                    free: (0..blocks_per_group).collect(),
+                    base_offset: group_base,
                     block_bytes,
                 }));
+                fixed.push(None);
             } else {
+                let per_seq = g.slots_bytes_per_seq()?;
+                let grp_bytes = per_seq
+                    .checked_mul(u64::from(max_seqs))
+                    .ok_or_else(|| overflow("fixed group bytes"))?;
+                // `per_seq` already counts both A and B buffers, so each
+                // buffer is exactly half; zero-size slots (e.g. `w = 1`
+                // conv) still allocate slot ids for ownership bookkeeping.
+                let buffer_bytes = per_seq / 2;
+                let group_base = base;
+                base = base
+                    .checked_add(grp_bytes)
+                    .ok_or_else(|| overflow("arena base"))?;
+                fixed.push(Some(FixedPool {
+                    total_slots: max_seqs,
+                    free: (0..max_seqs).collect(),
+                    slot_bytes_per_seq: per_seq,
+                    buffer_bytes,
+                    base_offset: group_base,
+                }));
                 pools.push(None);
             }
         }
@@ -404,8 +563,11 @@ impl StateManager {
             config,
             groups,
             pools,
+            fixed,
             max_blocks,
-            pool_bytes_total,
+            pool_bytes_total: assigned_paged,
+            fixed_bytes_total: fixed_total,
+            unusable_bytes: unusable,
             next_seq: 0,
             seqs: BTreeMap::new(),
             live_count: 0,
@@ -429,21 +591,81 @@ impl StateManager {
     /// No prefix cache yet: `matched_len` is always 0 and no blocks are
     /// allocated or shared; the prompt is covered by the first `reserve`
     /// (roadmap B1 owns prefix/session reuse).
+    ///
+    /// The token slice is only the future prefix-cache key: length validation
+    /// is sufficient here and contents are never interpreted. Allocation is
+    /// atomic across groups: every fixed group must have a free slot before
+    /// any is taken, so a refusal mutates nothing.
     pub fn new_seq(&mut self, tokens: &[u32]) -> StateResult<(SeqId, u32)> {
+        let len_u32 = u32::try_from(tokens.len()).map_err(|_| StateError::Overflow {
+            what: "prompt length".to_owned(),
+        })?;
         if tokens.len() > self.config.max_ctx as usize {
             return Err(StateError::ReserveTooLarge {
-                end: tokens.len().min(u32::MAX as usize) as u32,
+                end: len_u32,
                 max_ctx: self.config.max_ctx,
-                n: tokens.len().min(u32::MAX as usize) as u32,
+                n: len_u32,
             });
         }
-        if self.live_count >= self.config.max_seqs {
+        let live = self.live_count;
+        if live >= self.config.max_seqs {
             return Err(StateError::SeqLimit {
-                live: self.live_count,
+                live,
                 cap: self.config.max_seqs,
             });
         }
+        // Fallible checks first: the id counter must have room and every
+        // fixed group must hold a free slot before any is taken.
+        self.next_seq
+            .checked_add(1)
+            .ok_or_else(|| StateError::Overflow {
+                what: "sequence id".to_owned(),
+            })?;
+        for (gi, g) in self.groups.iter().enumerate() {
+            if !g.spec.is_recurrent() {
+                continue;
+            }
+            let has_free = self
+                .fixed
+                .get(gi)
+                .and_then(|p| p.as_ref())
+                .is_some_and(|p| !p.free.is_empty());
+            if !has_free {
+                return Err(StateError::SeqLimit {
+                    live,
+                    cap: self.config.max_seqs,
+                });
+            }
+        }
+        // DECISION(A1.11): deterministic smallest-free sequence-slot
+        // allocation per fixed group, two buffers per sequence inside the
+        // slot; rejected: implicit parity-only bookkeeping with no pool
+        // ownership (loses release/reuse accounting and exact budgeting).
+        // All groups were pre-checked, so these takes cannot fail.
+        let mut fixed_slots: Vec<Option<u32>> = vec![None; self.groups.len()];
+        for (gi, g) in self.groups.iter().enumerate() {
+            if !g.spec.is_recurrent() {
+                continue;
+            }
+            let pool = self.fixed[gi]
+                .as_mut()
+                .ok_or_else(|| StateError::InvalidBatch {
+                    detail: format!("group {gi} is not a fixed group"),
+                })?;
+            let id = pool
+                .free
+                .iter()
+                .next()
+                .copied()
+                .ok_or(StateError::SeqLimit {
+                    live,
+                    cap: self.config.max_seqs,
+                })?;
+            pool.free.remove(&id);
+            fixed_slots[gi] = Some(id);
+        }
         let id = self.next_seq;
+        // Assign the increment checked above, before any mutation.
         self.next_seq = self
             .next_seq
             .checked_add(1)
@@ -460,26 +682,30 @@ impl StateManager {
                 indices: vec![Vec::new(); g],
                 mirror: BTreeMap::new(),
                 compacted: None,
-                recompute_pending: 0,
+                fixed_slots,
                 parity: vec![0; g],
-                live: true,
             },
         );
-        self.live_count += 1;
+        // Safe from overflow: `live < max_seqs <= MAX_SEQS_HARD < u32::MAX`,
+        // but still checked — saturation must never hide a counting bug.
+        self.live_count = self
+            .live_count
+            .checked_add(1)
+            .ok_or_else(|| StateError::Overflow {
+                what: "live sequence count".to_owned(),
+            })?;
         Ok((SeqId::new(id), 0))
     }
 
     fn seq_mut(&mut self, seq: SeqId) -> StateResult<&mut SeqState> {
         self.seqs
             .get_mut(&seq.as_u64())
-            .filter(|s| s.live)
             .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })
     }
 
     fn seq(&self, seq: SeqId) -> StateResult<&SeqState> {
         self.seqs
             .get(&seq.as_u64())
-            .filter(|s| s.live)
             .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })
     }
 
@@ -504,19 +730,14 @@ impl StateManager {
             })?;
         Ok(match spec.spec.retain() {
             None | Some(crate::spec::Retain::All) => 0,
-            // DECISION(A1.11): Sink+Window reports the window start; the sink
-            // range is implicitly [0, ceil(n/32)*32) pinned from position 0.
-            // Rejected: reporting 0 (would hide the window from the kernel).
-            // Spec 3 §3.5 gives the kernel "both ranges" but BatchMeta carries
-            // a single window_start per group.
+            // DECISION(A1.11) per SI-17: Sink+Window reports the window
+            // start; the sink range is implicitly [0, ceil(n/32)*32) pinned
+            // from position 0. Rejected: reporting 0 (would hide the window
+            // from the kernel). Spec 3 §3.5 gives the kernel "both ranges"
+            // but BatchMeta carries a single window_start per group.
             Some(crate::spec::Retain::Window { w })
-            | Some(crate::spec::Retain::SinkWindow { w, .. }) => s.ctx_len.saturating_sub(w),
+            | Some(crate::spec::Retain::SinkWindow { w, .. }) => window_start_of(s.ctx_len, w),
         })
-    }
-
-    /// Tokens awaiting a recurrent re-run after a partial commit (Spec 3 §4.2).
-    pub fn recompute_pending(&self, seq: SeqId) -> StateResult<u32> {
-        Ok(self.seq(seq)?.recompute_pending)
     }
 
     /// Active double-buffer slot for a group: `0 = A`, `1 = B` (Spec 3 §4.2).
@@ -530,24 +751,134 @@ impl StateManager {
             })
     }
 
-    /// Free blocks in a paged group pool.
-    pub fn free_blocks(&self, group: usize) -> StateResult<u32> {
-        self.pools
+    /// Owned sequence slot id for a recurrent/conv group (Spec 3 §4.1).
+    ///
+    /// Deterministic smallest-free allocation at `new_seq`, released at
+    /// `free_seq`. Paged groups hold no sequence slots and are refused.
+    pub fn fixed_slot(&self, seq: SeqId, group: usize) -> StateResult<u32> {
+        let s = self.seq(seq)?;
+        let spec = self
+            .groups
+            .get(group)
+            .ok_or_else(|| StateError::InvalidBatch {
+                detail: format!("group {group} out of range {}", self.groups.len()),
+            })?;
+        if !spec.spec.is_recurrent() {
+            return Err(StateError::InvalidBatch {
+                detail: format!("group {group} is not a recurrent/conv group"),
+            });
+        }
+        s.fixed_slots
+            .get(group)
+            .and_then(|slot| *slot)
+            .ok_or_else(|| StateError::InvalidBatch {
+                detail: format!("sequence {} holds no slot in group {group}", seq.as_u64()),
+            })
+    }
+
+    /// Active and working buffer ids `(active, working)` for a
+    /// recurrent/conv group: buffer `2 * slot + parity` (Spec 3 §4.2).
+    ///
+    /// The scheduler reads verified state from the active buffer and writes
+    /// the step into the working buffer; `commit` with any `accepted > 0`
+    /// swaps them, so the next step's active buffer holds the verified state.
+    pub fn recurrent_buffers(&self, seq: SeqId, group: usize) -> StateResult<(u32, u32)> {
+        let slot = self.fixed_slot(seq, group)?;
+        let active_bit = u32::from(self.recurrent_active(seq, group)?);
+        let base = slot.checked_mul(2).ok_or_else(|| StateError::Overflow {
+            what: "fixed buffer id".to_owned(),
+        })?;
+        let active = base
+            .checked_add(active_bit)
+            .ok_or_else(|| StateError::Overflow {
+                what: "fixed buffer id".to_owned(),
+            })?;
+        // The working buffer is the other half of the slot: parity only ever
+        // holds 0 or 1 (flipped by `commit`); anything else fails closed.
+        let working_bit = match active_bit {
+            0 => 1,
+            1 => 0,
+            _ => {
+                return Err(StateError::Overflow {
+                    what: "fixed buffer parity".to_owned(),
+                });
+            }
+        };
+        let working = base
+            .checked_add(working_bit)
+            .ok_or_else(|| StateError::Overflow {
+                what: "fixed buffer id".to_owned(),
+            })?;
+        Ok((active, working))
+    }
+
+    /// Byte offset of a fixed-pool buffer in the abstract arena (Spec 3 §4.1).
+    ///
+    /// Buffers outside the group's `2 * total_slots` range are refused
+    /// before any arithmetic.
+    pub fn fixed_buffer_offset(&self, group: usize, buffer: u32) -> StateResult<u64> {
+        let pool = self
+            .fixed
             .get(group)
             .and_then(|p| p.as_ref())
-            .map(|p| p.free.len() as u32)
+            .ok_or_else(|| StateError::InvalidBatch {
+                detail: format!("group {group} is not a recurrent/conv group"),
+            })?;
+        let total_buffers =
+            pool.total_slots
+                .checked_mul(2)
+                .ok_or_else(|| StateError::Overflow {
+                    what: "fixed buffer range".to_owned(),
+                })?;
+        if buffer >= total_buffers {
+            return Err(StateError::OutOfRange {
+                start: buffer,
+                len: 1,
+                end: total_buffers,
+            });
+        }
+        pool.buffer_offset(buffer)
+    }
+
+    /// Free blocks in a paged group pool.
+    pub fn free_blocks(&self, group: usize) -> StateResult<u32> {
+        let pool = self
+            .pools
+            .get(group)
+            .and_then(|p| p.as_ref())
             .ok_or_else(|| StateError::InvalidBatch {
                 detail: format!("group {group} is not a paged group"),
-            })
+            })?;
+        u32::try_from(pool.free.len()).map_err(|_| StateError::Overflow {
+            what: "free block count".to_owned(),
+        })
+    }
+
+    /// Free sequence slots in a recurrent/conv group pool.
+    pub fn free_slots(&self, group: usize) -> StateResult<u32> {
+        let pool = self
+            .fixed
+            .get(group)
+            .and_then(|p| p.as_ref())
+            .ok_or_else(|| StateError::InvalidBatch {
+                detail: format!("group {group} is not a recurrent/conv group"),
+            })?;
+        u32::try_from(pool.free.len()).map_err(|_| StateError::Overflow {
+            what: "free slot count".to_owned(),
+        })
     }
 
     /// Ensures blocks exist for `ctx_len .. ctx_len + n` (Spec 3 §3.6).
     ///
-    /// Atomic: every group is checked before any block is allocated, so a
-    /// refusal leaves the sequence and the pools untouched.
+    /// Windowed groups allocate every block touched by the full new range,
+    /// even when `n` exceeds the window: retention releases only on `commit`,
+    /// so the reservation must cover the whole `ctx_len .. end` span.
+    /// Atomic: every group is checked before any block is allocated, and a
+    /// failed slot build rolls its inserts back, so a refusal leaves the
+    /// sequence and the pools untouched.
     pub fn reserve(&mut self, seq: SeqId, n: u32) -> StateResult<SlotRange> {
         if n == 0 || n > MAX_RESERVE_HARD {
-            let tail = self.seq(seq).map(|s| s.tail_len).unwrap_or(0);
+            let tail = self.seq(seq)?.tail_len;
             return Err(StateError::InvalidReserve { n, tail });
         }
         let (ctx, tail) = {
@@ -568,101 +899,181 @@ impl StateManager {
             });
         }
 
+        // Full-range block span for the new range. Retention has not run for
+        // these positions yet, so nothing is window-clipped here: a reserve
+        // of 64 tokens with a 32-token window still takes both blocks, and
+        // `commit` releases the aged one afterwards.
+        let first_block = ctx / BLOCK_TOKENS;
+        let last_block = end.div_ceil(BLOCK_TOKENS);
         // Check every group first (atomicity): needed new block indices.
-        let mut need: Vec<Vec<u32>> = Vec::with_capacity(self.groups.len());
+        // Each entry carries its checked block count so later error reports
+        // need no further conversion.
+        let mut need: Vec<(Vec<u32>, u32)> = Vec::with_capacity(self.groups.len());
         for (gi, g) in self.groups.iter().enumerate() {
             if !g.spec.is_paged() {
-                need.push(Vec::new());
+                need.push((Vec::new(), 0));
                 continue;
             }
-            let want = retained_indices(g.spec, end, self.config.max_ctx);
             let held: BTreeSet<u32> = self.seq(seq)?.indices[gi].iter().copied().collect();
-            let missing: Vec<u32> = want.into_iter().filter(|i| !held.contains(i)).collect();
-            let free = self.pools[gi].as_ref().map_or(0, |p| p.free.len() as u64);
-            if (missing.len() as u64) > free {
-                let pool = self.pools[gi].as_ref().map_or(0, |p| p.free.len() as u32);
-                let required = missing.len() as u32;
+            let mut missing: Vec<u32> = Vec::new();
+            for idx in first_block..last_block {
+                if !held.contains(&idx) {
+                    missing.push(idx);
+                }
+            }
+            let free = u64::try_from(self.pools[gi].as_ref().map_or(0, |p| p.free.len())).map_err(
+                |_| StateError::Overflow {
+                    what: "free block count".to_owned(),
+                },
+            )?;
+            let want = u64::try_from(missing.len()).map_err(|_| StateError::Overflow {
+                what: "missing block count".to_owned(),
+            })?;
+            if want > free {
+                let available = u32::try_from(free).map_err(|_| StateError::Overflow {
+                    what: "free block count".to_owned(),
+                })?;
+                let required = u32::try_from(want).map_err(|_| StateError::Overflow {
+                    what: "missing block count".to_owned(),
+                })?;
                 return Err(StateError::PoolExhausted {
                     group: gi,
                     required,
-                    available: pool,
-                    shortfall: required - pool,
+                    available,
+                    shortfall: required.checked_sub(available).ok_or_else(|| {
+                        StateError::Overflow {
+                            what: "pool shortfall".to_owned(),
+                        }
+                    })?,
                     end,
                     max_ctx: self.config.max_ctx,
                 });
             }
-            need.push(missing);
+            let count = u32::try_from(missing.len()).map_err(|_| StateError::Overflow {
+                what: "missing block count".to_owned(),
+            })?;
+            need.push((missing, count));
         }
 
-        // All checks passed: mutate (disjoint field borrows: pools, seqs).
+        // All checks passed: allocate (disjoint field borrows: pools, seqs).
+        // Every insert is recorded; any failure below rolls the recorded
+        // inserts back instead of leaving half-built tables.
+        let mut inserted: Vec<(usize, u32, u32)> = Vec::new();
+        let mut alloc_err: Option<StateError> = None;
         {
             let pools = &mut self.pools;
             let seqs = &mut self.seqs;
-            for (gi, missing) in need.iter().enumerate() {
+            'alloc: for (gi, (missing, count)) in need.iter().enumerate() {
                 if missing.is_empty() {
                     continue;
                 }
-                let pool = pools[gi].as_mut().ok_or_else(|| StateError::InvalidBatch {
-                    detail: format!("group {gi} is not a paged group"),
-                })?;
-                let s = seqs
-                    .get_mut(&seq.as_u64())
-                    .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })?;
+                let pool = match pools[gi].as_mut() {
+                    Some(pool) => pool,
+                    None => {
+                        alloc_err = Some(StateError::InvalidBatch {
+                            detail: format!("group {gi} is not a paged group"),
+                        });
+                        break 'alloc;
+                    }
+                };
+                let s = match seqs.get_mut(&seq.as_u64()) {
+                    Some(s) => s,
+                    None => {
+                        alloc_err = Some(StateError::UnknownSeq { seq: seq.as_u64() });
+                        break 'alloc;
+                    }
+                };
                 for idx in missing {
-                    let id = pool.alloc().ok_or(StateError::PoolExhausted {
-                        group: gi,
-                        required: missing.len() as u32,
-                        available: 0,
-                        shortfall: missing.len() as u32,
-                        end,
-                        max_ctx: self.config.max_ctx,
-                    })?;
+                    let Some(id) = pool.alloc() else {
+                        // Unreachable after the pre-check above (single
+                        // thread, counts already verified); handled like any
+                        // other failure: roll back, then report.
+                        alloc_err = Some(StateError::PoolExhausted {
+                            group: gi,
+                            required: *count,
+                            available: 0,
+                            shortfall: *count,
+                            end,
+                            max_ctx: self.config.max_ctx,
+                        });
+                        break 'alloc;
+                    };
                     let pos = s.indices[gi].partition_point(|&i| i < *idx);
                     s.indices[gi].insert(pos, *idx);
                     s.tables[gi].insert(pos, id);
+                    inserted.push((gi, *idx, id));
                 }
             }
         }
+        if let Some(e) = alloc_err {
+            self.rollback_reserve(seq, &inserted);
+            return Err(e);
+        }
+        // Flattened slots per group for the reserved range. A missing mapping
+        // is a typed error, never a clamp to a neighboring block; the inserts
+        // above roll back on failure so the sequence keeps no tail.
+        let slots = match self.slot_rows_for(seq, ctx, n, end) {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.rollback_reserve(seq, &inserted);
+                return Err(e);
+            }
+        };
         let s = self.seq_mut(seq)?;
         s.tail_len = n;
         s.compacted = None;
-        s.recompute_pending = 0;
+        Ok(SlotRange {
+            start: ctx,
+            len: n,
+            slots,
+        })
+    }
 
-        // Flattened slots per group for the reserved range.
+    /// Undoes a half-built reservation's block inserts: removes the recorded
+    /// `(group, index)` entries in reverse and returns their ids to the
+    /// pools. The tail is still 0 on this path, so the sequence lands exactly
+    /// where it was before `reserve`.
+    fn rollback_reserve(&mut self, seq: SeqId, inserted: &[(usize, u32, u32)]) {
+        for &(gi, idx, id) in inserted.iter().rev() {
+            if let Some(s) = self.seqs.get_mut(&seq.as_u64()) {
+                let at = s
+                    .indices
+                    .get(gi)
+                    .map(|v| v.partition_point(|&i| i < idx))
+                    .unwrap_or(usize::MAX);
+                let aligned = s.indices.get(gi).and_then(|v| v.get(at)).copied() == Some(idx)
+                    && s.tables.get(gi).is_some_and(|t| at < t.len());
+                if aligned {
+                    s.indices[gi].remove(at);
+                    s.tables[gi].remove(at);
+                }
+            }
+            if let Some(pool) = self.pools.get_mut(gi).and_then(|p| p.as_mut()) {
+                pool.release(id);
+            }
+        }
+    }
+
+    /// Flattened slot rows for a reservation: `slots[g][k]` covers
+    /// `ctx + k` (Spec 1 §2.5, Spec 3 §3.3).
+    fn slot_rows_for(&self, seq: SeqId, ctx: u32, n: u32, end: u32) -> StateResult<Vec<Vec<u32>>> {
         let mut slots: Vec<Vec<u32>> = Vec::with_capacity(self.groups.len());
         for (gi, g) in self.groups.iter().enumerate() {
             if !g.spec.is_paged() {
                 slots.push(vec![SLOT_NONE; n as usize]);
                 continue;
             }
-            let table = &self.seq(seq)?.tables[gi];
-            let indices = &self.seq(seq)?.indices[gi];
+            let s = self.seq(seq)?;
             let mut row = Vec::with_capacity(n as usize);
             for k in 0..n {
-                let pos = ctx + k;
-                let bi = pos / BLOCK_TOKENS;
-                let lane = pos % BLOCK_TOKENS;
-                let at = indices
-                    .partition_point(|&i| i < bi)
-                    .min(indices.len().saturating_sub(1));
-                debug_assert!(indices.get(at) == Some(&bi));
-                let id = table[at];
-                let slot = u64::from(id)
-                    .checked_mul(u64::from(BLOCK_TOKENS))
-                    .and_then(|v| v.checked_add(u64::from(lane)))
-                    .and_then(|v| u32::try_from(v).ok())
-                    .ok_or_else(|| StateError::Overflow {
-                        what: "slot id".to_owned(),
-                    })?;
-                row.push(slot);
+                let pos = ctx.checked_add(k).ok_or_else(|| StateError::Overflow {
+                    what: "slot position".to_owned(),
+                })?;
+                row.push(flatten_slot(s, gi, pos, end)?);
             }
             slots.push(row);
         }
-        Ok(SlotRange {
-            start: ctx,
-            len: n,
-            slots,
-        })
+        Ok(slots)
     }
 
     /// Simulates `state_write_kv` into reserved slots (Spec 3 §8 test support).
@@ -684,6 +1095,15 @@ impl StateManager {
                 .ok_or_else(|| StateError::Overflow {
                     what: "reserved end".to_owned(),
                 })?;
+        // Writes must land inside the open reservation: before `ctx_len` is
+        // already-verified history, past the reserved end is unmapped.
+        if start < s.ctx_len {
+            return Err(StateError::OutOfRange {
+                start,
+                len: tokens.len(),
+                end: reserved_end,
+            });
+        }
         if write_end > reserved_end {
             return Err(StateError::OutOfRange {
                 start,
@@ -758,7 +1178,23 @@ impl StateManager {
             }
         }
         let a = accepted_positions.len();
-        let src: Vec<u32> = accepted_positions.iter().map(|p| ctx + p).collect();
+        let mut src: Vec<u32> = Vec::with_capacity(accepted_positions.len());
+        for p in accepted_positions {
+            src.push(ctx.checked_add(*p).ok_or_else(|| StateError::Overflow {
+                what: "compact source".to_owned(),
+            })?);
+        }
+        // Destination positions are computed before any mutation so the write
+        // phase below cannot fail partway.
+        let mut dsts: Vec<u32> = Vec::with_capacity(accepted_positions.len());
+        for i in 0..accepted_positions.len() {
+            dsts.push(
+                ctx.checked_add(i as u32)
+                    .ok_or_else(|| StateError::Overflow {
+                        what: "compact destination".to_owned(),
+                    })?,
+            );
+        }
         // Read phase (immutable): stage every group's copies before mutating.
         let staged: Vec<Vec<(u32, Option<u32>)>> = {
             let s = self.seq(seq)?;
@@ -780,7 +1216,7 @@ impl StateManager {
         let s = self.seq_mut(seq)?;
         for (gi, copies) in staged.iter().enumerate() {
             for (i, (_, tok)) in copies.iter().enumerate() {
-                let dst = ctx + i as u32;
+                let dst = dsts[i];
                 match tok {
                     Some(t) => {
                         s.mirror.insert((gi, dst), *t);
@@ -806,18 +1242,32 @@ impl StateManager {
     /// allocated and are overwritten by the next reserve — rejection is a
     /// smaller `accepted`, with no data movement. Windowed groups release
     /// blocks older than the window. Full accepts swap recurrent A/B slots;
-    /// partial accepts defer the swap and record [`Self::recompute_pending`].
-    /// Atomic: validation precedes any mutation.
+    /// Any `accepted > 0` swaps the recurrent/conv A/B buffers: the
+    /// scheduler re-ran the accepted prefix from verified A into working B
+    /// before this call (Spec 3 §4.2), so the working buffer already holds
+    /// the verified state and the swap publishes it. Full rejection
+    /// (`accepted == 0`) swaps nothing and keeps the checkpoint. Atomic:
+    /// validation precedes any mutation.
+    ///
+    // DECISION(A1.11): the manager swaps on every `accepted > 0` and keeps
+    // no pending re-run descriptor; rejected: deferring the swap behind a
+    // `recompute_pending` flag cleared by the next reserve (that models the
+    // re-run as reserving the accepted tokens again at later positions,
+    // which double-counts them — the scheduler already knows accepted versus
+    // tail and re-runs the prefix in place before committing).
     pub fn commit(&mut self, seq: SeqId, accepted: u32) -> StateResult<()> {
         let (ctx, tail, compacted) = {
             let s = self.seq(seq)?;
             (s.ctx_len, s.tail_len, s.compacted)
         };
+        if tail == 0 {
+            return Err(StateError::NoReservation { seq: seq.as_u64() });
+        }
         if accepted > tail {
             return Err(StateError::CommitTooLarge { accepted, tail });
         }
         if let Some(c) = compacted {
-            if accepted != c as u32 {
+            if (accepted as usize) != c {
                 return Err(StateError::InvalidCompact {
                     len: c,
                     tail,
@@ -830,6 +1280,26 @@ impl StateManager {
             .ok_or_else(|| StateError::Overflow {
                 what: "commit ctx".to_owned(),
             })?;
+        // Pre-check the stats counters so the mutation phase cannot fail.
+        let next_commits = self
+            .commits
+            .checked_add(1)
+            .ok_or_else(|| StateError::Overflow {
+                what: "commit count".to_owned(),
+            })?;
+        let swap = accepted > 0 && self.groups.iter().any(|g| g.spec.is_recurrent());
+        let next_swaps = if swap {
+            Some(
+                self.swaps
+                    .checked_add(1)
+                    .ok_or_else(|| StateError::Overflow {
+                        what: "swap count".to_owned(),
+                    })?,
+            )
+        } else {
+            None
+        };
+        let swap_groups: Vec<bool> = self.groups.iter().map(|g| g.spec.is_recurrent()).collect();
 
         // Compute window releases before mutating: (table position, block index).
         let mut releases: Vec<Vec<(u32, u32)>> = vec![Vec::new(); self.groups.len()];
@@ -838,7 +1308,10 @@ impl StateManager {
                 Some(r) if r.is_windowed() => r,
                 _ => continue,
             };
-            let ws = new_ctx.saturating_sub(retain.window().unwrap_or(0));
+            let w = retain.window().ok_or_else(|| StateError::Overflow {
+                what: "window size".to_owned(),
+            })?;
+            let ws = window_start_of(new_ctx, w);
             let sink_blocks = match retain {
                 crate::spec::Retain::SinkWindow { n, .. } => n.div_ceil(BLOCK_TOKENS),
                 _ => 0,
@@ -860,9 +1333,7 @@ impl StateManager {
             }
         }
 
-        // Mutate (disjoint field borrows: seqs, pools, groups, swaps).
-        let has_recurrent = self.groups.iter().any(|g| g.spec.is_recurrent());
-        let recurrent: Vec<bool> = self.groups.iter().map(|g| g.spec.is_recurrent()).collect();
+        // Mutate (disjoint field borrows: seqs, pools, swaps, commits).
         {
             let Self {
                 seqs,
@@ -899,43 +1370,66 @@ impl StateManager {
                         .release(id);
                 }
             }
-            if has_recurrent {
-                if accepted == tail && accepted > 0 {
-                    for (gi, is_rec) in recurrent.iter().enumerate() {
-                        if *is_rec {
-                            s.parity[gi] ^= 1;
-                        }
+            if swap {
+                for (gi, is_rec) in swap_groups.iter().enumerate() {
+                    if *is_rec {
+                        s.parity[gi] ^= 1;
                     }
-                    *swaps += 1;
-                } else if accepted < tail {
-                    s.recompute_pending = accepted;
+                }
+                if let Some(next) = next_swaps {
+                    *swaps = next;
                 }
             }
-            *commits += 1;
+            *commits = next_commits;
         }
         Ok(())
     }
 
     /// Releases all references; may retain session state (Spec 3 §5).
     ///
-    /// Session retention is deferred to roadmap B1: everything is released
-    /// and nothing is retained.
+    /// Removes the sequence, its block references, its fixed slots, and its
+    /// mirrors outright: no dead map entries remain, so repeated create/free
+    /// cycles cannot grow unbounded tombstones. Session retention is deferred
+    /// to roadmap B1: everything is released and nothing is retained.
     pub fn free_seq(&mut self, seq: SeqId) -> StateResult<()> {
         let s = self
             .seqs
-            .get_mut(&seq.as_u64())
-            .filter(|s| s.live)
+            .remove(&seq.as_u64())
             .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })?;
-        s.live = false;
-        let tables = std::mem::take(&mut s.tables);
-        for (gi, ids) in tables.into_iter().enumerate() {
-            if let Some(pool) = self.pools[gi].as_mut() {
-                for id in ids {
-                    pool.release(id);
-                }
+        for (gi, ids) in s.tables.into_iter().enumerate() {
+            if ids.is_empty() {
+                continue;
+            }
+            let pool = self
+                .pools
+                .get_mut(gi)
+                .and_then(|p| p.as_mut())
+                .ok_or_else(|| StateError::InvalidBatch {
+                    detail: format!("group {gi} is not a paged group"),
+                })?;
+            for id in ids {
+                pool.release(id);
             }
         }
-        self.live_count = self.live_count.saturating_sub(1);
+        for (gi, slot) in s.fixed_slots.into_iter().enumerate() {
+            let Some(id) = slot else { continue };
+            let pool = self
+                .fixed
+                .get_mut(gi)
+                .and_then(|p| p.as_mut())
+                .ok_or_else(|| StateError::InvalidBatch {
+                    detail: format!("group {gi} is not a fixed group"),
+                })?;
+            pool.free.insert(id);
+        }
+        // A live sequence was just removed, so the count is positive; still
+        // checked — saturation must never hide a counting bug.
+        self.live_count = self
+            .live_count
+            .checked_sub(1)
+            .ok_or_else(|| StateError::Overflow {
+                what: "live sequence count".to_owned(),
+            })?;
         Ok(())
     }
 
@@ -956,6 +1450,12 @@ impl StateManager {
             });
         }
         let mut problems: Vec<String> = Vec::new();
+        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        for (i, seq) in seqs.iter().enumerate() {
+            if !seen.insert(seq.as_u64()) {
+                problems.push(format!("batch[{i}]: duplicate sequence {}", seq.as_u64()));
+            }
+        }
         let mut total: u64 = 0;
         for (i, (seq, q)) in seqs.iter().zip(query_lens.iter()).enumerate() {
             match self.seq(*seq) {
@@ -974,7 +1474,10 @@ impl StateManager {
                             s.ctx_len, self.config.max_ctx
                         )),
                     }
-                    total = total.saturating_add(u64::from(*q));
+                    match total.checked_add(u64::from(*q)) {
+                        Some(next) => total = next,
+                        None => problems.push(format!("batch[{i}]: token total overflows")),
+                    }
                 }
             }
         }
@@ -997,7 +1500,13 @@ impl StateManager {
             })?;
             ctx_len.push(s.ctx_len);
             for k in 0..*q {
-                positions.push(s.ctx_len + k);
+                positions.push(
+                    s.ctx_len
+                        .checked_add(k)
+                        .ok_or_else(|| StateError::Overflow {
+                            what: "batch position".to_owned(),
+                        })?,
+                );
             }
         }
 
@@ -1011,27 +1520,63 @@ impl StateManager {
             } else {
                 let mut row = Vec::with_capacity(positions.len());
                 for (si, (seq, q)) in seqs.iter().zip(query_lens.iter()).enumerate() {
-                    let s = &self.seqs[&seq.as_u64()];
+                    let s = self.seq(*seq).map_err(|_| StateError::InvalidBatch {
+                        detail: "sequence vanished during batch build".to_owned(),
+                    })?;
+                    let end = ctx_len[si]
+                        .checked_add(*q)
+                        .ok_or_else(|| StateError::Overflow {
+                            what: "batch reserved end".to_owned(),
+                        })?;
                     for k in 0..*q {
-                        let pos = ctx_len[si] + k;
-                        let bi = pos / BLOCK_TOKENS;
-                        let lane = pos % BLOCK_TOKENS;
-                        let at = s.indices[gi].partition_point(|&i| i < bi);
-                        let id = s.tables[gi][at];
-                        row.push(id * BLOCK_TOKENS + lane);
+                        let pos =
+                            ctx_len[si]
+                                .checked_add(k)
+                                .ok_or_else(|| StateError::Overflow {
+                                    what: "batch position".to_owned(),
+                                })?;
+                        row.push(flatten_slot(s, gi, pos, end)?);
                     }
                 }
                 slot_map.push(row);
             }
-            // block_table + window_start rows
+            // block_table + window_start rows.
+            //
+            // DECISION(A1.11) per SI-17: the §3.5 ring sentence describes the
+            // eviction policy, not the storage shape. Every row stays width
+            // `max_blocks` with each block id at its absolute logical block
+            // index and sentinel holes where window eviction released blocks;
+            // rejected: compacting live ids to the front (destroys the
+            // position-to-index mapping the slot formula relies on).
             let mut table_rows = Vec::with_capacity(seqs.len());
             let mut ws_rows = Vec::with_capacity(seqs.len());
             for seq in seqs {
-                let s = &self.seqs[&seq.as_u64()];
+                let s = self.seq(*seq).map_err(|_| StateError::InvalidBatch {
+                    detail: "sequence vanished during batch build".to_owned(),
+                })?;
                 let mut row = vec![BLOCK_SENTINEL; self.max_blocks as usize];
                 if g.spec.is_paged() {
-                    for (at, id) in s.tables[gi].iter().enumerate() {
-                        row[at] = *id;
+                    let indices = s.indices.get(gi).ok_or_else(|| StateError::InvalidBatch {
+                        detail: format!("sequence {} has no table", seq.as_u64()),
+                    })?;
+                    let tables = s.tables.get(gi).ok_or_else(|| StateError::InvalidBatch {
+                        detail: format!("sequence {} has no table", seq.as_u64()),
+                    })?;
+                    for (at, idx) in indices.iter().enumerate() {
+                        let id =
+                            tables
+                                .get(at)
+                                .copied()
+                                .ok_or_else(|| StateError::InvalidBatch {
+                                    detail: format!("sequence {} has no table", seq.as_u64()),
+                                })?;
+                        let cell: usize =
+                            usize::try_from(*idx).map_err(|_| StateError::Overflow {
+                                what: "block table index".to_owned(),
+                            })?;
+                        *row.get_mut(cell).ok_or_else(|| StateError::Overflow {
+                            what: "block table index".to_owned(),
+                        })? = id;
                     }
                 }
                 table_rows.push(row);
@@ -1039,7 +1584,7 @@ impl StateManager {
                     None | Some(crate::spec::Retain::All) => 0,
                     Some(crate::spec::Retain::Window { w })
                     | Some(crate::spec::Retain::SinkWindow { w, .. }) => {
-                        s.ctx_len.saturating_sub(w)
+                        window_start_of(s.ctx_len, w)
                     }
                 };
                 ws_rows.push(ws);
@@ -1061,43 +1606,78 @@ impl StateManager {
 
     /// Pool budget snapshot (Spec 3 §5 `budget`).
     pub fn budget(&self) -> Budget {
+        // DECISION(A1.11): the sub-block remainder of the proportional split
+        // is reported as `unusable_bytes` and `host_free` is an explicit zero
+        // while host swap is deferred to B1; rejected: silently absorbing the
+        // remainder into a total or omitting the host line (both hide bytes
+        // the scheduler cannot spend).
+        //
+        // All products below are bounded by construction (per-group assigned
+        // bytes fit in u64 and the free sums cannot exceed them), so the
+        // widening `as u128` casts are lossless and the single narrowing
+        // conversions name the invariant they rely on.
+        let mut free_paged: u128 = 0;
+        let mut free_fixed: u128 = 0;
         let mut groups = Vec::with_capacity(self.groups.len());
-        let mut free_bytes: u64 = 0;
         for gi in 0..self.groups.len() {
-            match &self.pools[gi] {
-                Some(p) => {
-                    free_bytes += (p.free.len() as u64) * p.block_bytes;
-                    groups.push(GroupBudget {
-                        index: gi,
-                        total_blocks: p.total,
-                        free_blocks: p.free.len() as u32,
-                        block_bytes: p.block_bytes,
-                        base_offset: p.base_offset,
-                    });
-                }
-                None => groups.push(GroupBudget {
-                    index: gi,
-                    total_blocks: 0,
-                    free_blocks: 0,
-                    block_bytes: 0,
-                    base_offset: 0,
-                }),
+            let mut entry = GroupBudget {
+                index: gi,
+                total_blocks: 0,
+                free_blocks: 0,
+                block_bytes: 0,
+                base_offset: 0,
+                total_slots: 0,
+                free_slots: 0,
+                slot_bytes_per_seq: 0,
+            };
+            if let Some(p) = &self.pools[gi] {
+                free_paged += p.free.len() as u128 * p.block_bytes as u128;
+                entry.total_blocks = p.total;
+                entry.free_blocks = p
+                    .free
+                    .len()
+                    .try_into()
+                    .expect("free blocks fit u32: bounded by the pool total");
+                entry.block_bytes = p.block_bytes;
+                entry.base_offset = p.base_offset;
             }
+            if let Some(f) = &self.fixed[gi] {
+                free_fixed += f.free.len() as u128 * f.slot_bytes_per_seq as u128;
+                entry.total_slots = f.total_slots;
+                entry.free_slots = f
+                    .free
+                    .len()
+                    .try_into()
+                    .expect("free slots fit u32: bounded by max_seqs");
+                entry.slot_bytes_per_seq = f.slot_bytes_per_seq;
+                entry.base_offset = f.base_offset;
+            }
+            groups.push(entry);
         }
         Budget {
             groups,
             pool_bytes_total: self.pool_bytes_total,
-            pool_bytes_free: free_bytes,
+            pool_bytes_free: u64::try_from(free_paged)
+                .expect("free paged bytes fit: bounded by assigned pool bytes"),
+            fixed_bytes_total: self.fixed_bytes_total,
+            fixed_bytes_free: u64::try_from(free_fixed)
+                .expect("free fixed bytes fit: bounded by assigned fixed bytes"),
+            host_free: 0,
+            unusable_bytes: self.unusable_bytes,
         }
     }
 
     /// Manager statistics (Spec 3 §5 `stats`).
     pub fn stats(&self) -> Stats {
-        let mut alloc: u64 = 0;
-        let mut total: u64 = 0;
+        let mut alloc: u128 = 0;
+        let mut total: u128 = 0;
         for pool in self.pools.iter().flatten() {
-            alloc += (pool.total - pool.free.len() as u32) as u64;
-            total += pool.total as u64;
+            let pool_total = pool.total as u128;
+            let pool_free = pool.free.len() as u128;
+            alloc += pool_total
+                .checked_sub(pool_free)
+                .expect("free blocks cannot exceed the pool total");
+            total += pool_total;
         }
         Stats {
             prefix_hit_rate: 0.0,
@@ -1113,27 +1693,48 @@ impl StateManager {
     }
 }
 
-/// Block indices retained at `end` for a paged spec (Spec 3 §3.5).
-fn retained_indices(spec: StateSpec, end: u32, max_ctx: u32) -> Vec<u32> {
-    let _ = max_ctx;
-    let first_block = |pos: u32| pos / BLOCK_TOKENS;
-    let last_block = |end: u32| end.div_ceil(BLOCK_TOKENS);
-    match spec.retain() {
-        None | Some(crate::spec::Retain::All) => (0..last_block(end)).collect(),
-        Some(crate::spec::Retain::Window { w }) => {
-            let ws = end.saturating_sub(w);
-            (first_block(ws)..last_block(end)).collect()
-        }
-        Some(crate::spec::Retain::SinkWindow { n, w }) => {
-            let sink_end = n.min(end);
-            let ws = end.saturating_sub(w);
-            let mut out: Vec<u32> = (0..last_block(sink_end)).collect();
-            for b in first_block(ws)..last_block(end) {
-                if !out.contains(&b) {
-                    out.push(b);
-                }
-            }
-            out
-        }
+/// Mathematical `max(0, ctx - w)` via checked branching (Spec 3 §3.5).
+///
+/// A short unverified sequence is normal, not malformed state, so this is an
+/// explicit branch — never a saturating subtract that could hide a genuine
+/// underflow elsewhere.
+//
+// The `implicit_saturating_sub` lint suggests `saturating_sub` here; that
+// spelling is deliberately refused because silent saturation is exactly what
+// the hostile audit for this card bans on state paths.
+#[allow(clippy::implicit_saturating_sub)]
+fn window_start_of(ctx: u32, w: u32) -> u32 {
+    if ctx >= w {
+        ctx - w
+    } else {
+        0
     }
+}
+
+/// Flattened slot for one retained position: `block_id * 32 + lane`
+/// (Spec 1 §2.5, Spec 3 §3.3).
+///
+// DECISION(A1.11) per SI-17: the flattened value carries the pool-global
+// block id, not the within-table position, so the device derives
+// `base[group] + block_id * block_bytes` directly; ids are per-group-pool,
+// never arena-global across groups. A position with no mapped block is a
+// typed error, never a clamp to a neighboring block.
+fn flatten_slot(s: &SeqState, group: usize, pos: u32, end: u32) -> StateResult<u32> {
+    let missing = || StateError::UnmappedPosition { group, pos, end };
+    let indices = s.indices.get(group).ok_or_else(missing)?;
+    let tables = s.tables.get(group).ok_or_else(missing)?;
+    let block = pos / BLOCK_TOKENS;
+    let lane = pos % BLOCK_TOKENS;
+    let at = indices.partition_point(|&i| i < block);
+    if indices.get(at) != Some(&block) {
+        return Err(missing());
+    }
+    let id = tables.get(at).copied().ok_or_else(missing)?;
+    u64::from(id)
+        .checked_mul(u64::from(BLOCK_TOKENS))
+        .and_then(|v| v.checked_add(u64::from(lane)))
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| StateError::Overflow {
+            what: "slot id".to_owned(),
+        })
 }
