@@ -192,6 +192,7 @@ name = "r9v-state"
 version = "0.1.0"
 dependencies = [
  "r9v-common",
+ "thiserror",
 ]
 
 [[package]]
