@@ -109,9 +109,10 @@ pub fn copy(_op: &CopyOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resu
             }
         }
         _ => {
-            for i in 0..num_elem {
-                y.write_f32(i, x.read_f32(i));
-            }
+            return Err(T0Error::BackingRepresentationMismatch {
+                op: "copy",
+                dtype: x.dtype(),
+            });
         }
     }
 

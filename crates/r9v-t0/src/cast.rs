@@ -35,7 +35,7 @@ pub fn cast(op: &CastOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resul
     // which cannot represent U32/I32 magnitudes beyond 2^24 and would normalize FP8 NaN
     // payloads (Spec 1 §2.1, Spec 1 §6.4).
     if x.dtype() == y.dtype() {
-        copy_identity(x, y);
+        copy_identity(x, y)?;
         return Ok(());
     }
 
@@ -52,8 +52,8 @@ pub fn cast(op: &CastOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resul
 ///
 /// Every storage representation pair for the shared dtype moves raw bits, so large integers,
 /// NaN payloads, and packed nibbles survive unchanged. Any unexpected representation pair
-/// falls back to the `f32` value path.
-fn copy_identity(x: &TensorView<'_>, y: &mut TensorViewMut<'_>) {
+/// fails closed instead of silently converting through a lossy value path.
+fn copy_identity(x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Result<(), T0Error> {
     let num_elem = x.num_elements();
     match (&x.data, &mut y.data) {
         (TensorData::F32(src), TensorDataMut::F32(dst)) => {
@@ -130,11 +130,14 @@ fn copy_identity(x: &TensorView<'_>, y: &mut TensorViewMut<'_>) {
             }
         }
         _ => {
-            for i in 0..num_elem {
-                y.write_f32(i, x.read_f32(i));
-            }
+            return Err(T0Error::BackingRepresentationMismatch {
+                op: "cast",
+                dtype: x.dtype(),
+            });
         }
     }
+
+    Ok(())
 }
 
 /// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.A, Spec 4 §2).

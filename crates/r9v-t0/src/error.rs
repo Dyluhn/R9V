@@ -93,6 +93,15 @@ pub enum T0Error {
         to: DType,
     },
 
+    /// Validated same-dtype operands use incompatible backing representations.
+    #[error("op `{op}` has no bit-exact backing conversion for dtype `{dtype:?}`")]
+    BackingRepresentationMismatch {
+        /// Operation that requires a bit-exact transfer.
+        op: &'static str,
+        /// Shared logical data type of the operands.
+        dtype: DType,
+    },
+
     /// Multiple validation errors collected together (CONVENTIONS.md §1.4).
     #[error("{count} validation error(s) in op `{op}`: {problems:?}")]
     Multiple {
