@@ -17,6 +17,16 @@ fn public_types_are_send_and_sync() {
     assert_send_sync::<L1Regions>();
     assert_send_sync::<L1sRegions>();
     assert_send_sync::<r9v_ir::LayoutId>();
+    assert_send_sync::<r9v_format::SchemeId>();
+    assert_send_sync::<r9v_format::ScaleGeometry>();
+    assert_send_sync::<r9v_format::I8RowScale>();
+    assert_send_sync::<r9v_format::I8Block128Scale>();
+    assert_send_sync::<r9v_format::E4M3Block128Scale>();
+    assert_send_sync::<r9v_format::I4KSuperblock>();
+    assert_send_sync::<r9v_format::E4m3>();
+    assert_send_sync::<r9v_format::QuantValue>();
+    assert_send_sync::<r9v_format::ScaleSet>();
+    assert_send_sync::<r9v_ir::SchemeId>();
 }
 
 #[test]
@@ -37,6 +47,104 @@ fn closed_sets_match_exhaustively_without_wildcards() {
     assert_eq!(layout_name(Layout::L1S), "l1s");
     assert!(packing_is_planes(Packing::bit_planes(6).unwrap()));
     assert!(!packing_is_planes(Packing::Byte));
+}
+
+fn assert_plain_data<
+    T: Send + Sync + Copy + Clone + PartialEq + Eq + std::hash::Hash + std::fmt::Debug,
+>() {
+}
+
+#[test]
+fn scheme_types_are_plain_data() {
+    assert_plain_data::<r9v_format::SchemeId>();
+    assert_plain_data::<r9v_format::ScaleGeometry>();
+    assert_plain_data::<r9v_format::I8RowScale>();
+    assert_plain_data::<r9v_format::I8Block128Scale>();
+    assert_plain_data::<r9v_format::E4M3Block128Scale>();
+    assert_plain_data::<r9v_format::I4KSuperblock>();
+    assert_plain_data::<r9v_format::E4m3>();
+    assert_plain_data::<r9v_format::QuantValue>();
+}
+
+#[test]
+fn scheme_id_covers_every_spec_table_row() {
+    // Exhaustive with no wildcard: adding a scheme breaks this compile.
+    fn code(id: r9v_format::SchemeId) -> u64 {
+        match id {
+            r9v_format::SchemeId::I8R => 1,
+            r9v_format::SchemeId::I8B128 => 2,
+            r9v_format::SchemeId::I4K => 3,
+            r9v_format::SchemeId::E4M3B128 => 4,
+            r9v_format::SchemeId::I8B32F => 5,
+            r9v_format::SchemeId::I4B32F => 6,
+            r9v_format::SchemeId::I4B32FM => 7,
+            r9v_format::SchemeId::I5B32F => 8,
+            r9v_format::SchemeId::I5B32FM => 9,
+            r9v_format::SchemeId::I5K => 10,
+            r9v_format::SchemeId::I6K => 11,
+            r9v_format::SchemeId::I3K => 12,
+            r9v_format::SchemeId::I2K => 13,
+            r9v_format::SchemeId::I4Nl => 14,
+            r9v_format::SchemeId::I4Xs => 15,
+            r9v_format::SchemeId::Iq3Xxs => 16,
+            r9v_format::SchemeId::Iq3S => 17,
+            r9v_format::SchemeId::Iq2Xxs => 18,
+            r9v_format::SchemeId::Iq2Xs => 19,
+            r9v_format::SchemeId::Iq2S => 20,
+            r9v_format::SchemeId::Iq1S => 21,
+            r9v_format::SchemeId::Iq1M => 22,
+        }
+    }
+    for id in r9v_format::SchemeId::ALL {
+        assert_eq!(code(id), id.code());
+    }
+}
+
+#[test]
+fn scheme_errors_carry_scheme_and_reason() {
+    let text = format!(
+        "{}",
+        FormatError::UnknownScheme {
+            value: "q9_z".to_owned()
+        }
+    );
+    assert!(text.contains("q9_z"));
+    let text = format!(
+        "{}",
+        FormatError::ReservedScheme {
+            scheme: "i8_b32f",
+            owner: "A2.3"
+        }
+    );
+    assert!(text.contains("i8_b32f"));
+    assert!(text.contains("A2.3"));
+    let text = format!(
+        "{}",
+        FormatError::SchemeMismatch {
+            scheme: "i4_k",
+            expected: "u4 + i4_k",
+            got: "i8 + f16"
+        }
+    );
+    assert!(text.contains("i4_k"));
+    let text = format!(
+        "{}",
+        FormatError::InvalidScale {
+            scheme: "i8_b128",
+            record: 5,
+            bits: f32::NAN.to_bits(),
+            reason: "nan"
+        }
+    );
+    assert!(text.contains("i8_b128"));
+    let text = format!(
+        "{}",
+        FormatError::UnsupportedLayout {
+            scheme: "i8_b128",
+            layout: "l0"
+        }
+    );
+    assert!(text.contains("l0"));
 }
 
 #[test]

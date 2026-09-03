@@ -68,6 +68,60 @@ pub enum FormatError {
         /// Actual byte length.
         got: u64,
     },
+    /// An unknown scheme code or name was supplied (Spec 2 §3, §9:
+    /// scheme ids are immutable; decoding an unknown id is an error,
+    /// never a guess).
+    #[error("unknown scheme {value} (Spec 2 §3)")]
+    UnknownScheme {
+        /// The unrecognized code or name.
+        value: String,
+    },
+    /// A repack-only scheme was used where only native behavior exists
+    /// (Spec 2 §3.3: repack rules and reference dequant for these ids
+    /// are owned by cards A2.3/A2.4, not A2.2).
+    #[error("scheme {scheme} is reserved for {owner} (Spec 2 §3.3)")]
+    ReservedScheme {
+        /// The repack-only scheme name (`i8_b32f`, ...).
+        scheme: &'static str,
+        /// The card that owns this scheme's behavior (`A2.3`, `A2.4`).
+        owner: &'static str,
+    },
+    /// A value or scale record of the wrong kind was passed for the
+    /// scheme (Spec 2 §3.2: each native scheme fixes its value bits
+    /// and scale record format).
+    #[error("scheme {scheme} expects {expected}, got {got} (Spec 2 §3.2)")]
+    SchemeMismatch {
+        /// The scheme that was requested.
+        scheme: &'static str,
+        /// The value/scale kind the scheme requires.
+        expected: &'static str,
+        /// The value/scale kind that was supplied.
+        got: &'static str,
+    },
+    /// A scale record failed validity: NaN or infinite, negative, or
+    /// not representable in its stored dtype (Spec 2 §3.2: scales are
+    /// non-negative finite multipliers; super-scales come from maxima).
+    #[error("invalid scale for {scheme} record {record}: {reason} (Spec 2 §3.2)")]
+    InvalidScale {
+        /// The scheme owning the record.
+        scheme: &'static str,
+        /// Index of the offending record in input order.
+        record: u64,
+        /// `f32::to_bits` of the offending scale value.
+        bits: u32,
+        /// Why it is rejected (`nan`, `infinite`, `negative`, ...).
+        reason: &'static str,
+    },
+    /// SoA scale geometry was requested for a layout that does not use
+    /// it (Spec 2 §2.1 vs §3.1: `L0` rows carry trailing scale records
+    /// composed with the `l0_*` helpers, not the SoA region).
+    #[error("scheme {scheme} has no SoA scale region on layout {layout} (Spec 2 §3.1)")]
+    UnsupportedLayout {
+        /// The scheme that was requested.
+        scheme: &'static str,
+        /// The layout that was supplied.
+        layout: &'static str,
+    },
     /// A logical element value did not fit its packing (Spec 2 §2.2
     /// table: nibbles hold 0..16, L1S indices hold 0..4).
     #[error("value {value} at position {position} does not fit {what} (Spec 2 §2)")]
