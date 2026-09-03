@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tolerance table per Spec 1 §6.1 loaded as data (CONVENTIONS.md §4.3).
 
-/// Numeric tolerances from Spec 1 §6.1.
+/// Numeric tolerances from Spec 1 §6.1 (Spec 1 §6.1, Spec 4 §10, Spec 1 App. B).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tolerance {
     /// Absolute error tolerance.
@@ -40,7 +40,7 @@ impl Tolerance {
         Self { abs: 0.0, rel: 0.0 }
     }
 
-    /// Asserts that `actual` and `expected` are within tolerance.
+    /// Asserts that `actual` and `expected` are within tolerance (Spec 1 §6.1, Spec 4 §10).
     pub fn assert_within(&self, actual: f64, expected: f64, context: &str) {
         let diff = (actual - expected).abs();
         let limit = self.abs + self.rel * expected.abs();

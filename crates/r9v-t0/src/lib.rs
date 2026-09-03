@@ -14,6 +14,7 @@ pub mod dtype;
 pub mod error;
 pub mod norm;
 pub mod quant_act;
+pub mod residual_add;
 pub mod rope;
 pub mod tolerance;
 
@@ -24,7 +25,7 @@ pub use activation::{
 };
 pub use buffer::{TensorData, TensorDataMut, TensorView, TensorViewMut, TypedBuffer};
 pub use cast::{cast, cast_f64_reference};
-pub use copy::copy;
+pub use copy::{copy, copy_f64_reference};
 pub use dtype::{
     bf16_to_f32, dtype_element_size, f16_to_f32, f32_to_bf16, f32_to_f16, fp8_e4m3_decode,
     fp8_e4m3_encode, fp8_e5m2_decode, fp8_e5m2_encode, read_f32_at, read_f64_at, write_f32_at,
@@ -36,11 +37,11 @@ pub use residual_add::{residual_add, residual_add_f64_reference};
 pub use rope::{rope, rope_f64_reference};
 pub use tolerance::Tolerance;
 
-pub mod residual_add;
-
 use r9v_ir::Op;
 
-/// Dispatches and executes an elementwise op using scalar T0 reference implementations.
+/// Dispatches and executes an elementwise op using scalar T0 reference implementations (Spec 1 §4.B, Spec 4 §2).
+///
+/// Enforces exact input and output operand arity for each supported elementwise op.
 pub fn execute_elementwise_op(
     op: &Op,
     inputs: &[TensorView<'_>],
@@ -48,7 +49,7 @@ pub fn execute_elementwise_op(
 ) -> Result<(), T0Error> {
     match op {
         Op::Norm(norm_op) => {
-            if inputs.len() < 2 || outputs.is_empty() {
+            if (inputs.len() != 2 && inputs.len() != 3) || outputs.len() != 1 {
                 return Err(T0Error::InvalidAttribute {
                     op: "norm",
                     attribute: "inputs/outputs",
@@ -61,7 +62,7 @@ pub fn execute_elementwise_op(
             }
             let x = &inputs[0];
             let weight = &inputs[1];
-            let bias = if inputs.len() >= 3 {
+            let bias = if inputs.len() == 3 {
                 Some(&inputs[2])
             } else {
                 None
@@ -69,7 +70,7 @@ pub fn execute_elementwise_op(
             norm(norm_op, x, weight, bias, &mut outputs[0])
         }
         Op::ResidualAdd(res_op) => {
-            if inputs.len() < 2 || outputs.is_empty() {
+            if inputs.len() != 2 || outputs.len() != 1 {
                 return Err(T0Error::InvalidAttribute {
                     op: "residual_add",
                     attribute: "inputs/outputs",
@@ -83,7 +84,7 @@ pub fn execute_elementwise_op(
             residual_add(res_op, &inputs[0], &inputs[1], &mut outputs[0])
         }
         Op::ActMul(act_mul_op) => {
-            if inputs.len() < 2 || outputs.is_empty() {
+            if inputs.len() != 2 || outputs.len() != 1 {
                 return Err(T0Error::InvalidAttribute {
                     op: "act_mul",
                     attribute: "inputs/outputs",
@@ -97,7 +98,7 @@ pub fn execute_elementwise_op(
             act_mul(act_mul_op, &inputs[0], &inputs[1], &mut outputs[0])
         }
         Op::Activation(act_op) => {
-            if inputs.is_empty() || outputs.is_empty() {
+            if inputs.len() != 1 || outputs.len() != 1 {
                 return Err(T0Error::InvalidAttribute {
                     op: "activation",
                     attribute: "inputs/outputs",
@@ -111,7 +112,7 @@ pub fn execute_elementwise_op(
             activation(act_op, &inputs[0], &mut outputs[0])
         }
         Op::Rope(rope_op) => {
-            if inputs.len() < 2 || outputs.is_empty() {
+            if inputs.len() != 2 || outputs.len() != 1 {
                 return Err(T0Error::InvalidAttribute {
                     op: "rope",
                     attribute: "inputs/outputs",
@@ -125,7 +126,7 @@ pub fn execute_elementwise_op(
             rope(rope_op, &inputs[0], &inputs[1], &mut outputs[0])
         }
         Op::Cast(cast_op) => {
-            if inputs.is_empty() || outputs.is_empty() {
+            if inputs.len() != 1 || outputs.len() != 1 {
                 return Err(T0Error::InvalidAttribute {
                     op: "cast",
                     attribute: "inputs/outputs",
@@ -139,7 +140,7 @@ pub fn execute_elementwise_op(
             cast(cast_op, &inputs[0], &mut outputs[0])
         }
         Op::Copy(copy_op) => {
-            if inputs.is_empty() || outputs.is_empty() {
+            if inputs.len() != 1 || outputs.len() != 1 {
                 return Err(T0Error::InvalidAttribute {
                     op: "copy",
                     attribute: "inputs/outputs",
@@ -153,7 +154,7 @@ pub fn execute_elementwise_op(
             copy(copy_op, &inputs[0], &mut outputs[0])
         }
         Op::QuantAct(quant_op) => {
-            if inputs.is_empty() || outputs.len() < 2 {
+            if inputs.len() != 1 || outputs.len() != 2 {
                 return Err(T0Error::InvalidAttribute {
                     op: "quant_act",
                     attribute: "inputs/outputs",

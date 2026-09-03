@@ -429,3 +429,34 @@ fn norm_rejects_malformed_inputs_with_complete_error() {
     assert!(msg.contains("not divisible"));
     assert!(msg.contains("does not match"));
 }
+
+#[test]
+fn norm_rejects_invalid_attributes() {
+    let op = NormOp {
+        kind: NormKind::Rms,
+        eps: -1e-5,              // invalid eps <= 0
+        axis: NormAxis::Head(0), // invalid head dim 0
+        weight_offset: f32::NAN, // invalid weight_offset
+        out_dtype: DType::I8,    // invalid out_dtype
+    };
+
+    let x_buf = TypedBuffer::zeros(&[2, 64], DType::F32);
+    let w_buf = TypedBuffer::zeros(&[64], DType::F32);
+    let mut y_buf = TypedBuffer::zeros(&[2, 64], DType::I8);
+
+    let err = norm(
+        &op,
+        &x_buf.as_view(),
+        &w_buf.as_view(),
+        None,
+        &mut y_buf.as_view_mut(),
+    )
+    .unwrap_err();
+
+    let msg = err.to_string();
+    assert!(msg.contains("validation error(s)"));
+    assert!(msg.contains("eps must be finite and > 0"));
+    assert!(msg.contains("out_dtype must be f16, bf16, or f32"));
+    assert!(msg.contains("weight_offset must be finite"));
+    assert!(msg.contains("NormAxis::Head(d): d must be > 0"));
+}

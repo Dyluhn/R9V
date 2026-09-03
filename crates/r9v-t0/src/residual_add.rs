@@ -6,13 +6,17 @@ use r9v_ir::{DType, ResidualAddOp};
 use crate::buffer::{TensorView, TensorViewMut};
 use crate::error::T0Error;
 
-/// Executes scalar T0 residual addition: `a + b` in f32, cast to `out_dtype` (Spec 1 §4.B).
+/// Executes scalar T0 residual addition: `a + b` in f32, cast to `out_dtype` (Spec 1 §4.B, Spec 1 §6.1, Spec 1 §6.4, Spec 4 §2).
 pub fn residual_add(
     op: &ResidualAddOp,
     a: &TensorView<'_>,
     b: &TensorView<'_>,
     y: &mut TensorViewMut<'_>,
 ) -> Result<(), T0Error> {
+    a.validate_backing("a")?;
+    b.validate_backing("b")?;
+    y.validate_backing("y")?;
+
     let mut problems = Vec::new();
 
     if a.shape() != b.shape() {
@@ -62,7 +66,7 @@ pub fn residual_add(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0.
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.B, Spec 4 §2).
 pub fn residual_add_f64_reference(a: &[f64], b: &[f64]) -> Vec<f64> {
     assert_eq!(a.len(), b.len());
     a.iter().zip(b.iter()).map(|(&x, &y)| x + y).collect()

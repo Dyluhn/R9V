@@ -381,3 +381,68 @@ fn rope_rejects_odd_rot_dim_and_dimension_mismatch() {
     assert!(msg.contains("exceeds head dimension"));
     assert!(msg.contains("does not match"));
 }
+
+#[test]
+fn rope_rejects_rank_zero_positions_with_typed_error() {
+    let op = RopeOp {
+        rot_dim: 16,
+        theta: 10000.0,
+        style: RopeStyle::Neox,
+        scaling: RopeScaling::None,
+        mrope_sections: None,
+        out_dtype: DType::F32,
+    };
+
+    let x_buf = TypedBuffer::zeros(&[2, 2, 16], DType::F32);
+    let pos_buf = TypedBuffer::zeros(&[], DType::U32); // rank 0
+    let mut y_buf = TypedBuffer::zeros(&[2, 2, 16], DType::F32);
+
+    let err = rope(
+        &op,
+        &x_buf.as_view(),
+        &pos_buf.as_view(),
+        &mut y_buf.as_view_mut(),
+    )
+    .unwrap_err();
+
+    match err {
+        r9v_t0::T0Error::RankMismatch {
+            tensor,
+            expected,
+            got,
+            ..
+        } => {
+            assert_eq!(tensor, "positions");
+            assert_eq!(expected, 1);
+            assert_eq!(got, 0);
+        }
+        other => panic!("expected RankMismatch error, got {other:?}"),
+    }
+}
+
+#[test]
+fn rope_rejects_dynamic_scaling_rot_dim_2() {
+    let op = RopeOp {
+        rot_dim: 2,
+        theta: 10000.0,
+        style: RopeStyle::Neox,
+        scaling: RopeScaling::Dynamic,
+        mrope_sections: None,
+        out_dtype: DType::F32,
+    };
+
+    let x_buf = TypedBuffer::zeros(&[2, 2, 16], DType::F32);
+    let pos_buf = TypedBuffer::zeros(&[2], DType::U32);
+    let mut y_buf = TypedBuffer::zeros(&[2, 2, 16], DType::F32);
+
+    let err = rope(
+        &op,
+        &x_buf.as_view(),
+        &pos_buf.as_view(),
+        &mut y_buf.as_view_mut(),
+    )
+    .unwrap_err();
+
+    let msg = err.to_string();
+    assert!(msg.contains("rot_dim 2 is invalid for Dynamic RoPE"));
+}

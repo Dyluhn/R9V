@@ -7,14 +7,25 @@ use crate::buffer::{TensorView, TensorViewMut};
 use crate::dtype::fp8_e4m3_encode;
 use crate::error::T0Error;
 
-/// Executes scalar T0 activation quantization (Spec 1 §4.A, Spec 2 §3.4).
+/// Executes scalar T0 activation quantization (Spec 1 §4.A, Spec 2 §3.4, Spec 4 §2).
 pub fn quant_act(
     op: &QuantActOp,
     x: &TensorView<'_>,
     xq: &mut TensorViewMut<'_>,
     scale: &mut TensorViewMut<'_>,
 ) -> Result<(), T0Error> {
+    x.validate_backing("x")?;
+    xq.validate_backing("xq")?;
+    scale.validate_backing("scale")?;
+
     let mut problems = Vec::new();
+
+    if op.target != DType::I8 && op.target != DType::E4m3 {
+        problems.push(format!(
+            "quant_act target must be i8 or e4m3, got {:?}",
+            op.target
+        ));
+    }
 
     if x.rank() != 2 {
         problems.push(format!(
@@ -64,6 +75,12 @@ pub fn quant_act(
 
         match op.scheme {
             QuantScheme::PerToken => {
+                if op.target != DType::I8 && op.target != DType::E4m3 {
+                    problems.push(format!(
+                        "PerToken only supports i8 or e4m3 target, got {:?}",
+                        op.target
+                    ));
+                }
                 if scale.rank() != 1 || scale.shape()[0] != t {
                     problems.push(format!(
                         "PerToken scale: expected rank 1 [{t}], got rank {} with shape {:?}",
@@ -193,7 +210,7 @@ pub fn quant_act(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0.
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.A, Spec 2 §3.4, Spec 4 §2).
 pub fn quant_act_f64_reference(
     op: &QuantActOp,
     x: &[f64],

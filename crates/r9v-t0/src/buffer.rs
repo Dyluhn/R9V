@@ -4,11 +4,12 @@
 use r9v_ir::DType;
 
 use crate::dtype::{
-    bf16_to_f32, f16_to_f32, f32_to_bf16, f32_to_f16, fp8_e4m3_decode, fp8_e4m3_encode,
-    fp8_e5m2_decode, fp8_e5m2_encode, read_f32_at, read_f64_at, write_f32_at,
+    bf16_to_f32, dtype_element_size, f16_to_f32, f32_to_bf16, f32_to_f16, fp8_e4m3_decode,
+    fp8_e4m3_encode, fp8_e5m2_decode, fp8_e5m2_encode, read_f32_at, read_f64_at, write_f32_at,
 };
+use crate::error::T0Error;
 
-/// Borrowed tensor data slice variant without raw pointer conversions.
+/// Borrowed tensor data slice variant without raw pointer conversions (Spec 1 §2.3, Spec 4 §2).
 #[derive(Debug, Clone)]
 pub enum TensorData<'a> {
     /// 32-bit floating point slice.
@@ -25,7 +26,7 @@ pub enum TensorData<'a> {
     Bytes(DType, &'a [u8]),
 }
 
-/// Mutable borrowed tensor data slice variant without raw pointer conversions.
+/// Mutable borrowed tensor data slice variant without raw pointer conversions (Spec 1 §2.3, Spec 4 §2).
 #[derive(Debug)]
 pub enum TensorDataMut<'a> {
     /// Mutable 32-bit floating point slice.
@@ -42,15 +43,15 @@ pub enum TensorDataMut<'a> {
     Bytes(DType, &'a mut [u8]),
 }
 
-/// Immutable view over a multidimensional tensor buffer.
+/// Immutable view over a multidimensional tensor buffer (Spec 1 §2.3, Spec 4 §2).
 #[derive(Debug, Clone)]
 pub struct TensorView<'a> {
-    shape: Vec<usize>,
-    data: TensorData<'a>,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) data: TensorData<'a>,
 }
 
 impl<'a> TensorView<'a> {
-    /// Creates a tensor view from raw bytes with shape and dtype.
+    /// Creates a tensor view from raw bytes with shape and dtype (Spec 1 §2.3, Spec 4 §2).
     pub fn from_bytes(shape: &[usize], dtype: DType, data: &'a [u8]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -58,7 +59,7 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Creates a tensor view from an `f32` slice.
+    /// Creates a tensor view from an `f32` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_f32_slice(shape: &[usize], data: &'a [f32]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -66,7 +67,7 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Creates a tensor view from an `f16` (u16 bits) slice.
+    /// Creates a tensor view from an `f16` (u16 bits) slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_f16_slice(shape: &[usize], data: &'a [u16]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -74,7 +75,7 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Creates a tensor view from an `bf16` (u16 bits) slice.
+    /// Creates a tensor view from an `bf16` (u16 bits) slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_bf16_slice(shape: &[usize], data: &'a [u16]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -82,7 +83,7 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Creates a tensor view from an `i8` slice.
+    /// Creates a tensor view from an `i8` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_i8_slice(shape: &[usize], data: &'a [i8]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -90,7 +91,7 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Creates a tensor view from a `u32` slice.
+    /// Creates a tensor view from a `u32` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_u32_slice(shape: &[usize], data: &'a [u32]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -98,17 +99,17 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Returns tensor shape.
+    /// Returns tensor shape (Spec 1 §2.3, Spec 4 §2).
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
 
-    /// Returns tensor rank.
+    /// Returns tensor rank (Spec 1 §2.3, Spec 4 §2).
     pub fn rank(&self) -> usize {
         self.shape.len()
     }
 
-    /// Returns tensor data type.
+    /// Returns tensor data type (Spec 1 §2.3, Spec 4 §2).
     pub fn dtype(&self) -> DType {
         match self.data {
             TensorData::F32(_) => DType::F32,
@@ -120,12 +121,82 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Returns total number of elements.
+    /// Returns total number of elements (Spec 1 §2.3, Spec 4 §2).
     pub fn num_elements(&self) -> usize {
         self.shape.iter().product()
     }
 
-    /// Reads one element converted to `f32`.
+    /// Returns the backing storage length in elements or raw bytes (Spec 1 §2.3, Spec 4 §2).
+    pub fn backing_len(&self) -> usize {
+        match self.data {
+            TensorData::F32(slice) => slice.len(),
+            TensorData::F16(slice) => slice.len(),
+            TensorData::Bf16(slice) => slice.len(),
+            TensorData::I8(slice) => slice.len(),
+            TensorData::U32(slice) => slice.len(),
+            TensorData::Bytes(_, slice) => slice.len(),
+        }
+    }
+
+    /// Validates backing buffer capacity against tensor shape and element data type (Spec 1 §2.3, Spec 4 §2).
+    ///
+    /// Refuses undersized buffers and shapes that overflow `usize::MAX`.
+    pub fn validate_backing(&self, tensor: &'static str) -> Result<(), T0Error> {
+        let num_elements = match self
+            .shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        {
+            Some(n) => n,
+            None => {
+                return Err(T0Error::BufferLengthMismatch {
+                    tensor,
+                    buffer_len: self.backing_len(),
+                    expected_len: usize::MAX,
+                    shape: self.shape.clone(),
+                });
+            }
+        };
+
+        let (buffer_len, required_len) = match self.data {
+            TensorData::F32(slice) => (slice.len(), num_elements),
+            TensorData::F16(slice) => (slice.len(), num_elements),
+            TensorData::Bf16(slice) => (slice.len(), num_elements),
+            TensorData::I8(slice) => (slice.len(), num_elements),
+            TensorData::U32(slice) => (slice.len(), num_elements),
+            TensorData::Bytes(dtype, slice) => {
+                let required_bytes = if dtype == DType::I4 {
+                    num_elements / 2 + (num_elements % 2)
+                } else {
+                    match num_elements.checked_mul(dtype_element_size(dtype)) {
+                        Some(b) => b,
+                        None => {
+                            return Err(T0Error::BufferLengthMismatch {
+                                tensor,
+                                buffer_len: slice.len(),
+                                expected_len: usize::MAX,
+                                shape: self.shape.clone(),
+                            });
+                        }
+                    }
+                };
+                (slice.len(), required_bytes)
+            }
+        };
+
+        if buffer_len < required_len {
+            return Err(T0Error::BufferLengthMismatch {
+                tensor,
+                buffer_len,
+                expected_len: required_len,
+                shape: self.shape.clone(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Reads one element converted to `f32` (Spec 1 §2.3, Spec 4 §2).
     pub fn read_f32(&self, index: usize) -> f32 {
         match self.data {
             TensorData::F32(slice) => slice[index],
@@ -137,7 +208,7 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Reads one element converted to `f64`.
+    /// Reads one element converted to `f64` (Spec 1 §2.3, Spec 4 §2).
     pub fn read_f64(&self, index: usize) -> f64 {
         match self.data {
             TensorData::F32(slice) => slice[index] as f64,
@@ -149,15 +220,39 @@ impl<'a> TensorView<'a> {
         }
     }
 
-    /// Reads one element as `u32`.
+    /// Reads one element as `u32` (Spec 1 §2.3, Spec 4 §2).
     pub fn read_u32(&self, index: usize) -> u32 {
         match self.data {
             TensorData::U32(slice) => slice[index],
+            TensorData::Bytes(DType::U32, slice) => {
+                let offset = index * 4;
+                u32::from_ne_bytes(slice[offset..offset + 4].try_into().unwrap())
+            }
             _ => self.read_f32(index) as u32,
         }
     }
 
-    /// Reads one element as `i8`.
+    /// Reads one element as `i32` (Spec 1 §2.3, Spec 4 §2).
+    pub fn read_i32(&self, index: usize) -> i32 {
+        match self.data {
+            TensorData::Bytes(DType::I32, slice) => {
+                let offset = index * 4;
+                i32::from_ne_bytes(slice[offset..offset + 4].try_into().unwrap())
+            }
+            _ => self.read_f32(index) as i32,
+        }
+    }
+
+    /// Reads raw byte at index for FP8/byte dtypes (Spec 1 §2.3, Spec 4 §2).
+    pub fn read_byte(&self, index: usize) -> u8 {
+        match self.data {
+            TensorData::Bytes(_, slice) => slice[index],
+            TensorData::I8(slice) => slice[index] as u8,
+            _ => self.read_f32(index) as u8,
+        }
+    }
+
+    /// Reads one element as `i8` (Spec 1 §2.3, Spec 4 §2).
     pub fn read_i8(&self, index: usize) -> i8 {
         match self.data {
             TensorData::I8(slice) => slice[index],
@@ -166,15 +261,15 @@ impl<'a> TensorView<'a> {
     }
 }
 
-/// Mutable view over a multidimensional tensor buffer.
+/// Mutable view over a multidimensional tensor buffer (Spec 1 §2.3, Spec 4 §2).
 #[derive(Debug)]
 pub struct TensorViewMut<'a> {
-    shape: Vec<usize>,
-    data: TensorDataMut<'a>,
+    pub(crate) shape: Vec<usize>,
+    pub(crate) data: TensorDataMut<'a>,
 }
 
 impl<'a> TensorViewMut<'a> {
-    /// Creates a mutable tensor view from raw bytes with shape and dtype.
+    /// Creates a mutable tensor view from raw bytes with shape and dtype (Spec 1 §2.3, Spec 4 §2).
     pub fn from_bytes(shape: &[usize], dtype: DType, data: &'a mut [u8]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -182,7 +277,7 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Creates a mutable tensor view from an `f32` slice.
+    /// Creates a mutable tensor view from an `f32` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_f32_slice(shape: &[usize], data: &'a mut [f32]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -190,7 +285,7 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Creates a mutable tensor view from an `f16` (u16 bits) slice.
+    /// Creates a mutable tensor view from an `f16` (u16 bits) slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_f16_slice(shape: &[usize], data: &'a mut [u16]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -198,7 +293,7 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Creates a mutable tensor view from an `bf16` (u16 bits) slice.
+    /// Creates a mutable tensor view from an `bf16` (u16 bits) slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_bf16_slice(shape: &[usize], data: &'a mut [u16]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -206,7 +301,7 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Creates a mutable tensor view from an `i8` slice.
+    /// Creates a mutable tensor view from an `i8` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_i8_slice(shape: &[usize], data: &'a mut [i8]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -214,7 +309,7 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Creates a mutable tensor view from a `u32` slice.
+    /// Creates a mutable tensor view from a `u32` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_u32_slice(shape: &[usize], data: &'a mut [u32]) -> Self {
         Self {
             shape: shape.to_vec(),
@@ -222,17 +317,17 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Returns tensor shape.
+    /// Returns tensor shape (Spec 1 §2.3, Spec 4 §2).
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
 
-    /// Returns tensor rank.
+    /// Returns tensor rank (Spec 1 §2.3, Spec 4 §2).
     pub fn rank(&self) -> usize {
         self.shape.len()
     }
 
-    /// Returns tensor data type.
+    /// Returns tensor data type (Spec 1 §2.3, Spec 4 §2).
     pub fn dtype(&self) -> DType {
         match self.data {
             TensorDataMut::F32(_) => DType::F32,
@@ -244,12 +339,82 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Returns total number of elements.
+    /// Returns total number of elements (Spec 1 §2.3, Spec 4 §2).
     pub fn num_elements(&self) -> usize {
         self.shape.iter().product()
     }
 
-    /// Reads one element converted to `f32`.
+    /// Returns the backing storage length in elements or raw bytes (Spec 1 §2.3, Spec 4 §2).
+    pub fn backing_len(&self) -> usize {
+        match self.data {
+            TensorDataMut::F32(ref slice) => slice.len(),
+            TensorDataMut::F16(ref slice) => slice.len(),
+            TensorDataMut::Bf16(ref slice) => slice.len(),
+            TensorDataMut::I8(ref slice) => slice.len(),
+            TensorDataMut::U32(ref slice) => slice.len(),
+            TensorDataMut::Bytes(_, ref slice) => slice.len(),
+        }
+    }
+
+    /// Validates backing buffer capacity against tensor shape and element data type (Spec 1 §2.3, Spec 4 §2).
+    ///
+    /// Refuses undersized buffers and shapes that overflow `usize::MAX`.
+    pub fn validate_backing(&self, tensor: &'static str) -> Result<(), T0Error> {
+        let num_elements = match self
+            .shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        {
+            Some(n) => n,
+            None => {
+                return Err(T0Error::BufferLengthMismatch {
+                    tensor,
+                    buffer_len: self.backing_len(),
+                    expected_len: usize::MAX,
+                    shape: self.shape.clone(),
+                });
+            }
+        };
+
+        let (buffer_len, required_len) = match self.data {
+            TensorDataMut::F32(ref slice) => (slice.len(), num_elements),
+            TensorDataMut::F16(ref slice) => (slice.len(), num_elements),
+            TensorDataMut::Bf16(ref slice) => (slice.len(), num_elements),
+            TensorDataMut::I8(ref slice) => (slice.len(), num_elements),
+            TensorDataMut::U32(ref slice) => (slice.len(), num_elements),
+            TensorDataMut::Bytes(dtype, ref slice) => {
+                let required_bytes = if dtype == DType::I4 {
+                    num_elements / 2 + (num_elements % 2)
+                } else {
+                    match num_elements.checked_mul(dtype_element_size(dtype)) {
+                        Some(b) => b,
+                        None => {
+                            return Err(T0Error::BufferLengthMismatch {
+                                tensor,
+                                buffer_len: slice.len(),
+                                expected_len: usize::MAX,
+                                shape: self.shape.clone(),
+                            });
+                        }
+                    }
+                };
+                (slice.len(), required_bytes)
+            }
+        };
+
+        if buffer_len < required_len {
+            return Err(T0Error::BufferLengthMismatch {
+                tensor,
+                buffer_len,
+                expected_len: required_len,
+                shape: self.shape.clone(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Reads one element converted to `f32` (Spec 1 §2.3, Spec 4 §2).
     pub fn read_f32(&self, index: usize) -> f32 {
         match self.data {
             TensorDataMut::F32(ref slice) => slice[index],
@@ -261,7 +426,7 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Reads one element converted to `f64`.
+    /// Reads one element converted to `f64` (Spec 1 §2.3, Spec 4 §2).
     pub fn read_f64(&self, index: usize) -> f64 {
         match self.data {
             TensorDataMut::F32(ref slice) => slice[index] as f64,
@@ -273,7 +438,39 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Writes one `f32` value converted to the destination tensor data type.
+    /// Reads one element as `u32` (Spec 1 §2.3, Spec 4 §2).
+    pub fn read_u32(&self, index: usize) -> u32 {
+        match self.data {
+            TensorDataMut::U32(ref slice) => slice[index],
+            TensorDataMut::Bytes(DType::U32, ref slice) => {
+                let offset = index * 4;
+                u32::from_ne_bytes(slice[offset..offset + 4].try_into().unwrap())
+            }
+            _ => self.read_f32(index) as u32,
+        }
+    }
+
+    /// Reads one element as `i32` (Spec 1 §2.3, Spec 4 §2).
+    pub fn read_i32(&self, index: usize) -> i32 {
+        match self.data {
+            TensorDataMut::Bytes(DType::I32, ref slice) => {
+                let offset = index * 4;
+                i32::from_ne_bytes(slice[offset..offset + 4].try_into().unwrap())
+            }
+            _ => self.read_f32(index) as i32,
+        }
+    }
+
+    /// Reads raw byte at index for FP8/byte dtypes (Spec 1 §2.3, Spec 4 §2).
+    pub fn read_byte(&self, index: usize) -> u8 {
+        match self.data {
+            TensorDataMut::Bytes(_, ref slice) => slice[index],
+            TensorDataMut::I8(ref slice) => slice[index] as u8,
+            _ => self.read_f32(index) as u8,
+        }
+    }
+
+    /// Writes one `f32` value converted to the destination tensor data type (Spec 1 §2.3, Spec 4 §2).
     pub fn write_f32(&mut self, index: usize, val: f32) {
         match self.data {
             TensorDataMut::F32(ref mut slice) => slice[index] = val,
@@ -289,12 +486,12 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Writes one `f64` value converted to the destination tensor data type.
+    /// Writes one `f64` value converted to the destination tensor data type (Spec 1 §2.3, Spec 4 §2).
     pub fn write_f64(&mut self, index: usize, val: f64) {
         self.write_f32(index, val as f32);
     }
 
-    /// Writes raw byte at index (useful for e4m3/e5m2 and custom byte encoding).
+    /// Writes raw byte at index (useful for e4m3/e5m2 and custom byte encoding) (Spec 1 §2.3, Spec 4 §2).
     pub fn write_byte(&mut self, index: usize, val: u8) {
         match self.data {
             TensorDataMut::Bytes(_, ref mut slice) => slice[index] = val,
@@ -303,7 +500,7 @@ impl<'a> TensorViewMut<'a> {
         }
     }
 
-    /// Reborrows as an immutable `TensorView`.
+    /// Reborrows as an immutable `TensorView` (Spec 1 §2.3, Spec 4 §2).
     pub fn as_view(&self) -> TensorView<'_> {
         let data = match self.data {
             TensorDataMut::F32(ref slice) => TensorData::F32(slice),
@@ -320,7 +517,7 @@ impl<'a> TensorViewMut<'a> {
     }
 }
 
-/// Owned heap-allocated multidimensional typed tensor buffer.
+/// Owned heap-allocated multidimensional typed tensor buffer (Spec 1 §2.3, Spec 4 §2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedBuffer {
     shape: Vec<usize>,
@@ -334,7 +531,7 @@ pub struct TypedBuffer {
 }
 
 impl TypedBuffer {
-    /// Creates a zero-initialized typed buffer for the given shape and dtype.
+    /// Creates a zero-initialized typed buffer for the given shape and dtype (Spec 1 §2.3, Spec 4 §2).
     pub fn zeros(shape: &[usize], dtype: DType) -> Self {
         let total_elements: usize = shape.iter().product();
         let mut buf = Self {
@@ -367,7 +564,7 @@ impl TypedBuffer {
         buf
     }
 
-    /// Creates a buffer from `f32` slice.
+    /// Creates a buffer from `f32` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_f32(shape: &[usize], values: &[f32]) -> Self {
         let expected: usize = shape.iter().product();
         assert_eq!(values.len(), expected);
@@ -383,7 +580,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Creates a buffer from `f16` (u16 bits) slice.
+    /// Creates a buffer from `f16` (u16 bits) slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_f16(shape: &[usize], values: &[u16]) -> Self {
         let expected: usize = shape.iter().product();
         assert_eq!(values.len(), expected);
@@ -399,7 +596,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Creates a buffer from `bf16` (u16 bits) slice.
+    /// Creates a buffer from `bf16` (u16 bits) slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_bf16(shape: &[usize], values: &[u16]) -> Self {
         let expected: usize = shape.iter().product();
         assert_eq!(values.len(), expected);
@@ -415,7 +612,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Creates a buffer from `i8` slice.
+    /// Creates a buffer from `i8` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_i8(shape: &[usize], values: &[i8]) -> Self {
         let expected: usize = shape.iter().product();
         assert_eq!(values.len(), expected);
@@ -431,7 +628,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Creates a buffer from `u32` slice.
+    /// Creates a buffer from `u32` slice (Spec 1 §2.3, Spec 4 §2).
     pub fn from_u32(shape: &[usize], values: &[u32]) -> Self {
         let expected: usize = shape.iter().product();
         assert_eq!(values.len(), expected);
@@ -447,7 +644,48 @@ impl TypedBuffer {
         }
     }
 
-    /// Creates an E4M3 byte buffer from raw bytes.
+    /// Creates a buffer from an `i32` slice (Spec 1 §2.3, Spec 4 §2).
+    pub fn from_i32(shape: &[usize], values: &[i32]) -> Self {
+        let expected: usize = shape.iter().product();
+        assert_eq!(values.len(), expected);
+        let mut byte_data = vec![0u8; expected * 4];
+        for (i, &v) in values.iter().enumerate() {
+            byte_data[i * 4..(i + 1) * 4].copy_from_slice(&v.to_ne_bytes());
+        }
+        Self {
+            shape: shape.to_vec(),
+            dtype: DType::I32,
+            f32_data: Vec::new(),
+            f16_data: Vec::new(),
+            bf16_data: Vec::new(),
+            i8_data: Vec::new(),
+            u32_data: Vec::new(),
+            byte_data,
+        }
+    }
+
+    /// Creates a typed buffer from raw byte data with shape and dtype (Spec 1 §2.3, Spec 4 §2).
+    pub fn from_bytes(shape: &[usize], dtype: DType, bytes: &[u8]) -> Self {
+        let total_elements: usize = shape.iter().product();
+        let expected_bytes = if dtype == DType::I4 {
+            total_elements.div_ceil(2)
+        } else {
+            total_elements * dtype_element_size(dtype)
+        };
+        assert_eq!(bytes.len(), expected_bytes);
+        Self {
+            shape: shape.to_vec(),
+            dtype,
+            f32_data: Vec::new(),
+            f16_data: Vec::new(),
+            bf16_data: Vec::new(),
+            i8_data: Vec::new(),
+            u32_data: Vec::new(),
+            byte_data: bytes.to_vec(),
+        }
+    }
+
+    /// Creates an E4M3 byte buffer from raw bytes (Spec 1 §2.3, Spec 4 §2).
     pub fn from_e4m3_bytes(shape: &[usize], bytes: &[u8]) -> Self {
         let expected: usize = shape.iter().product();
         assert_eq!(bytes.len(), expected);
@@ -463,27 +701,27 @@ impl TypedBuffer {
         }
     }
 
-    /// Returns tensor shape.
+    /// Returns tensor shape (Spec 1 §2.3, Spec 4 §2).
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
 
-    /// Returns tensor rank.
+    /// Returns tensor rank (Spec 1 §2.3, Spec 4 §2).
     pub fn rank(&self) -> usize {
         self.shape.len()
     }
 
-    /// Returns tensor data type.
+    /// Returns tensor data type (Spec 1 §2.3, Spec 4 §2).
     pub fn dtype(&self) -> DType {
         self.dtype
     }
 
-    /// Returns total number of elements.
+    /// Returns total number of elements (Spec 1 §2.3, Spec 4 §2).
     pub fn num_elements(&self) -> usize {
         self.shape.iter().product()
     }
 
-    /// Reads one element converted to `f32`.
+    /// Reads one element converted to `f32` (Spec 1 §2.3, Spec 4 §2).
     pub fn read_f32(&self, index: usize) -> f32 {
         match self.dtype {
             DType::F32 => self.f32_data[index],
@@ -497,7 +735,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Writes one `f32` value into buffer at `index`.
+    /// Writes one `f32` value into buffer at `index` (Spec 1 §2.3, Spec 4 §2).
     pub fn write_f32(&mut self, index: usize, val: f32) {
         match self.dtype {
             DType::F32 => self.f32_data[index] = val,
@@ -515,7 +753,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Reads raw byte at index for FP8/byte dtypes.
+    /// Reads raw byte at index for FP8/byte dtypes (Spec 1 §2.3, Spec 4 §2).
     pub fn read_byte(&self, index: usize) -> u8 {
         match self.dtype {
             DType::E4m3 | DType::E5m2 | DType::Bool | DType::I4 | DType::I32 => {
@@ -526,7 +764,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Writes raw byte at index for FP8/byte dtypes.
+    /// Writes raw byte at index for FP8/byte dtypes (Spec 1 §2.3, Spec 4 §2).
     pub fn write_byte(&mut self, index: usize, val: u8) {
         match self.dtype {
             DType::E4m3 | DType::E5m2 | DType::Bool | DType::I4 | DType::I32 => {
@@ -537,12 +775,17 @@ impl TypedBuffer {
         }
     }
 
-    /// Copies data out as a vector of `f32`.
+    /// Returns reference to raw byte data for byte-backed buffers (Spec 1 §2.3, Spec 4 §2).
+    pub fn byte_data(&self) -> &[u8] {
+        &self.byte_data
+    }
+
+    /// Copies data out as a vector of `f32` (Spec 1 §2.3, Spec 4 §2).
     pub fn to_f32_vec(&self) -> Vec<f32> {
         (0..self.num_elements()).map(|i| self.read_f32(i)).collect()
     }
 
-    /// Copies data out as a vector of `i8`.
+    /// Copies data out as a vector of `i8` (Spec 1 §2.3, Spec 4 §2).
     pub fn to_i8_vec(&self) -> Vec<i8> {
         match self.dtype {
             DType::I8 => self.i8_data.clone(),
@@ -552,7 +795,43 @@ impl TypedBuffer {
         }
     }
 
-    /// Copies data out as a vector of raw bytes.
+    /// Copies data out as a vector of `u32` (Spec 1 §2.3, Spec 4 §2).
+    pub fn to_u32_vec(&self) -> Vec<u32> {
+        let num_elem = self.num_elements();
+        match self.dtype {
+            DType::U32 => {
+                if !self.u32_data.is_empty() {
+                    self.u32_data.clone()
+                } else {
+                    (0..num_elem)
+                        .map(|i| {
+                            let offset = i * 4;
+                            u32::from_ne_bytes(
+                                self.byte_data[offset..offset + 4].try_into().unwrap(),
+                            )
+                        })
+                        .collect()
+                }
+            }
+            _ => (0..num_elem).map(|i| self.read_f32(i) as u32).collect(),
+        }
+    }
+
+    /// Copies data out as a vector of `i32` (Spec 1 §2.3, Spec 4 §2).
+    pub fn to_i32_vec(&self) -> Vec<i32> {
+        let num_elem = self.num_elements();
+        match self.dtype {
+            DType::I32 => (0..num_elem)
+                .map(|i| {
+                    let offset = i * 4;
+                    i32::from_ne_bytes(self.byte_data[offset..offset + 4].try_into().unwrap())
+                })
+                .collect(),
+            _ => (0..num_elem).map(|i| self.read_f32(i) as i32).collect(),
+        }
+    }
+
+    /// Copies data out as a vector of raw bytes (Spec 1 §2.3, Spec 4 §2).
     pub fn to_byte_vec(&self) -> Vec<u8> {
         match self.dtype {
             DType::E4m3 | DType::E5m2 | DType::Bool | DType::I4 | DType::I32 => {
@@ -565,7 +844,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Borrows buffer as an immutable `TensorView`.
+    /// Borrows buffer as an immutable `TensorView` (Spec 1 §2.3, Spec 4 §2).
     pub fn as_view(&self) -> TensorView<'_> {
         let data = match self.dtype {
             DType::F32 => TensorData::F32(&self.f32_data),
@@ -583,7 +862,7 @@ impl TypedBuffer {
         }
     }
 
-    /// Borrows buffer as a mutable `TensorViewMut`.
+    /// Borrows buffer as a mutable `TensorViewMut` (Spec 1 §2.3, Spec 4 §2).
     pub fn as_view_mut(&mut self) -> TensorViewMut<'_> {
         let dtype = self.dtype;
         let data = match dtype {

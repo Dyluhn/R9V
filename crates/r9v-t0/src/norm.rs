@@ -6,7 +6,7 @@ use r9v_ir::{DType, NormAxis, NormKind, NormOp};
 use crate::buffer::{TensorView, TensorViewMut};
 use crate::error::T0Error;
 
-/// Executes scalar T0 normalization (RMS or LayerNorm) per Spec 1 §4.B and §6.4.
+/// Executes scalar T0 normalization (RMS or LayerNorm) per Spec 1 §4.B, §6.4, Spec 4 §2.
 ///
 /// Accumulates mean/variance in f32 in ascending index order and casts once on output.
 pub fn norm(
@@ -16,7 +16,35 @@ pub fn norm(
     bias: Option<&TensorView<'_>>,
     y: &mut TensorViewMut<'_>,
 ) -> Result<(), T0Error> {
+    x.validate_backing("x")?;
+    weight.validate_backing("weight")?;
+    if let Some(b) = bias {
+        b.validate_backing("bias")?;
+    }
+    y.validate_backing("y")?;
+
     let mut problems = Vec::new();
+
+    if !op.eps.is_finite() || op.eps <= 0.0 {
+        problems.push(format!("eps must be finite and > 0, got {}", op.eps));
+    }
+    if !matches!(op.out_dtype, DType::F16 | DType::Bf16 | DType::F32) {
+        problems.push(format!(
+            "out_dtype must be f16, bf16, or f32, got {:?}",
+            op.out_dtype
+        ));
+    }
+    if !op.weight_offset.is_finite() {
+        problems.push(format!(
+            "weight_offset must be finite, got {}",
+            op.weight_offset
+        ));
+    }
+    if let NormAxis::Head(d) = op.axis {
+        if d == 0 {
+            problems.push("NormAxis::Head(d): d must be > 0".to_string());
+        }
+    }
 
     if x.rank() != 2 {
         problems.push(format!(
@@ -225,7 +253,7 @@ pub fn norm(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0.
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.B, Spec 4 §2).
 pub fn norm_f64_reference(
     op: &NormOp,
     x: &[f64],

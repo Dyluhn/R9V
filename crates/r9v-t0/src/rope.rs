@@ -103,14 +103,116 @@ fn compute_freqs_and_phases_f32(
     (phases, eff_mscale)
 }
 
-/// Executes scalar T0 Rotary Position Embedding (RoPE) (Spec 1 §4.B, §6.4).
+/// Executes scalar T0 Rotary Position Embedding (RoPE) (Spec 1 §4.B, Spec 1 §6.4, Spec 4 §2).
 pub fn rope(
     op: &RopeOp,
     x: &TensorView<'_>,
     positions: &TensorView<'_>,
     y: &mut TensorViewMut<'_>,
 ) -> Result<(), T0Error> {
+    if positions.rank() == 0 {
+        return Err(T0Error::RankMismatch {
+            tensor: "positions",
+            expected: if op.mrope_sections.is_some() { 2 } else { 1 },
+            got: 0,
+            shape: positions.shape().to_vec(),
+        });
+    }
+
+    x.validate_backing("x")?;
+    positions.validate_backing("positions")?;
+    y.validate_backing("y")?;
+
     let mut problems = Vec::new();
+
+    if op.rot_dim == 0 || !op.rot_dim.is_multiple_of(2) {
+        problems.push(format!(
+            "rot_dim must be positive and even, got {}",
+            op.rot_dim
+        ));
+    }
+    if !op.theta.is_finite() || op.theta <= 0.0 {
+        problems.push(format!("theta must be finite and > 0, got {}", op.theta));
+    }
+    if !matches!(op.out_dtype, DType::F16 | DType::Bf16 | DType::F32) {
+        problems.push(format!(
+            "out_dtype must be f16, bf16, or f32, got {:?}",
+            op.out_dtype
+        ));
+    }
+    if let Some(sections) = op.mrope_sections {
+        if sections.contains(&0) {
+            problems.push("mrope sections must be positive".to_string());
+        }
+        if sections.iter().any(|&s| s % 2 != 0) {
+            problems.push("mrope section dimensions must be even".to_string());
+        }
+        match sections.iter().try_fold(0u32, |sum, &s| sum.checked_add(s)) {
+            Some(total) if total > op.rot_dim => {
+                problems.push(format!(
+                    "sum of mrope sections {total} exceeds rot_dim {}",
+                    op.rot_dim
+                ));
+            }
+            None => {
+                problems.push("sum of mrope sections exceeds u32::MAX".to_string());
+            }
+            Some(_) => {}
+        }
+    }
+    match op.scaling {
+        RopeScaling::None => {}
+        RopeScaling::Linear(factor) => {
+            if !factor.is_finite() || factor <= 0.0 {
+                problems.push(format!(
+                    "scaling factor must be finite and > 0, got {factor}"
+                ));
+            }
+        }
+        RopeScaling::Yarn {
+            factor,
+            beta_fast,
+            beta_slow,
+            orig_ctx,
+            mscale,
+        } => {
+            if !factor.is_finite() || factor <= 0.0 {
+                problems.push(format!(
+                    "scaling factor must be finite and > 0, got {factor}"
+                ));
+            }
+            if !beta_fast.is_finite() || beta_fast <= 0.0 {
+                problems.push(format!(
+                    "scaling beta_fast must be finite and > 0, got {beta_fast}"
+                ));
+            }
+            if !beta_slow.is_finite() || beta_slow <= 0.0 {
+                problems.push(format!(
+                    "scaling beta_slow must be finite and > 0, got {beta_slow}"
+                ));
+            }
+            if beta_slow > beta_fast {
+                problems.push(format!(
+                    "scaling beta_slow ({beta_slow}) cannot exceed beta_fast ({beta_fast})"
+                ));
+            }
+            if orig_ctx == 0 {
+                problems.push("scaling orig_ctx must be > 0".to_string());
+            }
+            if !mscale.is_finite() || mscale <= 0.0 {
+                problems.push(format!(
+                    "scaling mscale must be finite and > 0, got {mscale}"
+                ));
+            }
+        }
+        RopeScaling::Dynamic => {
+            if op.rot_dim == 2 {
+                problems.push(
+                    "rot_dim 2 is invalid for Dynamic RoPE: exponent rot_dim / (rot_dim - 2) requires rot_dim > 2 to avoid division by zero".to_string(),
+                );
+            }
+        }
+    }
 
     if x.rank() != 3 {
         problems.push(format!(
@@ -176,12 +278,6 @@ pub fn rope(
             problems.push(format!(
                 "rot_dim {} exceeds head dimension D={}",
                 op.rot_dim, d
-            ));
-        }
-        if op.rot_dim == 0 || !op.rot_dim.is_multiple_of(2) {
-            problems.push(format!(
-                "rot_dim must be positive and even, got {}",
-                op.rot_dim
             ));
         }
         if y.rank() == 3 && y.shape() != x.shape() {
@@ -262,7 +358,7 @@ pub fn rope(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0.
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.B, Spec 4 §2).
 #[allow(clippy::needless_range_loop)]
 pub fn rope_f64_reference(
     op: &RopeOp,
@@ -271,6 +367,13 @@ pub fn rope_f64_reference(
     positions: &[u32],
     positions_is_2d: bool,
 ) -> Vec<f64> {
+    if op.scaling == RopeScaling::Dynamic {
+        assert!(
+            op.rot_dim > 2,
+            "rot_dim {} is invalid for Dynamic RoPE scaling: requires rot_dim > 2",
+            op.rot_dim
+        );
+    }
     let [t, h, d] = shape;
     assert_eq!(x.len(), t * h * d);
     let mut out = vec![0.0f64; t * h * d];

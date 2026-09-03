@@ -3,7 +3,7 @@
 
 use r9v_ir::DType;
 
-/// Domain error enum for T0 reference op execution (CONVENTIONS.md §1.1).
+/// Domain error enum for T0 reference op execution (Spec 4 §2, CONVENTIONS.md §1.1).
 #[derive(Debug, thiserror::Error)]
 pub enum T0Error {
     /// Wrapping an IR-level error from `r9v-ir`.
@@ -106,7 +106,7 @@ pub enum T0Error {
 }
 
 impl T0Error {
-    /// Helper to produce a `Multiple` error if problems were collected (CONVENTIONS.md §1.4).
+    /// Helper to produce a `Multiple` error if problems were collected (Spec 4 §2, CONVENTIONS.md §1.4).
     pub fn from_problems(op: &'static str, problems: Vec<String>) -> Result<(), Self> {
         if problems.is_empty() {
             Ok(())

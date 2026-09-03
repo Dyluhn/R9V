@@ -6,8 +6,11 @@ use r9v_ir::CastOp;
 use crate::buffer::{TensorView, TensorViewMut};
 use crate::error::T0Error;
 
-/// Executes scalar T0 precision cast: `x -> y` with `y.dtype == op.dtype` (Spec 1 §4.A).
+/// Executes scalar T0 precision cast: `x -> y` with `y.dtype == op.dtype` (Spec 1 §4.A, Spec 1 §6.4, Spec 4 §2).
 pub fn cast(op: &CastOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Result<(), T0Error> {
+    x.validate_backing("x")?;
+    y.validate_backing("y")?;
+
     let mut problems = Vec::new();
 
     if x.shape() != y.shape() {
@@ -36,7 +39,7 @@ pub fn cast(op: &CastOp, x: &TensorView<'_>, y: &mut TensorViewMut<'_>) -> Resul
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0.
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.A, Spec 4 §2).
 pub fn cast_f64_reference(x: &[f64]) -> Vec<f64> {
     x.to_vec()
 }

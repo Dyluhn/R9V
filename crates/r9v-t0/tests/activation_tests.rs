@@ -191,3 +191,26 @@ fn activation_rejects_malformed_operands() {
     assert!(msg.contains("clamp must be finite and > 0"));
     assert!(msg.contains("does not match"));
 }
+
+#[test]
+fn erf_f32_all_f32_arithmetic_and_matches_f64_oracle() {
+    use r9v_t0::{erf_f32, erf_f64};
+
+    assert_eq!(erf_f32(0.0f32), 0.0f32);
+    assert!(erf_f32(f32::NAN).is_nan());
+
+    let test_points = [
+        -4.0f32, -2.5, -1.8, -1.5, -1.2, -0.8, -0.5, -0.1, 0.0, 0.1, 0.5, 0.8, 1.2, 1.5, 1.8, 2.5,
+        4.0,
+    ];
+
+    for &x in &test_points {
+        let actual = erf_f32(x);
+        let expected = erf_f64(x as f64) as f32;
+        let diff = (actual - expected).abs();
+        assert!(
+            diff <= 1e-5,
+            "erf_f32({x}) = {actual}, expected {expected}, diff {diff}"
+        );
+    }
+}

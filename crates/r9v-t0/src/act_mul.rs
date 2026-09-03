@@ -7,13 +7,17 @@ use crate::activation::{eval_activation_f32, eval_activation_f64};
 use crate::buffer::{TensorView, TensorViewMut};
 use crate::error::T0Error;
 
-/// Executes scalar T0 gated activation product: `y = act(gate) * up` (Spec 1 §4.B, §6.4).
+/// Executes scalar T0 gated activation product: `y = act(gate) * up` (Spec 1 §4.B, Spec 1 §6.4, Spec 4 §2).
 pub fn act_mul(
     op: &ActMulOp,
     gate: &TensorView<'_>,
     up: &TensorView<'_>,
     y: &mut TensorViewMut<'_>,
 ) -> Result<(), T0Error> {
+    gate.validate_backing("gate")?;
+    up.validate_backing("up")?;
+    y.validate_backing("y")?;
+
     let mut problems = Vec::new();
 
     if gate.rank() != 2 {
@@ -97,7 +101,7 @@ pub fn act_mul(
     Ok(())
 }
 
-/// Straightforward 64-bit floating point reference implementation for testing against T0.
+/// Straightforward 64-bit floating point reference implementation for testing against T0 (Spec 1 §4.B, Spec 4 §2).
 pub fn act_mul_f64_reference(op: &ActMulOp, gate: &[f64], up: &[f64]) -> Vec<f64> {
     assert_eq!(gate.len(), up.len());
     gate.iter()

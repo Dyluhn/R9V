@@ -322,3 +322,28 @@ fn quant_act_rejects_non_divisible_block_size_and_mismatches() {
     assert!(msg.contains("validation error(s)"));
     assert!(msg.contains("divisible by 32"));
 }
+
+#[test]
+fn quant_act_rejects_invalid_per_token_target_without_panicking() {
+    let op = QuantActOp {
+        scheme: QuantScheme::PerToken,
+        target: DType::F32, // Invalid target for quant_act (must be i8 or e4m3)
+        smoothing: Smoothing::None,
+    };
+
+    let x_buf = TypedBuffer::zeros(&[2, 32], DType::F32);
+    let mut xq_buf = TypedBuffer::zeros(&[2, 32], DType::F32);
+    let mut scale_buf = TypedBuffer::zeros(&[2], DType::F32);
+
+    let err = quant_act(
+        &op,
+        &x_buf.as_view(),
+        &mut xq_buf.as_view_mut(),
+        &mut scale_buf.as_view_mut(),
+    )
+    .unwrap_err();
+
+    let msg = err.to_string();
+    assert!(msg.contains("validation error(s)"));
+    assert!(msg.contains("target must be i8 or e4m3") || msg.contains("only supports i8 or e4m3"));
+}

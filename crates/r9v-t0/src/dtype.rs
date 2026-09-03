@@ -3,7 +3,7 @@
 
 use r9v_ir::DType;
 
-/// Converts IEEE 754 single precision float (`f32`) to IEEE 754 half precision float (`f16`) bits.
+/// Converts IEEE 754 single precision float (`f32`) to IEEE 754 half precision float (`f16`) bits (Spec 1 §2.1, Spec 4 §2).
 ///
 /// Uses round-to-nearest-even and handles subnormals, infinities, and NaNs.
 pub fn f32_to_f16(val: f32) -> u16 {
@@ -66,7 +66,7 @@ pub fn f32_to_f16(val: f32) -> u16 {
     }
 }
 
-/// Converts IEEE 754 half precision float (`f16`) bits to IEEE 754 single precision float (`f32`).
+/// Converts IEEE 754 half precision float (`f16`) bits to IEEE 754 single precision float (`f32`) (Spec 1 §2.1, Spec 4 §2).
 pub fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
     let exp = ((bits >> 10) & 0x1F) as u32;
@@ -98,7 +98,7 @@ pub fn f16_to_f32(bits: u16) -> f32 {
     }
 }
 
-/// Converts IEEE 754 single precision float (`f32`) to bfloat16 (`bf16`) bits with round-to-nearest-even.
+/// Converts IEEE 754 single precision float (`f32`) to bfloat16 (`bf16`) bits with round-to-nearest-even (Spec 1 §2.1, Spec 4 §2).
 pub fn f32_to_bf16(val: f32) -> u16 {
     let u = val.to_bits();
     if val.is_nan() {
@@ -110,12 +110,12 @@ pub fn f32_to_bf16(val: f32) -> u16 {
     (rounded >> 16) as u16
 }
 
-/// Converts bfloat16 (`bf16`) bits to IEEE 754 single precision float (`f32`).
+/// Converts bfloat16 (`bf16`) bits to IEEE 754 single precision float (`f32`) (Spec 1 §2.1, Spec 4 §2).
 pub fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
 }
 
-/// Decodes OCP FP8 E4M3 byte to single precision float (`f32`) (Spec 1 §2.1, spikes/fp8-wmma/fp8_wmma.hip).
+/// Decodes OCP FP8 E4M3 byte to single precision float (`f32`) (Spec 1 §2.1, Spec 4 §2, spikes/fp8-wmma/fp8_wmma.hip).
 pub fn fp8_e4m3_decode(b: u8) -> f32 {
     let s = (b >> 7) & 1;
     let e = (b >> 3) & 0x0F;
@@ -135,7 +135,7 @@ pub fn fp8_e4m3_decode(b: u8) -> f32 {
     }
 }
 
-/// Encodes single precision float (`f32`) to OCP FP8 E4M3 byte with saturation to ±448 (spikes/fp8-wmma/fp8_wmma.hip).
+/// Encodes single precision float (`f32`) to OCP FP8 E4M3 byte with saturation to ±448 (Spec 1 §2.1, Spec 4 §2, spikes/fp8-wmma/fp8_wmma.hip).
 pub fn fp8_e4m3_encode(v: f32) -> u8 {
     if v.is_nan() {
         return 0x7F;
@@ -164,7 +164,7 @@ pub fn fp8_e4m3_encode(v: f32) -> u8 {
     best
 }
 
-/// Decodes OCP FP8 E5M2 byte to single precision float (`f32`) (Spec 1 §2.1).
+/// Decodes OCP FP8 E5M2 byte to single precision float (`f32`) (Spec 1 §2.1, Spec 4 §2).
 pub fn fp8_e5m2_decode(b: u8) -> f32 {
     let s = (b >> 7) & 1;
     let e = (b >> 2) & 0x1F;
@@ -190,7 +190,7 @@ pub fn fp8_e5m2_decode(b: u8) -> f32 {
     }
 }
 
-/// Encodes single precision float (`f32`) to OCP FP8 E5M2 byte with saturation to ±57344.
+/// Encodes single precision float (`f32`) to OCP FP8 E5M2 byte with saturation to ±57344 (Spec 1 §2.1, Spec 4 §2).
 pub fn fp8_e5m2_encode(v: f32) -> u8 {
     if v.is_nan() {
         return 0x7F;
@@ -220,7 +220,7 @@ pub fn fp8_e5m2_encode(v: f32) -> u8 {
     best
 }
 
-/// Reads one element from a raw byte buffer at `index` and returns it as `f32`.
+/// Reads one element from a raw byte buffer at `index` and returns it as `f32` (Spec 1 §2.1, Spec 4 §2).
 pub fn read_f32_at(dtype: DType, slice: &[u8], index: usize) -> f32 {
     match dtype {
         DType::F32 => {
@@ -293,12 +293,12 @@ pub fn read_f32_at(dtype: DType, slice: &[u8], index: usize) -> f32 {
     }
 }
 
-/// Reads one element from a raw byte buffer at `index` and returns it as `f64`.
+/// Reads one element from a raw byte buffer at `index` and returns it as `f64` (Spec 1 §2.1, Spec 4 §2).
 pub fn read_f64_at(dtype: DType, slice: &[u8], index: usize) -> f64 {
     read_f32_at(dtype, slice, index) as f64
 }
 
-/// Writes one `f32` value into a raw byte buffer at `index` converted to `dtype`.
+/// Writes one `f32` value into a raw byte buffer at `index` converted to `dtype` (Spec 1 §2.1, Spec 4 §2).
 pub fn write_f32_at(dtype: DType, slice: &mut [u8], index: usize, val: f32) {
     match dtype {
         DType::F32 => {
@@ -356,7 +356,7 @@ pub fn write_f32_at(dtype: DType, slice: &mut [u8], index: usize, val: f32) {
     }
 }
 
-/// Returns the element size in bytes for a `DType`. Returns 1 for sub-byte `I4` (packed).
+/// Returns the element size in bytes for a `DType`. Returns 1 for sub-byte `I4` (packed) (Spec 1 §2.1, Spec 4 §2).
 pub fn dtype_element_size(dtype: DType) -> usize {
     match dtype {
         DType::F32 | DType::I32 | DType::U32 => 4,
