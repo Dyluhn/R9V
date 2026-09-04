@@ -9,11 +9,14 @@
 use std::sync::Arc;
 
 use r9v_common::{ReqId, SeqId, StepId};
-use r9v_ir::{AttentionMask, DType, Epilogue, LayoutId, PlanId, QuantScheme, SamplingParams};
+use r9v_ir::{
+    AttentionMask, DType, Epilogue, LayoutId, NormAxis, NormKind, PlanId, QuantScheme,
+    RngAlgorithm, SamplingParams,
+};
 use r9v_registry::{
-    ArchName, AttentionStatic, BundleManifest, ElementwiseStatic, LaunchGeometry,
-    ManifestVariantEntry, MatmulStatic, OpId, OpStatic, Registry, RegistryConfig, SamplingMethod,
-    SamplingStatic, StubDevice, Tier, VariantHash,
+    ArchName, AttentionStatic, BundleManifest, ElementwiseParams, ElementwiseStatic,
+    LaunchGeometry, ManifestVariantEntry, MatmulStatic, NormStatic, OpId, OpStatic, Registry,
+    RegistryConfig, SampleStatic, SamplingStatic, StubDevice, Tier, VariantHash,
 };
 use r9v_sched::{
     ByteDetokenizer, CapturedGraph, CostTableStub, Detokenizer, DeviceStepSample, FinishReason,
@@ -67,9 +70,17 @@ fn hostile_program() -> StepGraphProgram {
         |key| {
             Some(OpStatic::Elementwise(ElementwiseStatic {
                 t_bucket: key.t_dec + key.t_pre,
-                dims: vec![1024],
-                dtypes: vec![DType::F16],
                 fused_with: None,
+                op_params: ElementwiseParams::Norm(NormStatic {
+                    kind: NormKind::Rms,
+                    eps_bits: 1e-5f32.to_bits(),
+                    axis: NormAxis::Last,
+                    weight_offset_bits: 0.0f32.to_bits(),
+                    in_dtype: DType::F16,
+                    out_dtype: DType::F16,
+                    n: 1024,
+                    has_bias: false,
+                }),
             }))
         },
         template.clone(),
@@ -85,12 +96,15 @@ fn hostile_program() -> StepGraphProgram {
                 hkv_local: 8,
                 d: 128,
                 dv: 128,
+                q_dtype: DType::F16,
                 cache_dtype: DType::E4m3,
                 attention_layout: LayoutId::CONTIGUOUS,
                 mask_kind: AttentionMask::Causal,
-                latent: None,
+                softmax_scale_bits: (1.0f32 / 128.0f32.sqrt()).to_bits(),
+                out_dtype: DType::F16,
+                mla: None,
                 softcap_bits: None,
-                sinks: None,
+                sinks: 0,
             }))
         },
         template.clone(),
@@ -104,11 +118,15 @@ fn hostile_program() -> StepGraphProgram {
                 m_bucket: key.t_dec + key.t_pre,
                 n: 1024,
                 k: 1024,
+                w_dtype: DType::F16,
                 w_scheme: QuantScheme::None,
                 w_layout: LayoutId::CONTIGUOUS,
+                in_dtype: DType::F16,
                 act_scheme: QuantScheme::None,
                 out_dtype: DType::F16,
                 epilogue: Epilogue::None,
+                residual_dtype: None,
+                transpose_w: false,
                 interleave: false,
                 sparse: false,
             }))
@@ -120,12 +138,11 @@ fn hostile_program() -> StepGraphProgram {
         OpId::Sample,
         "sample",
         |key| {
-            Some(OpStatic::Sampling(SamplingStatic {
+            Some(OpStatic::Sampling(SamplingStatic::Sample(SampleStatic {
                 s_bucket: key.s,
                 v: 32000,
-                q_bucket: key.t_dec,
-                method: SamplingMethod::InverseCdfSample,
-            }))
+                rng: RngAlgorithm::Philox4x32,
+            })))
         },
         template,
         Some(0),
