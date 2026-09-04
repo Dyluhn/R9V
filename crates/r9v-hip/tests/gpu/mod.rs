@@ -67,9 +67,17 @@ fn find_rocm_device_lib() -> Option<PathBuf> {
 /// When no HIP runtime library or zero GPU devices are present, reports an explicit skip.
 /// When hardware is present, any failure panics immediately.
 pub fn run_gpu_smoke() {
+    let require_gpu = std::env::var("R9V_REQUIRE_GPU").as_deref() == Ok("1")
+        || std::env::var("R9V_GPU_LANE").as_deref() == Ok("1");
+
     let lib = match HipLibrary::default_or_load() {
         Ok(l) => l,
         Err(HipError::LibraryNotFound { searched }) => {
+            if require_gpu {
+                panic!(
+                    "GPU lane required (R9V_REQUIRE_GPU/R9V_GPU_LANE set) but HIP dynamic library not found; searched: {searched:?}"
+                );
+            }
             println!(
                 "[SKIP] HIP dynamic library not available on this host; searched: {searched:?}"
             );
@@ -80,10 +88,23 @@ pub fn run_gpu_smoke() {
         }
     };
 
-    let count = lib
-        .device_count()
-        .expect("device_count query failed after HIP library load");
+    let count = match lib.device_count() {
+        Ok(c) => c,
+        Err(e) => {
+            if require_gpu {
+                panic!(
+                    "GPU lane required (R9V_REQUIRE_GPU/R9V_GPU_LANE set) but device_count query failed: {e}"
+                );
+            }
+            panic!("device_count query failed after HIP library load: {e}");
+        }
+    };
     if count == 0 {
+        if require_gpu {
+            panic!(
+                "GPU lane required (R9V_REQUIRE_GPU/R9V_GPU_LANE set) but no HIP GPU devices found (device count == 0)"
+            );
+        }
         println!("[SKIP] No HIP GPU devices available on this host (device count == 0)");
         return;
     }
