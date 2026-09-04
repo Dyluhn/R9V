@@ -7,7 +7,10 @@
 mod common;
 
 use r9v_ir::AttentionMask;
-use r9v_kgen::abi::{abi, abi_for_op, canonical_struct_name, op_static_family, PointeeType};
+use r9v_kgen::abi::{
+    abi, abi_for_op, canonical_struct_name, emit_hip_assume_aligned, emit_hip_struct,
+    op_static_family, AbiStruct, AbiType, BatchMetaField, FieldRole, PointeeType,
+};
 use r9v_kgen::error::KgenError;
 use r9v_registry::{static_hash, OpId, OpStatic};
 
@@ -65,8 +68,22 @@ fn test_each_compile_time_semantic_changes_static_hash() {
     flipped.w_dtype = r9v_ir::DType::I8;
     assert_ne!(
         static_hash(&base),
-        static_hash(&OpStatic::Matmul(flipped)),
+        static_hash(&OpStatic::Matmul(flipped.clone())),
         "weight w_dtype must change static_hash"
+    );
+    flipped.w_dtype = r9v_ir::DType::F16;
+    flipped.epilogue = r9v_ir::Epilogue::Residual;
+    flipped.residual_dtype = Some(r9v_ir::DType::F16);
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Matmul(flipped.clone())),
+        "residual epilogue input must change static_hash"
+    );
+    flipped.residual_dtype = Some(r9v_ir::DType::Bf16);
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Matmul(flipped)),
+        "residual input dtype must change static_hash"
     );
 
     // MoeRoute scoring, scale bits, group, and bias presence.
@@ -136,8 +153,23 @@ fn test_each_compile_time_semantic_changes_static_hash() {
     flipped.in_dtype = r9v_ir::DType::Bf16;
     assert_ne!(
         static_hash(&base),
-        static_hash(&OpStatic::MoeFfn(flipped)),
+        static_hash(&OpStatic::MoeFfn(flipped.clone())),
         "moe in_dtype must change static_hash"
+    );
+    flipped.in_dtype = r9v_ir::DType::F16;
+    flipped.gate_up.layout = r9v_ir::LayoutId::L0;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::MoeFfn(flipped.clone())),
+        "moe gate_up layout must change static_hash"
+    );
+    flipped.gate_up.layout = r9v_ir::LayoutId::L1;
+    flipped.down.dtype = r9v_ir::DType::I8;
+    flipped.down.scheme = r9v_ir::QuantScheme::PerRow;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::MoeFfn(flipped)),
+        "moe down dtype/scheme must change static_hash"
     );
 
     // Attention softmax scale, out dtype, sinks, and MLA descriptor.
@@ -176,8 +208,15 @@ fn test_each_compile_time_semantic_changes_static_hash() {
     });
     assert_ne!(
         static_hash(&base),
-        static_hash(&OpStatic::Attention(flipped)),
+        static_hash(&OpStatic::Attention(flipped.clone())),
         "mla descriptor must change static_hash"
+    );
+    flipped.mla = None;
+    flipped.q_dtype = r9v_ir::DType::Bf16;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Attention(flipped)),
+        "attention q_dtype must change static_hash"
     );
 
     // StateWriteKv granularity, latent, and input dtype.
@@ -240,8 +279,38 @@ fn test_each_compile_time_semantic_changes_static_hash() {
     flipped.out_dtype = r9v_ir::DType::Bf16;
     assert_ne!(
         static_hash(&base),
-        static_hash(&OpStatic::CausalConv1d(flipped)),
+        static_hash(&OpStatic::CausalConv1d(flipped.clone())),
         "conv out_dtype must change static_hash"
+    );
+    flipped.out_dtype = r9v_ir::DType::F16;
+    flipped.w_dtype = r9v_ir::DType::Bf16;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::CausalConv1d(flipped.clone())),
+        "conv w_dtype must change static_hash"
+    );
+    flipped.w_dtype = r9v_ir::DType::F16;
+    flipped.w_layout = r9v_ir::LayoutId::L0;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::CausalConv1d(flipped.clone())),
+        "conv w_layout must change static_hash"
+    );
+    flipped.w_layout = r9v_ir::LayoutId::L1;
+    flipped.w_dtype = r9v_ir::DType::I8;
+    flipped.w_scheme = r9v_ir::QuantScheme::PerRow;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::CausalConv1d(flipped.clone())),
+        "conv w_scheme must change static_hash"
+    );
+    flipped.w_dtype = r9v_ir::DType::F16;
+    flipped.w_scheme = r9v_ir::QuantScheme::None;
+    flipped.bias_dtype = Some(r9v_ir::DType::F16);
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::CausalConv1d(flipped)),
+        "conv bias dtype must change static_hash"
     );
 
     // LinearAttnScan dtypes.
@@ -293,11 +362,62 @@ fn test_each_compile_time_semantic_changes_static_hash() {
         _ => panic!("expected residual_add"),
     };
     add.set_scale(0.5);
+    flipped.op_params = r9v_registry::ElementwiseParams::ResidualAdd(add.clone());
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Elementwise(flipped.clone())),
+        "residual scale bits must change static_hash"
+    );
+    add.a_dtype = r9v_ir::DType::Bf16;
+    flipped.op_params = r9v_registry::ElementwiseParams::ResidualAdd(add.clone());
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Elementwise(flipped.clone())),
+        "residual a_dtype must change static_hash"
+    );
+    add.a_dtype = r9v_ir::DType::F16;
+    add.b_dtype = r9v_ir::DType::F32;
     flipped.op_params = r9v_registry::ElementwiseParams::ResidualAdd(add);
     assert_ne!(
         static_hash(&base),
         static_hash(&OpStatic::Elementwise(flipped)),
-        "residual scale bits must change static_hash"
+        "residual b_dtype must change static_hash"
+    );
+
+    // Norm bias presence.
+    let base = common::representative_elementwise_static();
+    let mut flipped = match base.clone() {
+        OpStatic::Elementwise(s) => s,
+        _ => panic!("expected elementwise"),
+    };
+    let mut norm = match flipped.op_params.clone() {
+        r9v_registry::ElementwiseParams::Norm(n) => n,
+        _ => panic!("expected norm"),
+    };
+    norm.has_bias = true;
+    flipped.op_params = r9v_registry::ElementwiseParams::Norm(norm);
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Elementwise(flipped)),
+        "norm bias presence must change static_hash"
+    );
+
+    // ScatterAddRows dest presence.
+    let base = common::representative_static_for_op(OpId::ScatterAddRows);
+    let mut flipped = match base.clone() {
+        OpStatic::Elementwise(s) => s,
+        _ => panic!("expected elementwise"),
+    };
+    let mut scatter = match flipped.op_params.clone() {
+        r9v_registry::ElementwiseParams::ScatterAddRows(p) => p,
+        _ => panic!("expected scatter_add_rows"),
+    };
+    scatter.has_dest = true;
+    flipped.op_params = r9v_registry::ElementwiseParams::ScatterAddRows(scatter);
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Elementwise(flipped)),
+        "scatter dest presence must change static_hash"
     );
 
     // Elementwise op variant itself is a semantic.
@@ -327,11 +447,27 @@ fn test_each_compile_time_semantic_changes_static_hash() {
         "ngram source must change static_hash"
     );
     params.dn = 256;
+    device.op_params = r9v_registry::ElementwiseParams::NgramGather(params.clone());
+    assert_ne!(
+        static_hash(&staged),
+        static_hash(&OpStatic::Elementwise(device.clone())),
+        "ngram dn must change static_hash"
+    );
+    params.dn = 128;
+    params.scales_dtype = Some(r9v_ir::DType::F16);
+    device.op_params = r9v_registry::ElementwiseParams::NgramGather(params.clone());
+    assert_ne!(
+        static_hash(&staged),
+        static_hash(&OpStatic::Elementwise(device.clone())),
+        "ngram scales dtype must change static_hash"
+    );
+    params.scales_dtype = Some(r9v_ir::DType::F32);
+    params.staging_layout = r9v_ir::LayoutId::L1;
     device.op_params = r9v_registry::ElementwiseParams::NgramGather(params);
     assert_ne!(
         static_hash(&staged),
         static_hash(&OpStatic::Elementwise(device)),
-        "ngram dn must change static_hash"
+        "ngram staging layout must change static_hash"
     );
 
     // Split first and total widths.
@@ -385,6 +521,45 @@ fn test_each_compile_time_semantic_changes_static_hash() {
         static_hash(&base),
         static_hash(&sample),
         "sampling op variant must change static_hash"
+    );
+    let mut drafted = match base.clone() {
+        OpStatic::Sampling(r9v_registry::SamplingStatic::Verify(v)) => v,
+        _ => panic!("expected verify"),
+    };
+    drafted.has_draft_probs = true;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Sampling(r9v_registry::SamplingStatic::Verify(
+            drafted
+        ))),
+        "verify draft presence must change static_hash"
+    );
+
+    // LogitsPostprocess optional inputs.
+    let base = common::representative_logits_postprocess_static();
+    let mut flagged = match base.clone() {
+        OpStatic::Sampling(r9v_registry::SamplingStatic::LogitsPostprocess(p)) => p,
+        _ => panic!("expected logits_postprocess"),
+    };
+    flagged.has_history_counts = true;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Sampling(
+            r9v_registry::SamplingStatic::LogitsPostprocess(flagged)
+        )),
+        "history presence must change static_hash"
+    );
+    let mut flagged = match base.clone() {
+        OpStatic::Sampling(r9v_registry::SamplingStatic::LogitsPostprocess(p)) => p,
+        _ => panic!("expected logits_postprocess"),
+    };
+    flagged.has_grammar_mask = true;
+    assert_ne!(
+        static_hash(&base),
+        static_hash(&OpStatic::Sampling(
+            r9v_registry::SamplingStatic::LogitsPostprocess(flagged)
+        )),
+        "grammar presence must change static_hash"
     );
 
     // Collective rank, group, and peer.
@@ -466,6 +641,7 @@ fn test_f32_determinism_is_bitwise() {
             q_bucket: 4,
             method,
             tree: false,
+            has_draft_probs: false,
         },
     )));
     let h2 = static_hash(&OpStatic::Sampling(r9v_registry::SamplingStatic::Verify(
@@ -475,6 +651,7 @@ fn test_f32_determinism_is_bitwise() {
             q_bucket: 4,
             method: neighbor,
             tree: false,
+            has_draft_probs: false,
         },
     )));
     assert_ne!(h1, h2, "one float bit flip must change static_hash");
@@ -705,5 +882,654 @@ fn test_embed_override_and_both_ngram_sources() {
     for name in ["staging", "row_scales", "token_ids", "table"] {
         let field = ngram_abi.field(name).expect("ngram source field");
         assert!(field.ty.is_nullable(), "ngram {name} must be nullable");
+    }
+}
+
+/// Every newly closed input semantic changes the canonical variant name, and
+/// dtype-dependent ABI pointers follow the static dtype instead of aliasing.
+#[test]
+fn test_new_semantics_change_canonical_name_and_abi_pointers() {
+    let named = |op: OpId, stat: &OpStatic| canonical_struct_name(op, stat);
+
+    // Attention q dtype changes the variant name.
+    let base = common::representative_attention_static(AttentionMask::Causal, 16);
+    let mut q_bf16 = match base.clone() {
+        OpStatic::Attention(s) => s,
+        _ => panic!("expected attention"),
+    };
+    q_bf16.q_dtype = r9v_ir::DType::Bf16;
+    let q_bf16 = OpStatic::Attention(q_bf16);
+    assert_ne!(
+        named(OpId::Attention, &base),
+        named(OpId::Attention, &q_bf16),
+        "q dtype must change the canonical name"
+    );
+
+    // Residual addends change the variant name independently.
+    let base = common::representative_residual_add_static();
+    let mut a_bf16 = match base.clone() {
+        OpStatic::Elementwise(s) => s,
+        _ => panic!("expected elementwise"),
+    };
+    if let r9v_registry::ElementwiseParams::ResidualAdd(ref mut r) = a_bf16.op_params {
+        r.a_dtype = r9v_ir::DType::Bf16;
+    }
+    let a_bf16 = OpStatic::Elementwise(a_bf16);
+    assert_ne!(
+        named(OpId::ResidualAdd, &base),
+        named(OpId::ResidualAdd, &a_bf16),
+        "residual a dtype must change the canonical name"
+    );
+
+    // Conv bias pointer follows the static bias dtype; absent bias keeps the
+    // historical f32 pointer shape.
+    let conv_none = common::representative_causal_conv1d_static();
+    let mut conv_f16 = match conv_none.clone() {
+        OpStatic::CausalConv1d(s) => s,
+        _ => panic!("expected causal_conv1d"),
+    };
+    conv_f16.bias_dtype = Some(r9v_ir::DType::F16);
+    let conv_f16 = OpStatic::CausalConv1d(conv_f16);
+    assert_ne!(
+        named(OpId::CausalConv1d, &conv_none),
+        named(OpId::CausalConv1d, &conv_f16),
+        "conv bias dtype must change the canonical name"
+    );
+    let abi_none = abi_for_op(OpId::CausalConv1d, &conv_none).expect("conv abi");
+    let abi_f16 = abi_for_op(OpId::CausalConv1d, &conv_f16).expect("conv abi");
+    let ptr_none = &abi_none.field("bias").expect("conv bias").ty;
+    let ptr_f16 = &abi_f16.field("bias").expect("conv bias").ty;
+    assert_ne!(
+        ptr_none, ptr_f16,
+        "f16 bias must not share the f32 bias pointer type"
+    );
+    assert_eq!(
+        *ptr_none,
+        r9v_kgen::abi::AbiType::nullable_const_ptr(PointeeType::F32),
+        "absent bias keeps the historical f32 pointer shape"
+    );
+
+    // Matmul residual pointer follows the static residual dtype.
+    let matmul_none = common::representative_matmul_static();
+    let mut res_f16 = match matmul_none.clone() {
+        OpStatic::Matmul(s) => s,
+        _ => panic!("expected matmul"),
+    };
+    res_f16.epilogue = r9v_ir::Epilogue::Residual;
+    res_f16.residual_dtype = Some(r9v_ir::DType::F16);
+    let res_f16 = OpStatic::Matmul(res_f16);
+    let mut res_bf16 = match res_f16.clone() {
+        OpStatic::Matmul(s) => s,
+        _ => panic!("expected matmul"),
+    };
+    res_bf16.residual_dtype = Some(r9v_ir::DType::Bf16);
+    let res_bf16 = OpStatic::Matmul(res_bf16);
+    assert_ne!(
+        named(OpId::Matmul, &matmul_none),
+        named(OpId::Matmul, &res_f16),
+        "residual epilogue input must change the canonical name"
+    );
+    assert_ne!(
+        named(OpId::Matmul, &res_f16),
+        named(OpId::Matmul, &res_bf16),
+        "residual dtype must change the canonical name"
+    );
+    let abi_f16 = abi_for_op(OpId::Matmul, &res_f16).expect("matmul abi");
+    let abi_bf16 = abi_for_op(OpId::Matmul, &res_bf16).expect("matmul abi");
+    assert_ne!(
+        abi_f16.field("residual").expect("residual").ty,
+        abi_bf16.field("residual").expect("residual").ty,
+        "bf16 residual must not share the f16 residual pointer type"
+    );
+
+    // Ngram row-scales pointer follows the static scales dtype; Device mode
+    // shares the Staged-f32 pointer shape but keeps a distinct name.
+    let staged_f32 = common::representative_static_for_op(OpId::NgramGather);
+    let mut staged_f16 = match staged_f32.clone() {
+        OpStatic::Elementwise(s) => s,
+        _ => panic!("expected elementwise"),
+    };
+    if let r9v_registry::ElementwiseParams::NgramGather(ref mut g) = staged_f16.op_params {
+        g.scales_dtype = Some(r9v_ir::DType::F16);
+    }
+    let staged_f16 = OpStatic::Elementwise(staged_f16);
+    assert_ne!(
+        named(OpId::NgramGather, &staged_f32),
+        named(OpId::NgramGather, &staged_f16),
+        "scales dtype must change the canonical name"
+    );
+    let abi_f32 = abi_for_op(OpId::NgramGather, &staged_f32).expect("ngram abi");
+    let abi_f16 = abi_for_op(OpId::NgramGather, &staged_f16).expect("ngram abi");
+    assert_ne!(
+        abi_f32.field("row_scales").expect("row_scales").ty,
+        abi_f16.field("row_scales").expect("row_scales").ty,
+        "f16 scales must not share the f32 scales pointer type"
+    );
+}
+
+/// Asserts one pointer field's exact pointee, nullability, constness, and role.
+fn expect_ptr(
+    abi: &AbiStruct,
+    name: &str,
+    pointee: PointeeType,
+    nullable: bool,
+    is_const: bool,
+    role: FieldRole,
+) {
+    let field = abi
+        .field(name)
+        .unwrap_or_else(|| panic!("{} ABI must have field '{name}'", abi.op()));
+    assert_eq!(
+        field.role(),
+        role,
+        "{} field '{name}' must have role {role:?}",
+        abi.op()
+    );
+    match &field.ty {
+        AbiType::Pointer {
+            pointee: got,
+            is_const: got_const,
+            is_nullable: got_nullable,
+            ..
+        } => {
+            assert_eq!(
+                *got,
+                pointee,
+                "{} field '{name}' must point to {pointee:?}",
+                abi.op()
+            );
+            assert_eq!(
+                *got_nullable,
+                nullable,
+                "{} field '{name}' nullability must be {nullable}",
+                abi.op()
+            );
+            assert_eq!(
+                *got_const,
+                is_const,
+                "{} field '{name}' constness must be {is_const}",
+                abi.op()
+            );
+        }
+        other => panic!(
+            "{} field '{name}' must be a pointer, got {other:?}",
+            abi.op()
+        ),
+    }
+}
+
+/// Exhaustive ABI pointee policy over all 32 ops (Spec 4 §7).
+///
+/// Every activation, parameter, index, or output pointer whose exact element
+/// dtype is in OpStatic is typed via `PointeeType::from_dtype` (or the exact
+/// U32/U64/F32/U8 spelling when the static carries no dtype, including the
+/// spec-fixed batch-meta index buffers); Void survives only for the documented
+/// exception classes (packed weights, scale records, state arenas, byte-copy,
+/// heterogeneous records).
+#[test]
+fn test_abi_pointee_policy_is_exhaustive() {
+    use FieldRole::{
+        ActivationScale, Bias, InputTensor, OutputTensor, Residual, Weight, WeightIndices,
+        WeightScale, Workspace,
+    };
+    use PointeeType::{Void, BF16, F16, F32, I8, U32, U64, U8};
+
+    // One asserted pointer row: (field, pointee, nullable, is_const, role).
+    type PtrRow = (&'static str, PointeeType, bool, bool, FieldRole);
+    // Every pointer in every ABI, with batch-meta and workspace fields included.
+    let table: &[(OpId, &[PtrRow])] = &[
+        (
+            OpId::EmbedGather,
+            &[
+                ("token_ids", U32, false, true, InputTensor),
+                ("table", Void, false, true, InputTensor),
+                ("embed_override", F16, true, true, InputTensor),
+                ("embed_mask", U8, true, true, InputTensor),
+                ("x", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::NgramGather,
+            &[
+                ("staging", Void, true, true, InputTensor),
+                ("row_scales", F32, true, true, WeightScale),
+                ("token_ids", U32, true, true, InputTensor),
+                ("table", Void, true, true, InputTensor),
+                ("x", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::QuantAct,
+            &[
+                ("x", F16, false, true, InputTensor),
+                ("xq", I8, false, false, OutputTensor),
+                ("scale", F32, false, false, ActivationScale),
+            ],
+        ),
+        (
+            OpId::Cast,
+            &[
+                ("x", F16, false, true, InputTensor),
+                ("y", BF16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::Copy,
+            &[
+                ("src", Void, false, true, InputTensor),
+                ("dst", Void, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::GatherRows,
+            &[
+                ("x", F16, false, true, InputTensor),
+                ("indices", U32, false, true, InputTensor),
+                ("y", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::ScatterAddRows,
+            &[
+                ("x", F32, false, true, InputTensor),
+                ("indices", U32, false, true, InputTensor),
+                ("dest", F32, true, true, InputTensor),
+                ("y", F32, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::Split,
+            &[
+                ("x", F16, false, true, InputTensor),
+                ("y0", F16, false, false, OutputTensor),
+                ("y1", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::Concat,
+            &[
+                ("x0", F16, false, true, InputTensor),
+                ("x1", F16, false, true, InputTensor),
+                ("y", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::Norm,
+            &[
+                ("x", F16, false, true, InputTensor),
+                ("weight", F32, false, true, Weight),
+                ("bias", F32, true, true, Bias),
+                ("y", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::ResidualAdd,
+            &[
+                ("a", F16, false, true, InputTensor),
+                ("b", F16, false, true, Residual),
+                ("y", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::ActMul,
+            &[
+                ("gate", F16, false, true, InputTensor),
+                ("up", F16, false, true, InputTensor),
+                ("y", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::Activation,
+            &[
+                ("x", F16, false, true, InputTensor),
+                ("y", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::LogitSoftcap,
+            &[
+                ("x", F32, false, true, InputTensor),
+                ("y", F32, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::Rope,
+            &[
+                ("x", F16, false, true, InputTensor),
+                (
+                    "positions",
+                    U32,
+                    false,
+                    true,
+                    FieldRole::BatchMeta(BatchMetaField::Positions),
+                ),
+                ("y", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::Matmul,
+            &[
+                ("w", U8, false, true, Weight),
+                ("w_scales", Void, true, true, WeightScale),
+                ("w_indices", U8, true, true, WeightIndices),
+                ("x", F16, false, true, InputTensor),
+                ("x_scale", F32, true, true, ActivationScale),
+                ("bias", F32, true, true, Bias),
+                ("residual", F16, true, true, Residual),
+                ("y", F16, false, false, OutputTensor),
+                ("workspace", F32, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::MoeRoute,
+            &[
+                ("logits", F32, false, true, InputTensor),
+                ("bias", F32, true, true, Bias),
+                ("expert_ids", U32, false, false, OutputTensor),
+                ("weights", F32, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::MoeFfn,
+            &[
+                ("x", F16, false, true, InputTensor),
+                ("expert_ids", U32, false, true, InputTensor),
+                ("weights", F32, false, true, InputTensor),
+                ("w_gate_up", Void, false, true, Weight),
+                ("w_gate_up_scales", Void, true, true, WeightScale),
+                ("w_down", Void, false, true, Weight),
+                ("w_down_scales", Void, true, true, WeightScale),
+                ("y", F16, false, false, OutputTensor),
+                ("sort_workspace", I8, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::Attention,
+            &[
+                ("q", F16, false, true, InputTensor),
+                ("k_cache", Void, false, true, InputTensor),
+                ("v_cache", Void, false, true, InputTensor),
+                ("o", F16, false, false, OutputTensor),
+                (
+                    "block_table",
+                    U32,
+                    false,
+                    true,
+                    FieldRole::BatchMeta(BatchMetaField::BlockTable),
+                ),
+                (
+                    "ctx_lens",
+                    U32,
+                    false,
+                    true,
+                    FieldRole::BatchMeta(BatchMetaField::CtxLen),
+                ),
+                (
+                    "query_lens",
+                    U32,
+                    false,
+                    true,
+                    FieldRole::BatchMeta(BatchMetaField::QueryLen),
+                ),
+                ("workspace", F32, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::StateWriteKv,
+            &[
+                ("k", F16, false, true, InputTensor),
+                ("v", F16, false, true, InputTensor),
+                (
+                    "slot_map",
+                    U32,
+                    false,
+                    true,
+                    FieldRole::BatchMeta(BatchMetaField::SlotMap),
+                ),
+                ("k_cache", Void, false, false, OutputTensor),
+                ("v_cache", Void, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::CausalConv1d,
+            &[
+                ("x", F16, false, true, InputTensor),
+                ("w", Void, false, true, Weight),
+                ("bias", F32, true, true, Bias),
+                ("conv_state", Void, false, false, InputTensor),
+                ("y", F16, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::LinearAttnScan,
+            &[
+                ("q", F16, false, true, InputTensor),
+                ("k", F16, false, true, InputTensor),
+                ("v", F16, false, true, InputTensor),
+                ("alpha", F32, false, true, InputTensor),
+                ("beta", F32, false, true, InputTensor),
+                ("state", Void, false, false, InputTensor),
+                ("o", F16, false, false, OutputTensor),
+                (
+                    "query_lens",
+                    U32,
+                    false,
+                    true,
+                    FieldRole::BatchMeta(BatchMetaField::QueryLen),
+                ),
+                ("workspace", F32, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::LogitsPostprocess,
+            &[
+                ("logits", F32, false, true, InputTensor),
+                ("params", Void, false, true, InputTensor),
+                ("history_counts", U32, true, true, InputTensor),
+                ("grammar_mask", U8, true, true, InputTensor),
+                ("probs", F32, false, false, OutputTensor),
+                ("workspace", I8, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::Sample,
+            &[
+                ("probs", F32, false, true, InputTensor),
+                ("rng_state", U64, false, false, InputTensor),
+                (
+                    "seq_ids",
+                    U32,
+                    false,
+                    true,
+                    FieldRole::BatchMeta(BatchMetaField::SeqIds),
+                ),
+                ("tokens", U32, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::Verify,
+            &[
+                ("draft_tokens", U32, false, true, InputTensor),
+                ("draft_probs", F32, true, true, InputTensor),
+                ("target_probs", F32, false, true, InputTensor),
+                ("rng_state", U64, false, false, InputTensor),
+                (
+                    "seq_ids",
+                    U32,
+                    false,
+                    true,
+                    FieldRole::BatchMeta(BatchMetaField::SeqIds),
+                ),
+                ("accepted", U32, false, false, OutputTensor),
+                ("accept_len", U32, false, false, OutputTensor),
+            ],
+        ),
+        (
+            OpId::AllReduce,
+            &[
+                ("send_buf", F16, false, true, InputTensor),
+                ("recv_buf", F16, false, false, OutputTensor),
+                ("staging", I8, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::AllGather,
+            &[
+                ("send_buf", F16, false, true, InputTensor),
+                ("recv_buf", F16, false, false, OutputTensor),
+                ("staging", I8, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::ReduceScatter,
+            &[
+                ("send_buf", F16, false, true, InputTensor),
+                ("recv_buf", F16, false, false, OutputTensor),
+                ("staging", I8, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::AllToAll,
+            &[
+                ("send_buf", F16, false, true, InputTensor),
+                ("recv_buf", F16, false, false, OutputTensor),
+                ("counts", U32, false, true, InputTensor),
+                ("staging", I8, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::Send,
+            &[
+                ("send_buf", F16, false, true, InputTensor),
+                ("staging", I8, false, false, Workspace),
+            ],
+        ),
+        (
+            OpId::Recv,
+            &[
+                ("recv_buf", F16, false, false, OutputTensor),
+                ("staging", I8, false, false, Workspace),
+            ],
+        ),
+        (OpId::Barrier, &[("flags", U32, false, false, InputTensor)]),
+    ];
+    assert_eq!(table.len(), 32, "pointee table must cover all 32 ops");
+
+    for (op, fields) in table {
+        let stat = common::representative_static_for_op(*op);
+        let built = abi_for_op(*op, &stat).expect("representative ABI must construct");
+        for (name, pointee, nullable, is_const, role) in fields.iter() {
+            expect_ptr(&built, name, *pointee, *nullable, *is_const, *role);
+        }
+        // No unnamed pointer may hide outside the table: every pointer field
+        // in the built ABI must be an asserted row above.
+        for field in built.fields() {
+            if field.ty.is_pointer() {
+                assert!(
+                    fields.iter().any(|(n, _, _, _, _)| *n == field.name),
+                    "{} has unasserted pointer field '{}'",
+                    op,
+                    field.name
+                );
+            }
+        }
+    }
+}
+
+/// Scatter absent/present ABI contract (Spec 1 §4.A, SI-10, Spec 4 §3, §7).
+///
+/// Both legal forms carry the same distinct nullable `dest` input typed by the
+/// static dtype; absent-form launches with null, present-form with a base
+/// tensor. Hash and canonical name already distinguish the forms.
+///
+/// Nullable is the only contract available here: A3.1/A3.2 ship no value-level
+/// host-argument packing or validation API (LaunchEntry.args_blob is opaque
+/// bytes; DeviceExecutor/StubDevice accept entries as-is), so no typed
+/// dest-null-iff-has_dest error can be enforced host-side without inventing a
+/// launch layer outside A3.1/A3.2 scope. Enforcement is the static has_dest
+/// flag, the nullable ABI spelling, and the guarded HIP unpacker below.
+#[test]
+fn test_scatter_dest_absent_present_contract() {
+    let absent = common::representative_static_for_op(OpId::ScatterAddRows);
+    let mut present_inner = match absent.clone() {
+        OpStatic::Elementwise(s) => s,
+        _ => panic!("expected elementwise"),
+    };
+    let mut scatter = match present_inner.op_params.clone() {
+        r9v_registry::ElementwiseParams::ScatterAddRows(p) => p,
+        _ => panic!("expected scatter_add_rows"),
+    };
+    scatter.has_dest = true;
+    present_inner.op_params = r9v_registry::ElementwiseParams::ScatterAddRows(scatter);
+    let present = OpStatic::Elementwise(present_inner);
+
+    let absent_abi = abi_for_op(OpId::ScatterAddRows, &absent).expect("absent ABI builds");
+    let present_abi = abi_for_op(OpId::ScatterAddRows, &present).expect("present ABI builds");
+
+    // Both forms carry the same distinct nullable dest input.
+    for abi in [&absent_abi, &present_abi] {
+        expect_ptr(
+            abi,
+            "dest",
+            PointeeType::F32,
+            true,
+            true,
+            FieldRole::InputTensor,
+        );
+        expect_ptr(
+            abi,
+            "x",
+            PointeeType::F32,
+            false,
+            true,
+            FieldRole::InputTensor,
+        );
+        expect_ptr(
+            abi,
+            "indices",
+            PointeeType::U32,
+            false,
+            true,
+            FieldRole::InputTensor,
+        );
+        expect_ptr(
+            abi,
+            "y",
+            PointeeType::F32,
+            false,
+            false,
+            FieldRole::OutputTensor,
+        );
+        abi.validate().expect("scatter ABI must validate");
+    }
+
+    // Hash and canonical name already distinguish the forms; statics are untouched.
+    assert_ne!(
+        static_hash(&absent),
+        static_hash(&present),
+        "has_dest must change static_hash"
+    );
+    assert_ne!(
+        canonical_struct_name(OpId::ScatterAddRows, &absent),
+        canonical_struct_name(OpId::ScatterAddRows, &present),
+        "has_dest must change the canonical name"
+    );
+
+    // Generated code launches both forms: the HIP struct carries dest and the
+    // nullable unpacker guards it, so absent-form null and present-form base
+    // tensor both launch through the same guarded load.
+    for abi in [&absent_abi, &present_abi] {
+        let hip = emit_hip_struct(abi);
+        assert!(
+            hip.contains("dest;"),
+            "emitted HIP struct for {} must carry dest",
+            abi.name()
+        );
+        let unpack = emit_hip_assume_aligned(abi, "args");
+        assert!(
+            unpack.contains("args.dest ?"),
+            "emitted unpacker for {} must guard nullable dest",
+            abi.name()
+        );
     }
 }

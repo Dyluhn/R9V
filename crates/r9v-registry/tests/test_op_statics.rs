@@ -8,16 +8,16 @@
 use r9v_ir::{
     ActivationKind, AttentionMask, CacheScaleGranularity, ConvActivation, CopyKind, DType, Dim,
     Epilogue, GroupId, HashId, LayoutId, LinearAttnKind, MoeScoring, NgramCombine, NgramSource,
-    NormAxis, NormKind, QuantScheme, ReduceOp, RngAlgorithm, RopeScaling, RopeStyle, Smoothing,
-    StateHandle, StateKind,
+    NormAxis, NormKind, QuantScheme, ReduceOp, RngAlgorithm, RopeScaling, RopeStyle, SchemeId,
+    ShapeSymbol, Smoothing, StateHandle, StateKind,
 };
 use r9v_registry::{
     static_hash, ArchName, AttentionFacts, BundleManifest, CausalConv1dFacts, CollectiveFacts,
     CollectivesStatic, ElementwiseFacts, ElementwiseParams, LinearAttnScanFacts,
-    LogitsPostprocessStatic, MatmulFacts, MlaAttentionStatic, MlaLatentStatic, MoeFfnFacts,
-    MoeRouteFacts, OpId, OpStatic, PlacementKind, Registry, RegistryConfig, RegistryError,
-    SamplingFacts, SamplingStatic, ScanMode, StateWriteKvFacts, StaticFacts, TileConfig,
-    VariantKey, VerifyMethodStatic,
+    LogitsPostprocessStatic, MatmulFacts, MatmulStatic, MlaAttentionStatic, MlaLatentStatic,
+    MoeFfnFacts, MoeFfnProjStatic, MoeRouteFacts, OpId, OpStatic, PlacementKind, Registry,
+    RegistryConfig, RegistryError, SamplingFacts, SamplingStatic, ScanMode, StateWriteKvFacts,
+    StaticFacts, TileConfig, VariantKey, VerifyMethodStatic,
 };
 
 fn all_32_op_ids() -> [OpId; 32] {
@@ -213,6 +213,7 @@ fn facts_for(op: OpId) -> StaticFacts {
             w_layout: LayoutId::L1,
             in_dtype: DType::F16,
             act_scheme: QuantScheme::None,
+            residual_dtype: None,
             interleave: false,
             sparse: false,
         }),
@@ -227,8 +228,16 @@ fn facts_for(op: OpId) -> StaticFacts {
             k_topk: 2,
             dm: 2048,
             dff: 1024,
-            schemes: vec![QuantScheme::None, QuantScheme::None],
-            w_dtype: DType::F16,
+            gate_up: r9v_registry::MoeFfnProjStatic {
+                dtype: DType::F16,
+                scheme: QuantScheme::None,
+                layout: LayoutId::L1,
+            },
+            down: r9v_registry::MoeFfnProjStatic {
+                dtype: DType::F16,
+                scheme: QuantScheme::None,
+                layout: LayoutId::L1,
+            },
             in_dtype: DType::F16,
             act_scheme: QuantScheme::None,
             placement_kind: PlacementKind::Device,
@@ -239,6 +248,7 @@ fn facts_for(op: OpId) -> StaticFacts {
             hkv_local: 8,
             d: 128,
             dv: 128,
+            q_dtype: DType::F16,
             cache_dtype: DType::F16,
             attention_layout: LayoutId::L1,
         }),
@@ -247,7 +257,6 @@ fn facts_for(op: OpId) -> StaticFacts {
             d: 128,
             dv: 128,
             in_dtype: DType::F16,
-            cache_dtype: DType::F16,
             attention_layout: LayoutId::L1,
         }),
         OpId::CausalConv1d => StaticFacts::CausalConv1d(CausalConv1dFacts {
@@ -255,8 +264,10 @@ fn facts_for(op: OpId) -> StaticFacts {
             channels: 2048,
             x_dtype: DType::F16,
             w_dtype: DType::F16,
+            w_scheme: QuantScheme::None,
+            w_layout: LayoutId::L1,
             out_dtype: DType::F16,
-            has_bias: false,
+            bias_dtype: None,
         }),
         OpId::LinearAttnScan => StaticFacts::LinearAttnScan(LinearAttnScanFacts {
             h_local: 16,
@@ -286,6 +297,9 @@ fn facts_for(op: OpId) -> StaticFacts {
                 table_scheme: QuantScheme::None,
                 table_layout: LayoutId::L0,
                 staging_dtype: DType::F16,
+                staging_scheme: QuantScheme::Scheme(r9v_ir::SchemeId::new(1)),
+                staging_layout: LayoutId::L0,
+                scales_dtype: Some(DType::F32),
             },
         },
         OpId::QuantAct => StaticFacts::Elementwise {
@@ -328,6 +342,7 @@ fn facts_for(op: OpId) -> StaticFacts {
                 dtype: DType::F32,
                 index_dtype: DType::U32,
                 width: 4096,
+                has_dest: false,
             },
         },
         OpId::Split => StaticFacts::Elementwise {
@@ -355,12 +370,17 @@ fn facts_for(op: OpId) -> StaticFacts {
             params: ElementwiseFacts::Norm {
                 in_dtype: DType::F16,
                 n: 4096,
+                has_bias: false,
             },
         },
         OpId::ResidualAdd => StaticFacts::Elementwise {
             t_bucket: 16,
             fused_with: None,
-            params: ElementwiseFacts::ResidualAdd { n: 4096 },
+            params: ElementwiseFacts::ResidualAdd {
+                a_dtype: DType::F16,
+                b_dtype: DType::F16,
+                n: 4096,
+            },
         },
         OpId::ActMul => StaticFacts::Elementwise {
             t_bucket: 16,
@@ -396,6 +416,8 @@ fn facts_for(op: OpId) -> StaticFacts {
             s_bucket: 4,
             v: 32000,
             q_bucket: 16,
+            has_history_counts: false,
+            has_grammar_mask: false,
         }),
         OpId::Sample => StaticFacts::Sampling(SamplingFacts::Sample {
             s_bucket: 4,
@@ -406,6 +428,7 @@ fn facts_for(op: OpId) -> StaticFacts {
             v: 32000,
             q_bucket: 16,
             tree: false,
+            has_draft_probs: false,
         }),
         OpId::AllReduce => StaticFacts::Collectives(CollectiveFacts::AllReduce {
             rank: 0,
@@ -647,11 +670,13 @@ fn test_from_op_copies_every_behavior_attribute() {
         v: 32000,
         q_bucket: 16,
         tree: true,
+        has_draft_probs: true,
     });
     let lowered = OpStatic::from_op(&ir, &facts).expect("verify lowers");
     match lowered {
         OpStatic::Sampling(SamplingStatic::Verify(v)) => {
             assert!(v.tree);
+            assert!(v.has_draft_probs);
             match v.method {
                 VerifyMethodStatic::TypicalAcceptance {
                     eps_bits,
@@ -761,13 +786,16 @@ fn test_all_32_exact_pairing_mismatches_are_typed_errors() {
 /// Invalid shapes are rejected by validate(), never silently accepted.
 #[test]
 fn test_validate_rejects_invalid_statics() {
-    // MoeFfn schemes must be exactly [gate_up, down].
+    // MoeFfn projections must be legal (dtype, scheme) combinations.
     let mut good = OpStatic::from_op(&ir_op_for(OpId::MoeFfn), &facts_for(OpId::MoeFfn))
         .expect("moe_ffn lowers");
     if let OpStatic::MoeFfn(ref mut s) = good {
-        s.schemes.pop();
+        s.gate_up.scheme = QuantScheme::PerRow;
     }
-    assert!(good.validate().is_err(), "single-scheme moe_ffn must fail");
+    assert!(
+        good.validate().is_err(),
+        "f16 gate_up with PerRow scales must fail"
+    );
 
     // Split requires 0 < first < total.
     let mut split =
@@ -931,6 +959,17 @@ fn test_new_attribute_flips_change_hash() {
             m.shared_experts = 1;
         }
     });
+    flip(OpId::MoeFfn, &|s| {
+        if let OpStatic::MoeFfn(m) = s {
+            m.gate_up.layout = LayoutId::L0;
+        }
+    });
+    flip(OpId::MoeFfn, &|s| {
+        if let OpStatic::MoeFfn(m) = s {
+            m.down.dtype = DType::I8;
+            m.down.scheme = QuantScheme::PerRow;
+        }
+    });
     flip(OpId::Attention, &|s| {
         if let OpStatic::Attention(a) = s {
             a.set_softmax_scale(0.5);
@@ -939,6 +978,11 @@ fn test_new_attribute_flips_change_hash() {
     flip(OpId::Attention, &|s| {
         if let OpStatic::Attention(a) = s {
             a.sinks = 2;
+        }
+    });
+    flip(OpId::Attention, &|s| {
+        if let OpStatic::Attention(a) = s {
+            a.q_dtype = DType::Bf16;
         }
     });
     flip(OpId::Attention, &|s| {
@@ -975,6 +1019,21 @@ fn test_new_attribute_flips_change_hash() {
             c.x_dtype = DType::Bf16;
         }
     });
+    flip(OpId::CausalConv1d, &|s| {
+        if let OpStatic::CausalConv1d(c) = s {
+            c.w_dtype = DType::Bf16;
+        }
+    });
+    flip(OpId::CausalConv1d, &|s| {
+        if let OpStatic::CausalConv1d(c) = s {
+            c.w_layout = LayoutId::L0;
+        }
+    });
+    flip(OpId::CausalConv1d, &|s| {
+        if let OpStatic::CausalConv1d(c) = s {
+            c.bias_dtype = Some(DType::F32);
+        }
+    });
     flip(OpId::LinearAttnScan, &|s| {
         if let OpStatic::LinearAttnScan(l) = s {
             l.out_dtype = DType::Bf16;
@@ -984,6 +1043,48 @@ fn test_new_attribute_flips_change_hash() {
         if let OpStatic::Elementwise(e) = s {
             if let ElementwiseParams::ResidualAdd(r) = &mut e.op_params {
                 r.set_scale(0.5);
+            }
+        }
+    });
+    flip(OpId::ResidualAdd, &|s| {
+        if let OpStatic::Elementwise(e) = s {
+            if let ElementwiseParams::ResidualAdd(r) = &mut e.op_params {
+                r.a_dtype = DType::Bf16;
+            }
+        }
+    });
+    flip(OpId::ResidualAdd, &|s| {
+        if let OpStatic::Elementwise(e) = s {
+            if let ElementwiseParams::ResidualAdd(r) = &mut e.op_params {
+                r.b_dtype = DType::F32;
+            }
+        }
+    });
+    flip(OpId::Norm, &|s| {
+        if let OpStatic::Elementwise(e) = s {
+            if let ElementwiseParams::Norm(n) = &mut e.op_params {
+                n.has_bias = true;
+            }
+        }
+    });
+    flip(OpId::ScatterAddRows, &|s| {
+        if let OpStatic::Elementwise(e) = s {
+            if let ElementwiseParams::ScatterAddRows(p) = &mut e.op_params {
+                p.has_dest = true;
+            }
+        }
+    });
+    flip(OpId::NgramGather, &|s| {
+        if let OpStatic::Elementwise(e) = s {
+            if let ElementwiseParams::NgramGather(g) = &mut e.op_params {
+                g.scales_dtype = Some(DType::F16);
+            }
+        }
+    });
+    flip(OpId::NgramGather, &|s| {
+        if let OpStatic::Elementwise(e) = s {
+            if let ElementwiseParams::NgramGather(g) = &mut e.op_params {
+                g.staging_scheme = QuantScheme::Scheme(SchemeId::new(2));
             }
         }
     });
@@ -1015,12 +1116,35 @@ fn test_new_attribute_flips_change_hash() {
                 s_bucket: 8,
                 v: 32000,
                 q_bucket: 16,
+                has_history_counts: false,
+                has_grammar_mask: false,
             }));
         }
     });
     flip(OpId::Verify, &|s| {
         if let OpStatic::Sampling(SamplingStatic::Verify(v)) = s {
             v.tree = true;
+        }
+    });
+    flip(OpId::Verify, &|s| {
+        if let OpStatic::Sampling(SamplingStatic::Verify(v)) = s {
+            v.has_draft_probs = true;
+        }
+    });
+    flip(OpId::LogitsPostprocess, &|s| {
+        if let OpStatic::Sampling(SamplingStatic::LogitsPostprocess(p)) = s {
+            p.has_history_counts = true;
+        }
+    });
+    flip(OpId::LogitsPostprocess, &|s| {
+        if let OpStatic::Sampling(SamplingStatic::LogitsPostprocess(p)) = s {
+            p.has_grammar_mask = true;
+        }
+    });
+    flip(OpId::Matmul, &|s| {
+        if let OpStatic::Matmul(m) = s {
+            m.epilogue = r9v_ir::Epilogue::Residual;
+            m.residual_dtype = Some(DType::F16);
         }
     });
     flip(OpId::Send, &|s| {
@@ -1039,4 +1163,407 @@ fn test_new_attribute_flips_change_hash() {
             b.group = 5;
         }
     });
+}
+
+/// Contradictory IR/facts pairs fail typed at lowering, never silently win.
+#[test]
+fn test_from_op_rejects_contradictory_facts() {
+    let must_mismatch =
+        |op: r9v_ir::Op, facts: StaticFacts, why: &str| match OpStatic::from_op(&op, &facts) {
+            Err(RegistryError::FactsOpMismatch { .. }) => {}
+            Err(other) => panic!("{why} must be FactsOpMismatch, got {other:?}"),
+            Ok(_) => panic!("{why} must fail"),
+        };
+
+    // Matmul residual presence must match a Residual epilogue.
+    let mut residual_facts = facts_for(OpId::Matmul);
+    if let StaticFacts::Matmul(ref mut f) = residual_facts {
+        f.residual_dtype = Some(DType::F16);
+    }
+    must_mismatch(
+        ir_op_for(OpId::Matmul),
+        residual_facts,
+        "residual facts with a None epilogue",
+    );
+    let residual_ir = r9v_ir::Op::Matmul(r9v_ir::MatmulOp {
+        out_dtype: DType::F16,
+        epilogue: r9v_ir::Epilogue::Residual,
+        transpose_w: false,
+    });
+    must_mismatch(
+        residual_ir,
+        facts_for(OpId::Matmul),
+        "Residual epilogue without residual facts",
+    );
+
+    // Ngram scales presence must match Staged source.
+    let mut staged_facts = facts_for(OpId::NgramGather);
+    if let StaticFacts::Elementwise {
+        params: ElementwiseFacts::NgramGather { scales_dtype, .. },
+        ..
+    } = &mut staged_facts
+    {
+        *scales_dtype = None;
+    }
+    must_mismatch(
+        ir_op_for(OpId::NgramGather),
+        staged_facts,
+        "Staged source without scales facts",
+    );
+    let device_ir = r9v_ir::Op::NgramGather(r9v_ir::NgramGatherOp {
+        source: NgramSource::Device,
+        orders: vec![2u32, 3u32].into_boxed_slice(),
+        heads: 2,
+        hash: HashId::new(7),
+        table_sizes: vec![1024u32, 1024u32].into_boxed_slice(),
+        combine: NgramCombine::Sum,
+        out_dtype: DType::F16,
+    });
+    must_mismatch(
+        device_ir,
+        facts_for(OpId::NgramGather),
+        "Device source with scales facts",
+    );
+
+    // Recv rank mismatch still fails typed.
+    let mut rank_facts = facts_for(OpId::Recv);
+    if let StaticFacts::Collectives(CollectiveFacts::Recv { shape, .. }) = &mut rank_facts {
+        shape.push(8);
+    }
+    must_mismatch(
+        ir_op_for(OpId::Recv),
+        rank_facts,
+        "recv facts rank must match IR rank",
+    );
+
+    // Recv concrete extent mismatch fails typed.
+    let mut extent_facts = facts_for(OpId::Recv);
+    if let StaticFacts::Collectives(CollectiveFacts::Recv { shape, .. }) = &mut extent_facts {
+        shape[1] = 2048;
+    }
+    must_mismatch(
+        ir_op_for(OpId::Recv),
+        extent_facts,
+        "recv facts extent must equal the concrete IR extent",
+    );
+
+    // Recv zero extents fail typed.
+    let mut zero_facts = facts_for(OpId::Recv);
+    if let StaticFacts::Collectives(CollectiveFacts::Recv { shape, .. }) = &mut zero_facts {
+        shape[1] = 0;
+    }
+    must_mismatch(ir_op_for(OpId::Recv), zero_facts, "recv zero extent");
+
+    // Recv overflowing element counts fail typed.
+    let wide_ir = r9v_ir::Op::Recv(r9v_ir::RecvOp {
+        group: GroupId::new(0),
+        peer: 0,
+        shape: vec![
+            Dim::Symbolic(ShapeSymbol::T),
+            Dim::Symbolic(ShapeSymbol::S),
+            Dim::Symbolic(ShapeSymbol::Dm),
+        ]
+        .into_boxed_slice(),
+        dtype: DType::F16,
+    });
+    let wide_facts = StaticFacts::Collectives(CollectiveFacts::Recv {
+        rank: 1,
+        world: 2,
+        transport: r9v_ir::P2pTransport::Direct,
+        bytes_bucket: 65536,
+        shape: vec![u32::MAX, u32::MAX, u32::MAX],
+    });
+    must_mismatch(wide_ir, wide_facts, "recv overflowing shape product");
+}
+
+/// Symbolic IR extents resolve to the concrete facts extents.
+#[test]
+fn test_recv_symbolic_extents_resolve_to_facts() {
+    let ir = r9v_ir::Op::Recv(r9v_ir::RecvOp {
+        group: GroupId::new(0),
+        peer: 0,
+        shape: vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(4096)].into_boxed_slice(),
+        dtype: DType::F16,
+    });
+    let lowered = OpStatic::from_op(&ir, &facts_for(OpId::Recv)).expect("symbolic recv lowers");
+    match lowered {
+        OpStatic::Collectives(CollectivesStatic::Recv(s)) => {
+            assert_eq!(s.shape, vec![128, 4096]);
+        }
+        other => panic!("expected recv, got {other:?}"),
+    }
+}
+
+/// Illegal (dtype, scheme, layout) combinations are rejected by `validate`.
+#[test]
+fn test_validate_rejects_illegal_semantic_combinations() {
+    let must_fail = |s: OpStatic, why: &str| {
+        assert!(s.validate().is_err(), "{why} must fail validation");
+    };
+    let must_pass = |s: OpStatic, why: &str| {
+        assert!(s.validate().is_ok(), "{why} must pass validation");
+    };
+
+    // Attention q dtype is f16/bf16/f32 only.
+    let mut attention = OpStatic::from_op(&ir_op_for(OpId::Attention), &facts_for(OpId::Attention))
+        .expect("attention lowers");
+    if let OpStatic::Attention(ref mut a) = attention {
+        a.q_dtype = DType::I8;
+    }
+    must_fail(attention, "i8 attention q_dtype");
+
+    // Residual addends are f16/bf16/f32 only, independently.
+    let mut residual =
+        OpStatic::from_op(&ir_op_for(OpId::ResidualAdd), &facts_for(OpId::ResidualAdd))
+            .expect("residual_add lowers");
+    if let OpStatic::Elementwise(ref mut e) = residual {
+        if let ElementwiseParams::ResidualAdd(ref mut r) = e.op_params {
+            r.a_dtype = DType::I8;
+        }
+    }
+    must_fail(residual, "i8 residual a_dtype");
+
+    // Conv weight legality mirrors the IR float/quantized split.
+    let conv = |w_dtype: DType, w_scheme: QuantScheme| {
+        let mut facts = facts_for(OpId::CausalConv1d);
+        if let StaticFacts::CausalConv1d(ref mut f) = facts {
+            f.w_dtype = w_dtype;
+            f.w_scheme = w_scheme;
+        }
+        OpStatic::from_op(&ir_op_for(OpId::CausalConv1d), &facts).expect("conv lowers")
+    };
+    must_fail(
+        conv(DType::F16, QuantScheme::PerRow),
+        "f16 conv with PerRow",
+    );
+    must_fail(conv(DType::I8, QuantScheme::None), "i8 conv without scales");
+    must_fail(conv(DType::E4m3, QuantScheme::None), "e4m3 conv weight");
+    must_pass(
+        conv(DType::Bf16, QuantScheme::None),
+        "bf16 conv without scales",
+    );
+    must_pass(
+        conv(DType::I8, QuantScheme::PerRow),
+        "i8 conv with PerRow scales",
+    );
+    must_pass(
+        conv(DType::I4, QuantScheme::Scheme(SchemeId::new(1))),
+        "i4 conv with block scales",
+    );
+    let mut biased = conv(DType::F16, QuantScheme::None);
+    if let OpStatic::CausalConv1d(ref mut c) = biased {
+        c.bias_dtype = Some(DType::Bool);
+    }
+    must_fail(biased, "bool conv bias_dtype");
+
+    // Matmul residual presence tracks the Residual epilogue. These statics are
+    // built literally (not lowered) because `from_op` already rejects the
+    // contradictory pairs; `validate` must reject them independently for
+    // directly constructed descriptors at resolve time.
+    let matmul = |epilogue: r9v_ir::Epilogue, residual_dtype: Option<DType>| {
+        OpStatic::Matmul(MatmulStatic {
+            m_bucket: 16,
+            n: 4096,
+            k: 4096,
+            w_dtype: DType::F16,
+            w_scheme: QuantScheme::None,
+            w_layout: LayoutId::L1,
+            in_dtype: DType::F16,
+            act_scheme: QuantScheme::None,
+            out_dtype: DType::F16,
+            epilogue,
+            residual_dtype,
+            transpose_w: false,
+            interleave: false,
+            sparse: false,
+        })
+    };
+    must_pass(
+        matmul(r9v_ir::Epilogue::Residual, Some(DType::Bf16)),
+        "Residual epilogue with bf16 residual must validate",
+    );
+    must_fail(
+        matmul(r9v_ir::Epilogue::Residual, None),
+        "Residual epilogue without residual dtype",
+    );
+    must_fail(
+        matmul(r9v_ir::Epilogue::None, Some(DType::F16)),
+        "residual dtype without Residual epilogue",
+    );
+    must_fail(
+        matmul(r9v_ir::Epilogue::Residual, Some(DType::I8)),
+        "i8 residual dtype",
+    );
+
+    // Moe projections validate independently per the GEMM weight rule.
+    let moe = |gate: MoeFfnProjStatic, down: MoeFfnProjStatic| {
+        let mut facts = facts_for(OpId::MoeFfn);
+        if let StaticFacts::MoeFfn(ref mut f) = facts {
+            f.gate_up = gate;
+            f.down = down;
+        }
+        OpStatic::from_op(&ir_op_for(OpId::MoeFfn), &facts).expect("moe_ffn lowers")
+    };
+    let f16_none = MoeFfnProjStatic {
+        dtype: DType::F16,
+        scheme: QuantScheme::None,
+        layout: LayoutId::L1,
+    };
+    let i8_row = MoeFfnProjStatic {
+        dtype: DType::I8,
+        scheme: QuantScheme::PerRow,
+        layout: LayoutId::L1,
+    };
+    must_pass(
+        moe(i8_row, f16_none),
+        "mixed quantized gate_up and dense down",
+    );
+    must_fail(
+        moe(
+            MoeFfnProjStatic {
+                scheme: QuantScheme::PerRow,
+                ..f16_none
+            },
+            f16_none,
+        ),
+        "f16 gate_up with PerRow scales",
+    );
+    must_fail(
+        moe(
+            f16_none,
+            MoeFfnProjStatic {
+                scheme: QuantScheme::None,
+                ..i8_row
+            },
+        ),
+        "i8 down without scales",
+    );
+    must_fail(
+        moe(
+            MoeFfnProjStatic {
+                dtype: DType::F32,
+                ..f16_none
+            },
+            f16_none,
+        ),
+        "f32 gate_up weight",
+    );
+
+    // Ngram Staged mode requires block scales and f32/f16 row scales.
+    let mut ngram = OpStatic::from_op(&ir_op_for(OpId::NgramGather), &facts_for(OpId::NgramGather))
+        .expect("ngram lowers");
+    if let OpStatic::Elementwise(ref mut e) = ngram {
+        if let ElementwiseParams::NgramGather(ref mut g) = e.op_params {
+            g.staging_scheme = QuantScheme::None;
+        }
+    }
+    must_fail(ngram, "Staged ngram without block staging scheme");
+    let mut ngram = OpStatic::from_op(&ir_op_for(OpId::NgramGather), &facts_for(OpId::NgramGather))
+        .expect("ngram lowers");
+    if let OpStatic::Elementwise(ref mut e) = ngram {
+        if let ElementwiseParams::NgramGather(ref mut g) = e.op_params {
+            g.scales_dtype = Some(DType::I8);
+        }
+    }
+    must_fail(ngram, "Staged ngram with i8 scales dtype");
+    let device_ir = r9v_ir::Op::NgramGather(r9v_ir::NgramGatherOp {
+        source: NgramSource::Device,
+        orders: vec![2u32, 3u32].into_boxed_slice(),
+        heads: 2,
+        hash: HashId::new(7),
+        table_sizes: vec![1024u32, 1024u32].into_boxed_slice(),
+        combine: NgramCombine::Sum,
+        out_dtype: DType::F16,
+    });
+    let mut device_facts = facts_for(OpId::NgramGather);
+    if let StaticFacts::Elementwise {
+        params: ElementwiseFacts::NgramGather { scales_dtype, .. },
+        ..
+    } = &mut device_facts
+    {
+        *scales_dtype = None;
+    }
+    must_pass(
+        OpStatic::from_op(&device_ir, &device_facts).expect("device ngram lowers"),
+        "Device-table ngram without scales must validate",
+    );
+}
+
+/// Gate/up and down projections are independent kernel semantics.
+#[test]
+fn test_moe_ffn_projections_are_independent() {
+    let base = OpStatic::from_op(&ir_op_for(OpId::MoeFfn), &facts_for(OpId::MoeFfn))
+        .expect("moe_ffn lowers");
+    // Swapping the two projections changes identity: order is semantic.
+    let mut swapped = base.clone();
+    if let OpStatic::MoeFfn(ref mut m) = swapped {
+        m.gate_up = MoeFfnProjStatic {
+            dtype: DType::I8,
+            scheme: QuantScheme::PerRow,
+            layout: LayoutId::L0,
+        };
+        m.down = MoeFfnProjStatic {
+            dtype: DType::F16,
+            scheme: QuantScheme::None,
+            layout: LayoutId::L1,
+        };
+    }
+    let mut unswapped = base.clone();
+    if let OpStatic::MoeFfn(ref mut m) = unswapped {
+        m.gate_up = MoeFfnProjStatic {
+            dtype: DType::F16,
+            scheme: QuantScheme::None,
+            layout: LayoutId::L1,
+        };
+        m.down = MoeFfnProjStatic {
+            dtype: DType::I8,
+            scheme: QuantScheme::PerRow,
+            layout: LayoutId::L0,
+        };
+    }
+    assert_ne!(
+        static_hash(&swapped),
+        static_hash(&unswapped),
+        "swapped projections must hash differently"
+    );
+    assert!(
+        swapped.validate().is_ok() && unswapped.validate().is_ok(),
+        "both mixed projection orders must validate"
+    );
+}
+
+/// Optional input dtypes survive canonical serde round-trips bit-exactly.
+#[test]
+fn test_optional_dtype_serde_roundtrip() {
+    let residual_ir = r9v_ir::Op::Matmul(r9v_ir::MatmulOp {
+        out_dtype: DType::F16,
+        epilogue: r9v_ir::Epilogue::Residual,
+        transpose_w: false,
+    });
+    let mut residual_facts = facts_for(OpId::Matmul);
+    if let StaticFacts::Matmul(ref mut f) = residual_facts {
+        f.residual_dtype = Some(DType::Bf16);
+    }
+    let biased_conv = {
+        let mut facts = facts_for(OpId::CausalConv1d);
+        if let StaticFacts::CausalConv1d(ref mut f) = facts {
+            f.bias_dtype = Some(DType::F16);
+        }
+        OpStatic::from_op(&ir_op_for(OpId::CausalConv1d), &facts).expect("biased conv lowers")
+    };
+    for op_s in [
+        OpStatic::from_op(&residual_ir, &residual_facts).expect("residual lowers"),
+        biased_conv,
+        OpStatic::from_op(&ir_op_for(OpId::NgramGather), &facts_for(OpId::NgramGather))
+            .expect("ngram lowers"),
+    ] {
+        let json = serde_json::to_string(&op_s).expect("static must serialize");
+        let back: OpStatic = serde_json::from_str(&json).expect("static must deserialize");
+        assert_eq!(op_s, back, "optional dtypes must round-trip in {json}");
+        assert_eq!(
+            static_hash(&op_s),
+            static_hash(&back),
+            "hash must survive serde round-trip"
+        );
+    }
 }

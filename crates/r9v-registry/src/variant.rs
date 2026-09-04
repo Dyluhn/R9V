@@ -97,6 +97,7 @@ mod tests {
             act_scheme: QuantScheme::None,
             out_dtype: DType::F16,
             epilogue: Epilogue::None,
+            residual_dtype: None,
             transpose_w: false,
             interleave: false,
             sparse: false,
@@ -118,8 +119,16 @@ mod tests {
             k_topk: 2,
             dm: 2048,
             dff: 5632,
-            schemes: vec![QuantScheme::None, QuantScheme::None],
-            w_dtype: DType::F16,
+            gate_up: MoeFfnProjStatic {
+                dtype: DType::F16,
+                scheme: QuantScheme::None,
+                layout: LayoutId::L1,
+            },
+            down: MoeFfnProjStatic {
+                dtype: DType::F16,
+                scheme: QuantScheme::None,
+                layout: LayoutId::L1,
+            },
             in_dtype: DType::F16,
             act_scheme: QuantScheme::None,
             act: r9v_ir::ActivationKind::Silu,
@@ -144,6 +153,7 @@ mod tests {
             hkv_local: 8,
             d: 128,
             dv: 128,
+            q_dtype: DType::F16,
             cache_dtype: DType::F16,
             attention_layout: LayoutId::CONTIGUOUS,
             mask_kind: AttentionMask::Causal,
@@ -234,8 +244,10 @@ mod tests {
             act: r9v_ir::ConvActivation::Silu,
             x_dtype: DType::F16,
             w_dtype: DType::F16,
+            w_scheme: QuantScheme::None,
+            w_layout: LayoutId::L1,
             out_dtype: DType::F16,
-            has_bias: false,
+            bias_dtype: None,
         });
         let k_conv = VariantKey::new(
             OpId::CausalConv1d,
@@ -252,6 +264,8 @@ mod tests {
             t_bucket: 128,
             fused_with: None,
             op_params: ElementwiseParams::ResidualAdd(ResidualAddStatic {
+                a_dtype: DType::F16,
+                b_dtype: DType::F16,
                 out_dtype: DType::F16,
                 scale_bits: 1.0f32.to_bits(),
                 n: 4096,
@@ -368,8 +382,10 @@ mod tests {
                 act: r9v_ir::ConvActivation::Identity,
                 x_dtype: r9v_ir::DType::F32,
                 w_dtype: r9v_ir::DType::F32,
+                w_scheme: QuantScheme::None,
+                w_layout: LayoutId::L1,
                 out_dtype: r9v_ir::DType::F32,
-                has_bias: true,
+                bias_dtype: Some(r9v_ir::DType::F32),
             }),
             OpStatic::Elementwise(ElementwiseStatic {
                 t_bucket: 8,
@@ -382,10 +398,11 @@ mod tests {
                     in_dtype: r9v_ir::DType::F16,
                     out_dtype: r9v_ir::DType::F16,
                     n: 1024,
+                    has_bias: true,
                 }),
             }),
             OpStatic::Sampling(SamplingStatic::Verify(VerifyStatic::typical(
-                2, 32000, 4, 0.05, 1.25, true,
+                2, 32000, 4, 0.05, 1.25, true, true,
             ))),
             OpStatic::Collectives(CollectivesStatic::Send(SendStatic {
                 group: 2,
@@ -429,6 +446,7 @@ mod tests {
                 q_bucket: 1,
                 method: m,
                 tree: false,
+                has_draft_probs: false,
             }))
         };
         assert_ne!(static_hash(&mk(method)), static_hash(&mk(method2)));

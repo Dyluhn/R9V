@@ -202,6 +202,7 @@ fn api_function_signatures() {
         act_scheme: r9v_ir::QuantScheme::None,
         out_dtype: r9v_ir::DType::F16,
         epilogue: r9v_ir::Epilogue::None,
+        residual_dtype: None,
         transpose_w: false,
         interleave: false,
         sparse: false,

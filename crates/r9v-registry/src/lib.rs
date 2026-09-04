@@ -35,10 +35,10 @@ pub use types::{
     ElementwiseFacts, ElementwiseParams, ElementwiseStatic, EmbedGatherStatic, GatherRowsStatic,
     LaunchGeometry, LinearAttnScanFacts, LinearAttnScanStatic, LogitSoftcapStatic,
     LogitsPostprocessStatic, MatmulFacts, MatmulStatic, MlaAttentionStatic, MlaLatentStatic,
-    MoeFfnFacts, MoeFfnStatic, MoeRouteFacts, MoeRouteStatic, NgramGatherStatic, NormStatic, OpId,
-    OpStatic, PlacementKind, QuantActStatic, RecvStatic, ReduceScatterStatic, ResidualAddStatic,
-    RopeScalingStatic, RopeStatic, SampleStatic, SamplingFacts, SamplingStatic, ScanMode,
-    ScatterAddRowsStatic, SendStatic, SplitStatic, StateWriteKvFacts, StateWriteKvStatic,
+    MoeFfnFacts, MoeFfnProjStatic, MoeFfnStatic, MoeRouteFacts, MoeRouteStatic, NgramGatherStatic,
+    NormStatic, OpId, OpStatic, PlacementKind, QuantActStatic, RecvStatic, ReduceScatterStatic,
+    ResidualAddStatic, RopeScalingStatic, RopeStatic, SampleStatic, SamplingFacts, SamplingStatic,
+    ScanMode, ScatterAddRowsStatic, SendStatic, SplitStatic, StateWriteKvFacts, StateWriteKvStatic,
     StaticFacts, Tier, TileConfig, VariantHash, VerifyMethodStatic, VerifyStatic,
 };
 pub use variant::{static_hash, variant_hash, VariantKey};

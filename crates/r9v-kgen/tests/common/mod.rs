@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Common test helpers and representative op static descriptors for r9v-kgen tests.
 
-use r9v_ir::{AttentionMask, DType, Epilogue, LayoutId, LinearAttnKind, P2pTransport, QuantScheme};
+use r9v_ir::{
+    AttentionMask, DType, Epilogue, LayoutId, LinearAttnKind, P2pTransport, QuantScheme, SchemeId,
+};
+use r9v_registry::MoeFfnProjStatic;
 use r9v_registry::{
     ActMulStatic, ActivationStatic, AllGatherStatic, AllReduceStatic, AllToAllStatic,
     AttentionStatic, BarrierStatic, CastStatic, CausalConv1dStatic, CollectivesStatic,
@@ -60,6 +63,7 @@ pub fn representative_matmul_static() -> OpStatic {
         act_scheme: QuantScheme::None,
         out_dtype: DType::F16,
         epilogue: Epilogue::None,
+        residual_dtype: None,
         transpose_w: false,
         interleave: false,
         sparse: false,
@@ -87,8 +91,10 @@ pub fn representative_causal_conv1d_static() -> OpStatic {
         act: r9v_ir::ConvActivation::Silu,
         x_dtype: DType::F16,
         w_dtype: DType::F16,
+        w_scheme: QuantScheme::None,
+        w_layout: LayoutId::L1,
         out_dtype: DType::F16,
-        has_bias: false,
+        bias_dtype: None,
     })
 }
 
@@ -99,8 +105,16 @@ pub fn representative_moe_ffn_static() -> OpStatic {
         k_topk: 2,
         dm: 2048,
         dff: 1024,
-        schemes: vec![QuantScheme::None, QuantScheme::None],
-        w_dtype: DType::F16,
+        gate_up: MoeFfnProjStatic {
+            dtype: DType::F16,
+            scheme: QuantScheme::None,
+            layout: LayoutId::L1,
+        },
+        down: MoeFfnProjStatic {
+            dtype: DType::F16,
+            scheme: QuantScheme::None,
+            layout: LayoutId::L1,
+        },
         in_dtype: DType::F16,
         act_scheme: QuantScheme::None,
         act: r9v_ir::ActivationKind::Silu,
@@ -117,6 +131,7 @@ pub fn representative_attention_static(mask_kind: AttentionMask, q_bucket: u32) 
         hkv_local: 8,
         d: 128,
         dv: 128,
+        q_dtype: DType::F16,
         cache_dtype: DType::F16,
         attention_layout: LayoutId::L1,
         mask_kind,
@@ -166,6 +181,7 @@ pub fn representative_elementwise_static() -> OpStatic {
             in_dtype: DType::F16,
             out_dtype: DType::F16,
             n: 4096,
+            has_bias: false,
         }),
     })
 }
@@ -175,6 +191,8 @@ pub fn representative_residual_add_static() -> OpStatic {
         t_bucket: 16,
         fused_with: None,
         op_params: ElementwiseParams::ResidualAdd(ResidualAddStatic {
+            a_dtype: DType::F16,
+            b_dtype: DType::F16,
             out_dtype: DType::F16,
             scale_bits: 1.0f32.to_bits(),
             n: 4096,
@@ -197,6 +215,7 @@ pub fn representative_verify_static(tree: bool) -> OpStatic {
         q_bucket: 16,
         method: VerifyMethodStatic::Rejection,
         tree,
+        has_draft_probs: false,
     }))
 }
 
@@ -205,6 +224,8 @@ pub fn representative_logits_postprocess_static() -> OpStatic {
         s_bucket: 4,
         v: 32000,
         q_bucket: 16,
+        has_history_counts: false,
+        has_grammar_mask: false,
     }))
 }
 
@@ -258,6 +279,9 @@ pub fn representative_static_for_op(op: OpId) -> OpStatic {
                 table_scheme: QuantScheme::None,
                 table_layout: LayoutId::L0,
                 staging_dtype: DType::F16,
+                staging_scheme: QuantScheme::Scheme(SchemeId::new(1)),
+                staging_layout: LayoutId::L0,
+                scales_dtype: Some(DType::F32),
                 combine: r9v_ir::NgramCombine::Sum,
                 out_dtype: DType::F16,
             }),
@@ -307,6 +331,7 @@ pub fn representative_static_for_op(op: OpId) -> OpStatic {
                 dtype: DType::F32,
                 index_dtype: DType::U32,
                 width: 4096,
+                has_dest: false,
             }),
         }),
         OpId::Split => OpStatic::Elementwise(ElementwiseStatic {

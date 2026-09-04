@@ -97,6 +97,57 @@ fn validate_op_family(op: OpId, op_static: &OpStatic) -> Result<(), KgenError> {
     Ok(())
 }
 
+// DECISION(A3.API): ABI pointee policy is exhaustive over five classes (Spec 4 §7).
+// Every activation, parameter, index, or output pointer whose exact element dtype
+// is carried in OpStatic uses PointeeType::from_dtype; fields with no dtype in the
+// static keep their exact U32/U64/F32/U8 spelling. Rejected leaving typed pointers
+// Void because an untyped pointer aliases distinct load widths. Void survives only
+// for: (a) layout- or scheme-dependent weight storage (matmul byte buffers,
+// embed/ngram tables, moe/conv packed weights); (b) scheme-dependent weight scale
+// records (matmul/moe scales); (c) paged or fixed state arenas whose element
+// interpretation varies by layout (attention/state-write caches, conv/scan state);
+// (d) dtype-agnostic raw byte movement (copy src/dst); (e) truly heterogeneous
+// records (sampling params blob). Quantized-but-byte-addressable activations
+// (i8/e4m3/i4/bool map to I8/U8) stay typed because the byte spelling is exact.
+// Spec 1 §2.1, §4, Spec 4 §3, §7.
+/// Borrows the closed elementwise parameter descriptor for an elementwise op (Spec 4 §3).
+fn elementwise_params(
+    op: OpId,
+    op_static: &OpStatic,
+) -> Result<&r9v_registry::ElementwiseParams, KgenError> {
+    match op_static {
+        OpStatic::Elementwise(s) => Ok(&s.op_params),
+        _ => Err(KgenError::MismatchedOpFamily {
+            op,
+            family: op_static_family(op_static),
+        }),
+    }
+}
+
+/// Returns the exact communication element dtype for a collective op (Spec 1 §4.G, Spec 4 §3).
+fn collective_dtype(op: OpId, op_static: &OpStatic) -> Result<r9v_ir::DType, KgenError> {
+    match op_static {
+        OpStatic::Collectives(c) => Ok(match c {
+            r9v_registry::CollectivesStatic::AllReduce(s) => s.dtype,
+            r9v_registry::CollectivesStatic::AllGather(s) => s.dtype,
+            r9v_registry::CollectivesStatic::ReduceScatter(s) => s.dtype,
+            r9v_registry::CollectivesStatic::AllToAll(s) => s.dtype,
+            r9v_registry::CollectivesStatic::Send(s) => s.dtype,
+            r9v_registry::CollectivesStatic::Recv(s) => s.dtype,
+            r9v_registry::CollectivesStatic::Barrier(_) => {
+                return Err(KgenError::NestedOpMismatch {
+                    op,
+                    static_op: OpId::Barrier,
+                });
+            }
+        }),
+        _ => Err(KgenError::MismatchedOpFamily {
+            op,
+            family: op_static_family(op_static),
+        }),
+    }
+}
+
 /// Derives the canonical ABI description from an [`OpStatic`] parameter descriptor (Spec 4 §4.1).
 ///
 /// Unique families dispatch directly; shared/ambiguous families fail closed with [`KgenError::AmbiguousOpFamily`].
@@ -156,8 +207,18 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
     let b = AbiStructBuilder::new(name, op);
 
     match op {
-        OpId::EmbedGather => b
-            .add_field(FieldSpec::new(
+        OpId::EmbedGather => {
+            let out_dtype = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::EmbedGather(p) => p.out_dtype,
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            let out_pointee = PointeeType::from_dtype(out_dtype);
+            b.add_field(FieldSpec::new(
                 "token_ids",
                 AbiType::const_ptr(PointeeType::U32),
                 FieldRole::InputTensor,
@@ -167,13 +228,13 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 "table",
                 AbiType::const_ptr(PointeeType::Void),
                 FieldRole::InputTensor,
-                "Embedding table [V, Dm] (Spec 1 §4.A)",
+                "Embedding table [V, Dm] in layout- and scheme-dependent storage (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "embed_override",
-                AbiType::nullable_const_ptr(PointeeType::Void),
+                AbiType::nullable_const_ptr(out_pointee),
                 FieldRole::InputTensor,
-                "Optional external embeddings [T, Dm]; null when unused (Spec 1 §3.2)",
+                "Optional external embeddings [T, Dm]; element type follows the static out dtype, null when unused (Spec 1 §3.2)",
             ))
             .add_field(FieldSpec::new(
                 "embed_mask",
@@ -183,9 +244,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "x",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Gathered activations [T, Dm] (Spec 1 §4.A)",
+                "Gathered activations [T, Dm]; element type follows the static out dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -193,14 +254,35 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
         // DECISION(A3.API): one ngram_gather struct carries both source signatures with the
         // inactive pair null (staging/row_scales live for Staged, token_ids/table for Device);
         // rejected two structs per source because the op key must stay one variant per static
         // descriptor. Spec 1 §4.A.
-        OpId::NgramGather => b
-            .add_field(FieldSpec::new(
+        OpId::NgramGather => {
+            // Row scales are f32 or f16 in Staged mode (Spec 1 §4.A); the
+            // pointer type follows the static scales dtype so f16 scales are
+            // never read through an f32-typed field. Device-table mode keeps
+            // the historical f32 pointer shape (always null). validate_op_family
+            // above already enforces exact NgramGather pairing; re-check here
+            // without panicking so input-dependent misuse stays a typed error.
+            let params = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::NgramGather(p) => p,
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            let scales_pointee = match params.scales_dtype {
+                Some(d) => PointeeType::from_dtype(d),
+                None => PointeeType::F32,
+            };
+            let out_pointee = PointeeType::from_dtype(params.out_dtype);
+            b.add_field(FieldSpec::new(
                 "staging",
                 AbiType::nullable_const_ptr(PointeeType::Void),
                 FieldRole::InputTensor,
@@ -208,9 +290,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "row_scales",
-                AbiType::nullable_const_ptr(PointeeType::F32),
+                AbiType::nullable_const_ptr(scales_pointee),
                 FieldRole::WeightScale,
-                "Row scales buffer; null in Device-table mode (Spec 1 §4.A)",
+                "Row scales buffer; element type follows the static scales dtype, null in Device-table mode (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "token_ids",
@@ -226,9 +308,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "x",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Gathered activations [T, Np*Dn] (Spec 1 §4.A)",
+                "Gathered activations [T, Np*Dn]; element type follows the static out dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -236,20 +318,33 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::QuantAct => b
-            .add_field(FieldSpec::new(
+        OpId::QuantAct => {
+            let (in_pointee, target_pointee) = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::QuantAct(p) => (
+                    PointeeType::from_dtype(p.in_dtype),
+                    PointeeType::from_dtype(p.target),
+                ),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Input activations [T, N] (Spec 1 §4.A)",
+                "Input activations [T, N]; element type follows the static in dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "xq",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(target_pointee),
                 FieldRole::OutputTensor,
-                "Quantized activations [T, N] (Spec 1 §4.A)",
+                "Quantized activations [T, N]; element type follows the static target dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "scale",
@@ -263,20 +358,33 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::Cast => b
-            .add_field(FieldSpec::new(
+        OpId::Cast => {
+            let (in_pointee, out_pointee) = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::Cast(p) => (
+                    PointeeType::from_dtype(p.in_dtype),
+                    PointeeType::from_dtype(p.out_dtype),
+                ),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Input tensor (Spec 1 §4.A)",
+                "Input tensor; element type follows the static in dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Output tensor (Spec 1 §4.A)",
+                "Output tensor; element type follows the static out dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -284,7 +392,8 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic element count (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
         OpId::Copy => b
             .add_field(FieldSpec::new(
@@ -307,24 +416,36 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .build(),
 
-        OpId::GatherRows => b
-            .add_field(FieldSpec::new(
+        OpId::GatherRows => {
+            let (elem_pointee, index_pointee) = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::GatherRows(p) => (
+                    PointeeType::from_dtype(p.dtype),
+                    PointeeType::from_dtype(p.index_dtype),
+                ),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Source rows [N, D] (Spec 1 §4.A)",
+                "Source rows [N, D]; element type follows the static dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "indices",
-                AbiType::const_ptr(PointeeType::U32),
+                AbiType::const_ptr(index_pointee),
                 FieldRole::InputTensor,
-                "Row indices [M] u32 (Spec 1 §4.A)",
+                "Row indices [M]; element type follows the static index dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Gathered rows [M, D] (Spec 1 §4.A)",
+                "Gathered rows [M, D]; element type follows the static dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "m",
@@ -332,26 +453,45 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic gathered row count M (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::ScatterAddRows => b
-            .add_field(FieldSpec::new(
+        OpId::ScatterAddRows => {
+            let (elem_pointee, index_pointee) = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::ScatterAddRows(p) => (
+                    PointeeType::from_dtype(p.dtype),
+                    PointeeType::from_dtype(p.index_dtype),
+                ),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Update rows [M, D] (Spec 1 §4.A)",
+                "Update rows [M, D]; element type follows the static dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "indices",
-                AbiType::const_ptr(PointeeType::U32),
+                AbiType::const_ptr(index_pointee),
                 FieldRole::InputTensor,
-                "Row indices [M] u32 (Spec 1 §4.A)",
+                "Row indices [M]; element type follows the static index dtype (Spec 1 §4.A)",
+            ))
+            .add_field(FieldSpec::new(
+                "dest",
+                AbiType::nullable_const_ptr(elem_pointee),
+                FieldRole::InputTensor,
+                "Distinct base tensor [N, D] for the out-of-place form; element type follows the static dtype, null exactly when the static has_dest is false (Spec 1 §4.A, SI-10). No host-side value packer exists in A3.1/A3.2: LaunchEntry carries opaque args_blob bytes with no per-op host validation, so nullable here is the only contract available; enforcement is the static has_dest flag plus the guarded HIP unpacker, not a launch-layer check.",
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Accumulation target rows [N, D] (Spec 1 §4.A)",
+                "Accumulation target rows [N, D]; element type follows the static dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "m",
@@ -359,26 +499,36 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic update row count M (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::Split => b
-            .add_field(FieldSpec::new(
+        OpId::Split => {
+            let elem_pointee = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::Split(p) => PointeeType::from_dtype(p.dtype),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Input tensor [T, C] (Spec 1 §4.A)",
+                "Input tensor [T, C]; element type follows the static dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "y0",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "First split output [T, C0] (Spec 1 §4.A)",
+                "First split output [T, C0]; element type follows the static dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "y1",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Second split output [T, C1] (Spec 1 §4.A)",
+                "Second split output [T, C1]; element type follows the static dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -386,26 +536,40 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::Concat => b
-            .add_field(FieldSpec::new(
+        OpId::Concat => {
+            let (a_pointee, b_pointee, out_pointee) = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::Concat(p) => (
+                    PointeeType::from_dtype(p.a_dtype),
+                    PointeeType::from_dtype(p.b_dtype),
+                    PointeeType::from_dtype(p.out_dtype),
+                ),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x0",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(a_pointee),
                 FieldRole::InputTensor,
-                "First input [T, C0] (Spec 1 §4.A)",
+                "First input [T, C0]; element type follows the static a dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "x1",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(b_pointee),
                 FieldRole::InputTensor,
-                "Second input [T, C1] (Spec 1 §4.A)",
+                "Second input [T, C1]; element type follows the static b dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Concatenated output [T, C] (Spec 1 §4.A)",
+                "Concatenated output [T, C]; element type follows the static out dtype (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -413,14 +577,27 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::Norm => b
-            .add_field(FieldSpec::new(
+        OpId::Norm => {
+            let (in_pointee, out_pointee) = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::Norm(p) => (
+                    PointeeType::from_dtype(p.in_dtype),
+                    PointeeType::from_dtype(p.out_dtype),
+                ),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Input activations [T, N] (Spec 1 §4.B)",
+                "Input activations [T, N]; element type follows the static in dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "weight",
@@ -436,9 +613,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Normalized output activations [T, N] (Spec 1 §4.B)",
+                "Normalized output activations [T, N]; element type follows the static out dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -446,26 +623,40 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::ResidualAdd => b
-            .add_field(FieldSpec::new(
+        OpId::ResidualAdd => {
+            let (a_pointee, b_pointee, out_pointee) = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::ResidualAdd(p) => (
+                    PointeeType::from_dtype(p.a_dtype),
+                    PointeeType::from_dtype(p.b_dtype),
+                    PointeeType::from_dtype(p.out_dtype),
+                ),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "a",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(a_pointee),
                 FieldRole::InputTensor,
-                "First addend tensor (Spec 1 §4.B)",
+                "First addend tensor; element type follows the static a dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "b",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(b_pointee),
                 FieldRole::Residual,
-                "Second addend (residual) tensor (Spec 1 §4.B)",
+                "Second addend (residual) tensor; element type follows the static b dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Sum output tensor (Spec 1 §4.B)",
+                "Sum output tensor; element type follows the static out dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -473,26 +664,36 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic element count (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::ActMul => b
-            .add_field(FieldSpec::new(
+        OpId::ActMul => {
+            let elem_pointee = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::ActMul(p) => PointeeType::from_dtype(p.dtype),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "gate",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Gate activations [T, Dff] (Spec 1 §4.B)",
+                "Gate activations [T, Dff]; element type follows the static dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "up",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Up activations [T, Dff] (Spec 1 §4.B)",
+                "Up activations [T, Dff]; element type follows the static dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Gated multiplied output [T, Dff] (Spec 1 §4.B)",
+                "Gated multiplied output [T, Dff]; element type follows the static dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -500,20 +701,30 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::Activation => b
-            .add_field(FieldSpec::new(
+        OpId::Activation => {
+            let elem_pointee = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::Activation(p) => PointeeType::from_dtype(p.dtype),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Input activations [T, Dff] (Spec 1 §4.B)",
+                "Input activations [T, Dff]; element type follows the static dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Activated output [T, Dff] (Spec 1 §4.B)",
+                "Activated output [T, Dff]; element type follows the static dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -521,7 +732,8 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
         OpId::LogitSoftcap => b
             .add_field(FieldSpec::new(
@@ -544,19 +756,31 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .build(),
 
-        OpId::Rope => b
-            .add_field(FieldSpec::new(
+        OpId::Rope => {
+            let (in_pointee, out_pointee) = match elementwise_params(op, op_static)? {
+                r9v_registry::ElementwiseParams::Rope(p) => (
+                    PointeeType::from_dtype(p.in_dtype),
+                    PointeeType::from_dtype(p.out_dtype),
+                ),
+                other => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Input activations [T, H, D] (Spec 1 §4.B)",
+                "Input activations [T, H, D]; element type follows the static in dtype (Spec 1 §4.B)",
             ))
             .add_batch_meta_field(BatchMetaField::Positions)
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Rotated output activations [T, H, D] (Spec 1 §4.B)",
+                "Rotated output activations [T, H, D]; element type follows the static out dtype (Spec 1 §4.B)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -564,7 +788,8 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
         OpId::Matmul => {
             // validate_op_family above enforces exact Matmul pairing; re-check here
@@ -616,9 +841,11 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "residual",
-                AbiType::nullable_const_ptr(PointeeType::from_dtype(s.out_dtype)),
+                AbiType::nullable_const_ptr(PointeeType::from_dtype(
+                    s.residual_dtype.unwrap_or(s.out_dtype),
+                )),
                 FieldRole::Residual,
-                "Optional fused epilogue residual tensor [M, N] (Spec 1 §4.C)",
+                "Optional fused epilogue residual tensor [M, N]; pointer type follows the residual input dtype, not out_dtype (Spec 1 §4.C)",
             ))
             .add_field(FieldSpec::new(
                 "y",
@@ -673,12 +900,26 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .build(),
 
-        OpId::MoeFfn => b
-            .add_field(FieldSpec::new(
+        OpId::MoeFfn => {
+            // validate_op_family above enforces exact MoeFfn pairing; re-check
+            // here without panicking so input-dependent misuse stays a typed error.
+            let (in_pointee, out_pointee) = match op_static {
+                OpStatic::MoeFfn(s) => (
+                    PointeeType::from_dtype(s.in_dtype),
+                    PointeeType::from_dtype(s.out_dtype),
+                ),
+                _ => {
+                    return Err(KgenError::MismatchedOpFamily {
+                        op,
+                        family: op_static_family(op_static),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Input activations [T, Dm] (Spec 1 §4.C)",
+                "Input activations [T, Dm]; element type follows the static in dtype (Spec 1 §4.C)",
             ))
             .add_field(FieldSpec::new(
                 "expert_ids",
@@ -718,9 +959,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Combined output activations [T, Dm] (Spec 1 §4.C)",
+                "Combined output activations [T, Dm]; element type follows the static out dtype (Spec 1 §4.C)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::MoeSortBuffers, 0))
             .add_field(FieldSpec::new(
@@ -729,7 +970,8 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T <= T_bucket (Spec 1 §3.5, Spec 4 §7)",
             ))
-            .build(),
+            .build()
+        }
 
         OpId::Attention => {
             // validate_op_family above enforces exact Attention pairing; re-check here
@@ -743,12 +985,14 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                     });
                 }
             };
+            let q_pointee = PointeeType::from_dtype(s.q_dtype);
+            let o_pointee = PointeeType::from_dtype(s.out_dtype);
             let mut builder = b
                 .add_field(FieldSpec::new(
                     "q",
-                    AbiType::const_ptr(PointeeType::Void),
+                    AbiType::const_ptr(q_pointee),
                     FieldRole::InputTensor,
-                    "Query activations [T, H, D] (Spec 1 §4.D)",
+                    "Query activations [T, H, D]; element type follows the static q dtype (Spec 1 §4.D)",
                 ))
                 .add_field(FieldSpec::new(
                     "k_cache",
@@ -764,9 +1008,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 ))
                 .add_field(FieldSpec::new(
                     "o",
-                    AbiType::mut_ptr(PointeeType::Void),
+                    AbiType::mut_ptr(o_pointee),
                     FieldRole::OutputTensor,
-                    "Attention output activations [T, H, D] (Spec 1 §4.D)",
+                    "Attention output activations [T, H, D]; element type follows the static out dtype (Spec 1 §4.D)",
                 ))
                 .add_batch_meta_field(BatchMetaField::BlockTable)
                 .add_batch_meta_field(BatchMetaField::CtxLen)
@@ -805,18 +1049,30 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 .build()
         }
 
-        OpId::StateWriteKv => b
-            .add_field(FieldSpec::new(
+        OpId::StateWriteKv => {
+            // validate_op_family above enforces exact StateWriteKv pairing;
+            // re-check here without panicking so input-dependent misuse stays
+            // a typed error.
+            let in_pointee = match op_static {
+                OpStatic::StateWriteKv(s) => PointeeType::from_dtype(s.in_dtype),
+                _ => {
+                    return Err(KgenError::MismatchedOpFamily {
+                        op,
+                        family: op_static_family(op_static),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "k",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Key projections [T, Hkv, D] (Spec 1 §4.D)",
+                "Key projections [T, Hkv, D]; element type follows the static in dtype (Spec 1 §4.D)",
             ))
             .add_field(FieldSpec::new(
                 "v",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Value projections [T, Hkv, Dv] (Spec 1 §4.D)",
+                "Value projections [T, Hkv, Dv]; element type follows the static in dtype (Spec 1 §4.D)",
             ))
             .add_batch_meta_field(BatchMetaField::SlotMap)
             .add_field(FieldSpec::new(
@@ -837,14 +1093,37 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::CausalConv1d => b
-            .add_field(FieldSpec::new(
+        OpId::CausalConv1d => {
+            // validate_op_family above enforces exact CausalConv1d pairing;
+            // re-check here without panicking so input-dependent misuse stays
+            // a typed error.
+            let s = match op_static {
+                OpStatic::CausalConv1d(s) => s,
+                _ => {
+                    return Err(KgenError::MismatchedOpFamily {
+                        op,
+                        family: op_static_family(op_static),
+                    });
+                }
+            };
+            // The bias dtype is independent of the input dtype (Spec 1 §4.E);
+            // the pointer type follows the static bias dtype so an f16/bf16
+            // bias is never read through an f32-typed field. Absent bias keeps
+            // the historical f32 pointer shape (always null).
+            let bias_pointee = match s.bias_dtype {
+                Some(d) => PointeeType::from_dtype(d),
+                None => PointeeType::F32,
+            };
+            let x_pointee = PointeeType::from_dtype(s.x_dtype);
+            let y_pointee = PointeeType::from_dtype(s.out_dtype);
+            b.add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(x_pointee),
                 FieldRole::InputTensor,
-                "Input sequence [T, C] (Spec 1 §4.E)",
+                "Input sequence [T, C]; element type follows the static x dtype (Spec 1 §4.E)",
             ))
             .add_field(FieldSpec::new(
                 "w",
@@ -854,9 +1133,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "bias",
-                AbiType::nullable_const_ptr(PointeeType::F32),
+                AbiType::nullable_const_ptr(bias_pointee),
                 FieldRole::Bias,
-                "Optional bias [C] f32 (Spec 1 §4.E)",
+                "Optional bias [C]; element type follows the static bias dtype (Spec 1 §4.E)",
             ))
             .add_field(FieldSpec::new(
                 "conv_state",
@@ -866,9 +1145,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "y",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(y_pointee),
                 FieldRole::OutputTensor,
-                "Convolved output sequence [T, C] (Spec 1 §4.E)",
+                "Convolved output sequence [T, C]; element type follows the static out dtype (Spec 1 §4.E)",
             ))
             .add_field(FieldSpec::new(
                 "t",
@@ -876,26 +1155,42 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::LinearAttnScan => b
-            .add_field(FieldSpec::new(
+        OpId::LinearAttnScan => {
+            // validate_op_family above enforces exact LinearAttnScan pairing;
+            // re-check here without panicking so input-dependent misuse stays
+            // a typed error.
+            let (in_pointee, out_pointee) = match op_static {
+                OpStatic::LinearAttnScan(s) => (
+                    PointeeType::from_dtype(s.in_dtype),
+                    PointeeType::from_dtype(s.out_dtype),
+                ),
+                _ => {
+                    return Err(KgenError::MismatchedOpFamily {
+                        op,
+                        family: op_static_family(op_static),
+                    });
+                }
+            };
+            b.add_field(FieldSpec::new(
                 "q",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Query activations [T, H, D] (Spec 1 §4.E)",
+                "Query activations [T, H, D]; element type follows the static in dtype (Spec 1 §4.E)",
             ))
             .add_field(FieldSpec::new(
                 "k",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Key activations [T, H, D] (Spec 1 §4.E)",
+                "Key activations [T, H, D]; element type follows the static in dtype (Spec 1 §4.E)",
             ))
             .add_field(FieldSpec::new(
                 "v",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(in_pointee),
                 FieldRole::InputTensor,
-                "Value activations [T, H, Dv] (Spec 1 §4.E)",
+                "Value activations [T, H, Dv]; element type follows the static in dtype (Spec 1 §4.E)",
             ))
             .add_field(FieldSpec::new(
                 "alpha",
@@ -917,9 +1212,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "o",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(out_pointee),
                 FieldRole::OutputTensor,
-                "Scan output activations [T, H, Dv] (Spec 1 §4.E)",
+                "Scan output activations [T, H, Dv]; element type follows the static out dtype (Spec 1 §4.E)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::ScanCarry, 0))
             .add_batch_meta_field(BatchMetaField::QueryLen)
@@ -929,7 +1224,8 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Dynamic token count T (Spec 1 §3.5)",
             ))
-            .build(),
+            .build()
+        }
 
         OpId::LogitsPostprocess => b
             .add_field(FieldSpec::new(
@@ -1089,18 +1385,19 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
         // count is the only dynamic collective scalar; rejected runtime rank/world/peer scalars
         // because a kernel launched with a different rank than its static descriptor is a wrong
         // launch, not a dynamic shape. Spec 1 §4.G, Spec 4 §3.
-        OpId::AllReduce => b
-            .add_field(FieldSpec::new(
+        OpId::AllReduce => {
+            let elem_pointee = PointeeType::from_dtype(collective_dtype(op, op_static)?);
+            b.add_field(FieldSpec::new(
                 "send_buf",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Send buffer (Spec 1 §4.G)",
+                "Send buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_field(FieldSpec::new(
                 "recv_buf",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Receive buffer (Spec 1 §4.G)",
+                "Receive buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::CollectiveStaging, 0))
             .add_field(FieldSpec::new(
@@ -1109,20 +1406,22 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Element count to reduce (Spec 1 §4.G)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::AllGather => b
-            .add_field(FieldSpec::new(
+        OpId::AllGather => {
+            let elem_pointee = PointeeType::from_dtype(collective_dtype(op, op_static)?);
+            b.add_field(FieldSpec::new(
                 "send_buf",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Send buffer (Spec 1 §4.G)",
+                "Send buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_field(FieldSpec::new(
                 "recv_buf",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Receive buffer (Spec 1 §4.G)",
+                "Receive buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::CollectiveStaging, 0))
             .add_field(FieldSpec::new(
@@ -1131,20 +1430,22 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Element count per rank (Spec 1 §4.G)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::ReduceScatter => b
-            .add_field(FieldSpec::new(
+        OpId::ReduceScatter => {
+            let elem_pointee = PointeeType::from_dtype(collective_dtype(op, op_static)?);
+            b.add_field(FieldSpec::new(
                 "send_buf",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Send buffer (Spec 1 §4.G)",
+                "Send buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_field(FieldSpec::new(
                 "recv_buf",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Receive buffer (Spec 1 §4.G)",
+                "Receive buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::CollectiveStaging, 0))
             .add_field(FieldSpec::new(
@@ -1153,20 +1454,22 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Element count per rank (Spec 1 §4.G)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::AllToAll => b
-            .add_field(FieldSpec::new(
+        OpId::AllToAll => {
+            let elem_pointee = PointeeType::from_dtype(collective_dtype(op, op_static)?);
+            b.add_field(FieldSpec::new(
                 "send_buf",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Send buffer (Spec 1 §4.G)",
+                "Send buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_field(FieldSpec::new(
                 "recv_buf",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Receive buffer (Spec 1 §4.G)",
+                "Receive buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_field(FieldSpec::new(
                 "counts",
@@ -1175,14 +1478,16 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 "Per-rank row counts [P] u32 (Spec 1 §4.G, SI-11)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::CollectiveStaging, 0))
-            .build(),
+            .build()
+        }
 
-        OpId::Send => b
-            .add_field(FieldSpec::new(
+        OpId::Send => {
+            let elem_pointee = PointeeType::from_dtype(collective_dtype(op, op_static)?);
+            b.add_field(FieldSpec::new(
                 "send_buf",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::const_ptr(elem_pointee),
                 FieldRole::InputTensor,
-                "Send buffer (Spec 1 §4.G)",
+                "Send buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::CollectiveStaging, 0))
             .add_field(FieldSpec::new(
@@ -1191,14 +1496,16 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Element count to transfer (Spec 1 §4.G)",
             ))
-            .build(),
+            .build()
+        }
 
-        OpId::Recv => b
-            .add_field(FieldSpec::new(
+        OpId::Recv => {
+            let elem_pointee = PointeeType::from_dtype(collective_dtype(op, op_static)?);
+            b.add_field(FieldSpec::new(
                 "recv_buf",
-                AbiType::mut_ptr(PointeeType::Void),
+                AbiType::mut_ptr(elem_pointee),
                 FieldRole::OutputTensor,
-                "Receive buffer (Spec 1 §4.G)",
+                "Receive buffer; element type follows the static dtype (Spec 1 §4.G)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::CollectiveStaging, 0))
             .add_field(FieldSpec::new(
@@ -1207,7 +1514,8 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Expected element count (Spec 1 §4.G)",
             ))
-            .build(),
+            .build()
+        }
 
         OpId::Barrier => b
             .add_field(FieldSpec::new(

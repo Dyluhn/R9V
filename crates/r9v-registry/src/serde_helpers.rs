@@ -149,46 +149,52 @@ pub mod serde_quant_scheme {
     }
 }
 
-pub mod serde_quant_scheme_vec {
+/// Canonical nullable dtype encoding for optional input dtypes (`None` for an
+/// absent optional input, the stable snake_case dtype name otherwise).
+/// Uses the same names as [`serde_dtype`] so `Some(d)` round-trips through it.
+pub mod serde_opt_dtype {
     use super::*;
 
-    pub fn serialize<S: Serializer>(vec: &[QuantScheme], s: S) -> Result<S::Ok, S::Error> {
-        let mut seq = s.serialize_seq(Some(vec.len()))?;
-        for item in vec {
-            match item {
-                QuantScheme::None => seq.serialize_element("none")?,
-                QuantScheme::PerRow => seq.serialize_element("per_row")?,
-                QuantScheme::Scheme(id) => {
-                    seq.serialize_element(&format!("scheme:{}", id.as_u64()))?
-                }
-                QuantScheme::PerToken => seq.serialize_element("per_token")?,
-                QuantScheme::PerBlock32 => seq.serialize_element("per_block32")?,
-            }
+    fn name(dtype: &DType) -> &'static str {
+        match dtype {
+            DType::F32 => "f32",
+            DType::F16 => "f16",
+            DType::Bf16 => "bf16",
+            DType::E4m3 => "e4m3",
+            DType::E5m2 => "e5m2",
+            DType::I8 => "i8",
+            DType::I4 => "i4",
+            DType::I32 => "i32",
+            DType::U32 => "u32",
+            DType::Bool => "bool",
         }
-        seq.end()
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<QuantScheme>, D::Error> {
-        let raw_list = Vec::<String>::deserialize(d)?;
-        let mut result = Vec::with_capacity(raw_list.len());
-        for s in raw_list {
-            let qs = if s.eq_ignore_ascii_case("none") {
-                QuantScheme::None
-            } else if s.eq_ignore_ascii_case("per_row") {
-                QuantScheme::PerRow
-            } else if s.eq_ignore_ascii_case("per_token") {
-                QuantScheme::PerToken
-            } else if s.eq_ignore_ascii_case("per_block32") {
-                QuantScheme::PerBlock32
-            } else if let Some(code_str) = s.strip_prefix("scheme:") {
-                let code = code_str.parse::<u64>().map_err(de::Error::custom)?;
-                QuantScheme::Scheme(SchemeId::new(code))
-            } else {
-                return Err(de::Error::custom(format!("unknown QuantScheme '{s}'")));
-            };
-            result.push(qs);
+    pub fn serialize<S: Serializer>(opt: &Option<DType>, s: S) -> Result<S::Ok, S::Error> {
+        match opt {
+            Some(dtype) => s.serialize_str(name(dtype)),
+            None => s.serialize_none(),
         }
-        Ok(result)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<DType>, D::Error> {
+        let opt = Option::<String>::deserialize(d)?;
+        match opt.as_deref() {
+            None => Ok(None),
+            Some(s) => match s.to_ascii_lowercase().as_str() {
+                "f32" => Ok(Some(DType::F32)),
+                "f16" => Ok(Some(DType::F16)),
+                "bf16" => Ok(Some(DType::Bf16)),
+                "e4m3" => Ok(Some(DType::E4m3)),
+                "e5m2" => Ok(Some(DType::E5m2)),
+                "i8" => Ok(Some(DType::I8)),
+                "i4" => Ok(Some(DType::I4)),
+                "i32" => Ok(Some(DType::I32)),
+                "u32" => Ok(Some(DType::U32)),
+                "bool" => Ok(Some(DType::Bool)),
+                other => Err(de::Error::custom(format!("unknown DType '{other}'"))),
+            },
+        }
     }
 }
 

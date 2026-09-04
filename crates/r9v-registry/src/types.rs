@@ -7,7 +7,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 
 use r9v_ir::{
-    ActivationKind, AttentionMask, CacheScaleGranularity, ConvActivation, CopyKind, DType,
+    ActivationKind, AttentionMask, CacheScaleGranularity, ConvActivation, CopyKind, DType, Dim,
     Epilogue, HashId, LayoutId, LinearAttnKind, MlaAttentionSpec, MlaLatent, MoeGroup, MoeScoring,
     NgramCombine, NgramSource, NormAxis, NormKind, P2pTransport, Placement, QuantScheme, ReduceOp,
     RngAlgorithm, RopeScaling, RopeStyle, Smoothing, VerifyMethod,
@@ -656,6 +656,13 @@ pub struct LogitsPostprocessStatic {
     pub v: u32,
     /// Query tokens bucket (Spec 1 §3.5, Spec 4 §3).
     pub q_bucket: u32,
+    /// Whether the optional `history_counts [S, V] u32` input is present:
+    /// repetition/presence/frequency penalties emit distinct code when live
+    /// (Spec 1 §4.F, Spec 4 §3).
+    pub has_history_counts: bool,
+    /// Whether the optional `grammar_mask [S, q, V] bool` input is present:
+    /// mask application emits distinct code when live (Spec 1 §4.F, Spec 4 §3).
+    pub has_grammar_mask: bool,
 }
 
 /// Static parameters for `sample` kernels (Spec 1 §4.F, Spec 4 §3).
@@ -683,6 +690,10 @@ pub struct VerifyStatic {
     pub method: VerifyMethodStatic,
     /// Whether tree-based speculative verification is enabled (adds TreeParents/TreeAncestors to Verify ABI, Spec 7 §4).
     pub tree: bool,
+    /// Whether the optional `draft_probs [S, k, V] f32` input is present:
+    /// the weighted acceptance path emits distinct code from the
+    /// deterministic one-hot path (Spec 1 §4.F, Spec 7 §4, Spec 4 §3).
+    pub has_draft_probs: bool,
 }
 
 impl VerifyStatic {
@@ -694,6 +705,7 @@ impl VerifyStatic {
         eps: f32,
         delta: f32,
         tree: bool,
+        has_draft_probs: bool,
     ) -> Self {
         Self {
             s_bucket,
@@ -701,6 +713,7 @@ impl VerifyStatic {
             q_bucket,
             method: VerifyMethodStatic::typical(eps, delta),
             tree,
+            has_draft_probs,
         }
     }
 }
@@ -739,6 +752,15 @@ pub struct MatmulStatic {
     /// Fused epilogue operation (Spec 1 §4.C, Spec 4 §3).
     #[serde(with = "crate::serde_helpers::serde_epilogue")]
     pub epilogue: Epilogue,
+    /// Residual epilogue input `[M, N]` element data type: `Some` with the
+    /// residual tensor dtype (f16/bf16/f32, independent of `out_dtype`,
+    /// selecting distinct residual loads) exactly when the epilogue is
+    /// `Residual`, `None` otherwise. Presence is already the epilogue, so a
+    /// bare presence flag would duplicate it; `validate` and `from_op` reject
+    /// a `Some` without a `Residual` epilogue and vice versa
+    /// (Spec 1 §4.C, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_opt_dtype")]
+    pub residual_dtype: Option<DType>,
     /// Whether weight matrix w is stored transposed [K, N] (Spec 1 §4.C, Spec 4 §3).
     pub transpose_w: bool,
     /// Interleaving mode enabled (Spec 4 §3).
@@ -782,6 +804,25 @@ impl MoeRouteStatic {
     }
 }
 
+/// Closed per-projection expert weight descriptor for `moe_ffn` (Spec 1 §4.C, Spec 4 §3).
+///
+/// Each projection carries its own element dtype, quantization scheme, and
+/// physical layout as one fixed struct: gate/up and down weights are
+/// independent tensors and independent kernel semantics. A variable-length
+/// list would admit lengths other than two and alias distinct variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MoeFfnProjStatic {
+    /// Expert weight element data type (Spec 1 §2.1, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_dtype")]
+    pub dtype: DType,
+    /// Expert weight quantization scheme (Spec 2 §3, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_quant_scheme")]
+    pub scheme: QuantScheme,
+    /// Expert weight tensor layout (Spec 2 §2, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_layout_id")]
+    pub layout: LayoutId,
+}
+
 /// Static parameters for Mixture of Experts feed-forward variants (Spec 4 §3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MoeFfnStatic {
@@ -795,12 +836,10 @@ pub struct MoeFfnStatic {
     pub dm: u32,
     /// Intermediate projection dimension Dff (exact, Spec 4 §3).
     pub dff: u32,
-    /// Quantization schemes per projection `[gate_up, down]` in that order (Spec 4 §3).
-    #[serde(with = "crate::serde_helpers::serde_quant_scheme_vec")]
-    pub schemes: Vec<QuantScheme>,
-    /// Expert weight element data type (Spec 1 §2.1, Spec 4 §3).
-    #[serde(with = "crate::serde_helpers::serde_dtype")]
-    pub w_dtype: DType,
+    /// Gate/up projection `[E, 2·Dff, Dm]` weight descriptor (Spec 1 §4.C, Spec 4 §3).
+    pub gate_up: MoeFfnProjStatic,
+    /// Down projection `[E, Dm, Dff]` weight descriptor (Spec 1 §4.C, Spec 4 §3).
+    pub down: MoeFfnProjStatic,
     /// Input activation element data type (Spec 1 §2.1, Spec 4 §3).
     #[serde(with = "crate::serde_helpers::serde_dtype")]
     pub in_dtype: DType,
@@ -898,6 +937,10 @@ pub struct AttentionStatic {
     pub d: u32,
     /// Value head dimension (exact, Spec 4 §3).
     pub dv: u32,
+    /// Query input element data type: f16/bf16/f32 select distinct Q fragment
+    /// loads in decode and prefill kernels (Spec 1 §4.D, Spec 4 §3, §5.3).
+    #[serde(with = "crate::serde_helpers::serde_dtype")]
+    pub q_dtype: DType,
     /// KV cache data type (Spec 3 §2, Spec 4 §3).
     #[serde(with = "crate::serde_helpers::serde_dtype")]
     pub cache_dtype: DType,
@@ -985,11 +1028,24 @@ pub struct CausalConv1dStatic {
     /// Convolution weight element data type (Spec 1 §4.E, Spec 4 §3).
     #[serde(with = "crate::serde_helpers::serde_dtype")]
     pub w_dtype: DType,
+    /// Convolution weight quantization scheme: distinct schemes select
+    /// distinct dequantization in the kernel (Spec 1 §4.E, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_quant_scheme")]
+    pub w_scheme: QuantScheme,
+    /// Convolution weight physical layout: distinct layouts select distinct
+    /// fragment loads in the kernel (Spec 2 §2, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_layout_id")]
+    pub w_layout: LayoutId,
     /// Output sequence element data type (Spec 1 §4.E, Spec 4 §3).
     #[serde(with = "crate::serde_helpers::serde_dtype")]
     pub out_dtype: DType,
-    /// Whether optional bias tensor is present (Spec 1 §4.E).
-    pub has_bias: bool,
+    /// Optional bias `[C]` element data type: `None` when the bias input is
+    /// absent, `Some` with the bias tensor dtype otherwise. The bias dtype is
+    /// independent of the input dtype (Spec 1 §4.E) and selects distinct bias
+    /// loads, so presence and dtype are one closed field, never a bare flag
+    /// plus an unconstrained dtype.
+    #[serde(with = "crate::serde_helpers::serde_opt_dtype")]
+    pub bias_dtype: Option<DType>,
 }
 
 /// Static parameters for linear attention scan variants (Spec 4 §3).
@@ -1174,6 +1230,21 @@ pub struct NgramGatherStatic {
     /// Staging buffer element data type, used in Staged mode (Spec 1 §2.1, Spec 4 §3).
     #[serde(with = "crate::serde_helpers::serde_dtype")]
     pub staging_dtype: DType,
+    /// Staging buffer quantization scheme, used in Staged mode: the IR admits
+    /// any spec 2 §3 scheme, and distinct schemes select distinct dequantization
+    /// (Spec 1 §4.A, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_quant_scheme")]
+    pub staging_scheme: QuantScheme,
+    /// Staging buffer physical layout, used in Staged mode: distinct layouts
+    /// select distinct fragment loads (Spec 2 §2, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_layout_id")]
+    pub staging_layout: LayoutId,
+    /// Row-scales element data type, used in Staged mode only: `Some` with the
+    /// `row_scales` tensor dtype (f32 or f16, selecting distinct scale loads)
+    /// in Staged mode, `None` in Device-table mode where no scales tensor
+    /// exists (Spec 1 §4.A, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_opt_dtype")]
+    pub scales_dtype: Option<DType>,
     /// How gathered head embeddings are combined.
     #[serde(with = "crate::serde_helpers::serde_ngram_combine")]
     pub combine: NgramCombine,
@@ -1251,6 +1322,11 @@ pub struct ScatterAddRowsStatic {
     pub index_dtype: DType,
     /// Row width D (exact, Spec 4 §3).
     pub width: u32,
+    /// Whether the optional `dest [N, D]` base tensor input is present: the
+    /// out-of-place form reads a distinct base tensor while the two-input form
+    /// accumulates into the output, so presence selects distinct pointer
+    /// interpretation (Spec 1 §4.A, SI-10, Spec 4 §3).
+    pub has_dest: bool,
 }
 
 /// Static parameters for channel split (Spec 1 §4.A, card A1.14, SI-29).
@@ -1304,6 +1380,10 @@ pub struct NormStatic {
     pub out_dtype: DType,
     /// Feature width N (exact, Spec 4 §3).
     pub n: u32,
+    /// Whether the optional bias `[N] f32` input is present: a biased norm
+    /// kernel emits a distinct add, so presence is a variant semantic
+    /// (Spec 1 §4.B, Spec 4 §3).
+    pub has_bias: bool,
 }
 
 impl NormStatic {
@@ -1331,6 +1411,14 @@ impl NormStatic {
 /// Static parameters for residual addition (Spec 1 §4.B, Spec 4 §3).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ResidualAddStatic {
+    /// First addend element data type: the IR admits f16/bf16/f32 per input
+    /// independently, and distinct input dtypes select distinct loads
+    /// (Spec 1 §4.B, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_dtype")]
+    pub a_dtype: DType,
+    /// Second addend element data type, independent of `a_dtype` (Spec 1 §4.B, Spec 4 §3).
+    #[serde(with = "crate::serde_helpers::serde_dtype")]
+    pub b_dtype: DType,
     /// Output activation data type (Spec 1 §4.B, Spec 4 §3).
     #[serde(with = "crate::serde_helpers::serde_dtype")]
     pub out_dtype: DType,
@@ -1855,6 +1943,20 @@ impl OpStatic {
                 if s.k == 0 {
                     problems.push("matmul.k must be > 0".to_owned());
                 }
+                let wants_residual = matches!(s.epilogue, Epilogue::Residual);
+                if s.residual_dtype.is_some() != wants_residual {
+                    problems.push(
+                        "matmul.residual_dtype must be Some exactly when the epilogue is Residual"
+                            .to_owned(),
+                    );
+                }
+                if let Some(d) = s.residual_dtype {
+                    if !matches!(d, DType::F16 | DType::Bf16 | DType::F32) {
+                        problems.push(format!(
+                            "matmul.residual_dtype must be f16, bf16, or f32, got {d:?}"
+                        ));
+                    }
+                }
             }
             Self::MoeRoute(s) => {
                 if s.t_bucket == 0 {
@@ -1903,16 +2005,18 @@ impl OpStatic {
                 if s.dff == 0 {
                     problems.push("moe_ffn.dff must be > 0".to_owned());
                 }
-                if s.schemes.len() != 2 {
-                    problems.push(format!(
-                        "moe_ffn.schemes must hold exactly [gate_up, down], got len {}",
-                        s.schemes.len()
-                    ));
-                }
+                check_moe_proj_problems("gate_up", &s.gate_up, &mut problems);
+                check_moe_proj_problems("down", &s.down, &mut problems);
             }
             Self::Attention(s) => {
                 if s.q_bucket == 0 {
                     problems.push("attention.q_bucket must be > 0".to_owned());
+                }
+                if !matches!(s.q_dtype, DType::F16 | DType::Bf16 | DType::F32) {
+                    problems.push(format!(
+                        "attention.q_dtype must be f16, bf16, or f32, got {:?}",
+                        s.q_dtype
+                    ));
                 }
                 if s.h_local == 0 {
                     problems.push("attention.h_local must be > 0".to_owned());
@@ -1977,6 +2081,43 @@ impl OpStatic {
                 if s.kernel == 0 {
                     problems.push("causal_conv1d.kernel must be > 0".to_owned());
                 }
+                // DECISION(A3.API): Spec 1 §4.E is silent on conv weight
+                // quantization, so the rule mirrors the IR (see SI-55 for the
+                // sanctioned T0 weight-scale/state rule): float weights are
+                // unquantized, i8/i4 weights require PerRow or spec 2 block
+                // scales (the GEMM weight rule extended to the IR-legal
+                // bf16/f32 conv set). Rejected leaving w_scheme unconstrained
+                // because distinct schemes select distinct dequantization.
+                match s.w_dtype {
+                    DType::F16 | DType::Bf16 | DType::F32 => {
+                        if s.w_scheme != QuantScheme::None {
+                            problems.push(format!(
+                                "causal_conv1d.w_scheme must be None for {:?} weights, got {:?}",
+                                s.w_dtype, s.w_scheme
+                            ));
+                        }
+                    }
+                    DType::I8 | DType::I4 => {
+                        if !matches!(s.w_scheme, QuantScheme::PerRow | QuantScheme::Scheme(_)) {
+                            problems.push(format!(
+                                "causal_conv1d.w_scheme must be PerRow or a spec 2 block scheme for {:?} weights, got {:?}",
+                                s.w_dtype, s.w_scheme
+                            ));
+                        }
+                    }
+                    other => {
+                        problems.push(format!(
+                            "causal_conv1d.w_dtype must be f16, bf16, f32, i8, or i4, got {other:?}"
+                        ));
+                    }
+                }
+                if let Some(d) = s.bias_dtype {
+                    if !matches!(d, DType::F16 | DType::Bf16 | DType::F32) {
+                        problems.push(format!(
+                            "causal_conv1d.bias_dtype must be f16, bf16, or f32, got {d:?}"
+                        ));
+                    }
+                }
             }
             Self::LinearAttnScan(s) => {
                 if s.h_local == 0 {
@@ -1998,6 +2139,36 @@ impl OpStatic {
                 }
                 match &s.op_params {
                     ElementwiseParams::NgramGather(p) => {
+                        // DECISION(A3.API): Spec 1 §4.A names the staging
+                        // quant only as "Block" and is silent on its physical
+                        // layout, so the rule mirrors the IR (see SI-8 for the
+                        // Staged/Device signatures and SI-53 for the sanctioned
+                        // carrier/hash rules): Staged mode requires a spec 2
+                        // block scheme and f32/f16 scales, Device mode carries
+                        // no scales. Rejected leaving the Staged dequant inputs
+                        // unconstrained because distinct schemes select distinct
+                        // dequantization.
+                        if p.source == NgramSource::Staged {
+                            if !matches!(p.staging_scheme, QuantScheme::Scheme(_)) {
+                                problems.push(format!(
+                                    "ngram_gather.staging_scheme must be a spec 2 block scheme in Staged mode, got {:?}",
+                                    p.staging_scheme
+                                ));
+                            }
+                            match p.scales_dtype {
+                                Some(DType::F32 | DType::F16) => {}
+                                other => {
+                                    problems.push(format!(
+                                        "ngram_gather.scales_dtype must be Some(f32|f16) in Staged mode, got {other:?}"
+                                    ));
+                                }
+                            }
+                        } else if p.scales_dtype.is_some() {
+                            problems.push(
+                                "ngram_gather.scales_dtype must be None in Device-table mode"
+                                    .to_owned(),
+                            );
+                        }
                         if p.heads == 0 {
                             problems.push("ngram_gather.heads must be > 0".to_owned());
                         }
@@ -2074,6 +2245,13 @@ impl OpStatic {
                     ElementwiseParams::ResidualAdd(p) => {
                         if p.n == 0 {
                             problems.push("residual_add.n must be > 0".to_owned());
+                        }
+                        for (name, d) in [("a_dtype", p.a_dtype), ("b_dtype", p.b_dtype)] {
+                            if !matches!(d, DType::F16 | DType::Bf16 | DType::F32) {
+                                problems.push(format!(
+                                    "residual_add.{name} must be f16, bf16, or f32, got {d:?}"
+                                ));
+                            }
                         }
                     }
                     ElementwiseParams::ActMul(p) => {
@@ -2299,6 +2477,9 @@ pub struct MatmulFacts {
     pub in_dtype: DType,
     /// Activation quantization scheme from the activation tensor.
     pub act_scheme: QuantScheme,
+    /// Residual epilogue input dtype from the residual tensor, `Some` exactly
+    /// when the IR epilogue is `Residual` (Spec 1 §4.C).
+    pub residual_dtype: Option<DType>,
     /// Interleaved weight layout mode (resolved kernel fact).
     pub interleave: bool,
     /// SWMMAC 2:4 structured sparsity mode (resolved kernel fact).
@@ -2329,10 +2510,10 @@ pub struct MoeFfnFacts {
     pub dm: u32,
     /// Intermediate projection dimension Dff (exact).
     pub dff: u32,
-    /// Quantization schemes per projection `[gate_up, down]` in that order.
-    pub schemes: Vec<QuantScheme>,
-    /// Expert weight element data type.
-    pub w_dtype: DType,
+    /// Gate/up projection weight descriptor from the `w_gate_up` tensor.
+    pub gate_up: MoeFfnProjStatic,
+    /// Down projection weight descriptor from the `w_down` tensor.
+    pub down: MoeFfnProjStatic,
     /// Input activation element data type.
     pub in_dtype: DType,
     /// Activation quantization scheme.
@@ -2354,6 +2535,8 @@ pub struct AttentionFacts {
     pub d: u32,
     /// Value head dimension (exact).
     pub dv: u32,
+    /// Query input element data type from the `q` tensor.
+    pub q_dtype: DType,
     /// KV cache data type.
     pub cache_dtype: DType,
     /// Memory layout of the KV cache.
@@ -2371,8 +2554,6 @@ pub struct StateWriteKvFacts {
     pub dv: u32,
     /// Input key/value projection element data type.
     pub in_dtype: DType,
-    /// Cache storage data type.
-    pub cache_dtype: DType,
     /// Target attention cache layout.
     pub attention_layout: LayoutId,
 }
@@ -2388,10 +2569,15 @@ pub struct CausalConv1dFacts {
     pub x_dtype: DType,
     /// Convolution weight element data type.
     pub w_dtype: DType,
+    /// Convolution weight quantization scheme from the weight tensor.
+    pub w_scheme: QuantScheme,
+    /// Convolution weight physical layout from the weight tensor.
+    pub w_layout: LayoutId,
     /// Output sequence element data type.
     pub out_dtype: DType,
-    /// Whether the optional bias tensor `[C]` is present.
-    pub has_bias: bool,
+    /// Optional bias `[C]` element data type from the bias tensor, `None`
+    /// when the bias input is absent.
+    pub bias_dtype: Option<DType>,
 }
 
 /// Closed resolved kernel facts for `linear_attn_scan` lowering (Spec 4 §3).
@@ -2439,6 +2625,13 @@ pub enum ElementwiseFacts {
         table_layout: LayoutId,
         /// Staging buffer element data type.
         staging_dtype: DType,
+        /// Staging buffer quantization scheme.
+        staging_scheme: QuantScheme,
+        /// Staging buffer physical layout.
+        staging_layout: LayoutId,
+        /// Row-scales element data type (`Some` in Staged mode, `None` in
+        /// Device-table mode).
+        scales_dtype: Option<DType>,
     },
     /// `quant_act` facts; scheme/target/smoothing come from IR.
     QuantAct {
@@ -2478,6 +2671,8 @@ pub enum ElementwiseFacts {
         index_dtype: DType,
         /// Row width D (exact).
         width: u32,
+        /// Whether the optional `dest` base tensor input is present.
+        has_dest: bool,
     },
     /// `split` facts; `first` comes from IR.
     Split {
@@ -2505,9 +2700,15 @@ pub enum ElementwiseFacts {
         in_dtype: DType,
         /// Feature width N (exact).
         n: u32,
+        /// Whether the optional bias `[N]` input is present.
+        has_bias: bool,
     },
     /// `residual_add` facts; out_dtype/scale come from IR.
     ResidualAdd {
+        /// First addend element data type from the `a` tensor.
+        a_dtype: DType,
+        /// Second addend element data type from the `b` tensor.
+        b_dtype: DType,
         /// Feature width N (exact).
         n: u32,
     },
@@ -2575,6 +2776,10 @@ pub enum SamplingFacts {
         v: u32,
         /// Query tokens bucket.
         q_bucket: u32,
+        /// Whether the optional `history_counts` input is present.
+        has_history_counts: bool,
+        /// Whether the optional `grammar_mask` input is present.
+        has_grammar_mask: bool,
     },
     /// `sample` facts; rng comes from IR.
     Sample {
@@ -2593,6 +2798,8 @@ pub enum SamplingFacts {
         q_bucket: u32,
         /// Whether tree-based speculative verification applies.
         tree: bool,
+        /// Whether the optional `draft_probs` input is present.
+        has_draft_probs: bool,
     },
 }
 
@@ -2739,6 +2946,36 @@ pub enum StaticFacts {
     Collectives(CollectiveFacts),
 }
 
+/// Collects `moe_ffn` per-projection (dtype, scheme) legality problems for one
+/// named projection, mirroring the IR GEMM weight rule (`check_gemm_weight_operand`):
+/// i4/i8/e4m3 weights require `PerRow` or spec 2 block scales, f16 weights are
+/// unquantized, and every other dtype is illegal here (Spec 1 §4.C, Spec 4 §3).
+fn check_moe_proj_problems(name: &str, proj: &MoeFfnProjStatic, problems: &mut Vec<String>) {
+    match proj.dtype {
+        DType::I4 | DType::I8 | DType::E4m3 => {
+            if !matches!(proj.scheme, QuantScheme::PerRow | QuantScheme::Scheme(_)) {
+                problems.push(format!(
+                    "moe_ffn.{name}.scheme must be PerRow or a spec 2 block scheme for {:?} weights, got {:?}",
+                    proj.dtype, proj.scheme
+                ));
+            }
+        }
+        DType::F16 => {
+            if proj.scheme != QuantScheme::None {
+                problems.push(format!(
+                    "moe_ffn.{name}.scheme must be None for f16 weights, got {:?}",
+                    proj.scheme
+                ));
+            }
+        }
+        other => {
+            problems.push(format!(
+                "moe_ffn.{name}.dtype must be i4, i8, e4m3, or f16, got {other:?}"
+            ));
+        }
+    }
+}
+
 fn facts_mismatch(op: OpId, what: &str) -> crate::error::RegistryError {
     crate::error::RegistryError::FactsOpMismatch {
         op,
@@ -2757,21 +2994,31 @@ impl OpStatic {
         facts: &StaticFacts,
     ) -> Result<Self, crate::error::RegistryError> {
         match (op, facts) {
-            (r9v_ir::Op::Matmul(o), StaticFacts::Matmul(f)) => Ok(Self::Matmul(MatmulStatic {
-                m_bucket: f.m_bucket,
-                n: f.n,
-                k: f.k,
-                w_dtype: f.w_dtype,
-                w_scheme: f.w_scheme,
-                w_layout: f.w_layout,
-                in_dtype: f.in_dtype,
-                act_scheme: f.act_scheme,
-                out_dtype: o.out_dtype,
-                epilogue: o.epilogue,
-                transpose_w: o.transpose_w,
-                interleave: f.interleave,
-                sparse: f.sparse,
-            })),
+            (r9v_ir::Op::Matmul(o), StaticFacts::Matmul(f)) => {
+                let wants_residual = matches!(o.epilogue, Epilogue::Residual);
+                if f.residual_dtype.is_some() != wants_residual {
+                    return Err(facts_mismatch(
+                        OpId::Matmul,
+                        "matmul facts residual_dtype presence must match a Residual epilogue",
+                    ));
+                }
+                Ok(Self::Matmul(MatmulStatic {
+                    m_bucket: f.m_bucket,
+                    n: f.n,
+                    k: f.k,
+                    w_dtype: f.w_dtype,
+                    w_scheme: f.w_scheme,
+                    w_layout: f.w_layout,
+                    in_dtype: f.in_dtype,
+                    act_scheme: f.act_scheme,
+                    out_dtype: o.out_dtype,
+                    epilogue: o.epilogue,
+                    residual_dtype: f.residual_dtype,
+                    transpose_w: o.transpose_w,
+                    interleave: f.interleave,
+                    sparse: f.sparse,
+                }))
+            }
             (r9v_ir::Op::MoeRoute(o), StaticFacts::MoeRoute(f)) => {
                 Ok(Self::MoeRoute(MoeRouteStatic {
                     t_bucket: f.t_bucket,
@@ -2790,8 +3037,8 @@ impl OpStatic {
                 k_topk: f.k_topk,
                 dm: f.dm,
                 dff: f.dff,
-                schemes: f.schemes.clone(),
-                w_dtype: f.w_dtype,
+                gate_up: f.gate_up,
+                down: f.down,
                 in_dtype: f.in_dtype,
                 act_scheme: f.act_scheme,
                 act: o.act,
@@ -2806,6 +3053,7 @@ impl OpStatic {
                     hkv_local: f.hkv_local,
                     d: f.d,
                     dv: f.dv,
+                    q_dtype: f.q_dtype,
                     cache_dtype: f.cache_dtype,
                     attention_layout: f.attention_layout,
                     mask_kind: o.mask,
@@ -2836,8 +3084,10 @@ impl OpStatic {
                     act: o.act,
                     x_dtype: f.x_dtype,
                     w_dtype: f.w_dtype,
+                    w_scheme: f.w_scheme,
+                    w_layout: f.w_layout,
                     out_dtype: f.out_dtype,
-                    has_bias: f.has_bias,
+                    bias_dtype: f.bias_dtype,
                 }))
             }
             (r9v_ir::Op::LinearAttnScan(o), StaticFacts::LinearAttnScan(f)) => {
@@ -2893,26 +3143,41 @@ impl OpStatic {
                             table_scheme,
                             table_layout,
                             staging_dtype,
+                            staging_scheme,
+                            staging_layout,
+                            scales_dtype,
                         },
                 },
-            ) => Ok(Self::Elementwise(ElementwiseStatic {
-                t_bucket: *t_bucket,
-                fused_with: *fused_with,
-                op_params: ElementwiseParams::NgramGather(NgramGatherStatic {
-                    source: o.source,
-                    hash: o.hash,
-                    orders: o.orders.to_vec(),
-                    heads: o.heads,
-                    table_sizes: o.table_sizes.to_vec(),
-                    dn: *dn,
-                    table_dtype: *table_dtype,
-                    table_scheme: *table_scheme,
-                    table_layout: *table_layout,
-                    staging_dtype: *staging_dtype,
-                    combine: o.combine,
-                    out_dtype: o.out_dtype,
-                }),
-            })),
+            ) => {
+                let staged = o.source == NgramSource::Staged;
+                if scales_dtype.is_some() != staged {
+                    return Err(facts_mismatch(
+                        OpId::NgramGather,
+                        "ngram_gather facts scales_dtype presence must match Staged source",
+                    ));
+                }
+                Ok(Self::Elementwise(ElementwiseStatic {
+                    t_bucket: *t_bucket,
+                    fused_with: *fused_with,
+                    op_params: ElementwiseParams::NgramGather(NgramGatherStatic {
+                        source: o.source,
+                        hash: o.hash,
+                        orders: o.orders.to_vec(),
+                        heads: o.heads,
+                        table_sizes: o.table_sizes.to_vec(),
+                        dn: *dn,
+                        table_dtype: *table_dtype,
+                        table_scheme: *table_scheme,
+                        table_layout: *table_layout,
+                        staging_dtype: *staging_dtype,
+                        staging_scheme: *staging_scheme,
+                        staging_layout: *staging_layout,
+                        scales_dtype: *scales_dtype,
+                        combine: o.combine,
+                        out_dtype: o.out_dtype,
+                    }),
+                }))
+            }
             (
                 r9v_ir::Op::QuantAct(o),
                 StaticFacts::Elementwise {
@@ -2994,6 +3259,7 @@ impl OpStatic {
                             dtype,
                             index_dtype,
                             width,
+                            has_dest,
                         },
                 },
             ) => Ok(Self::Elementwise(ElementwiseStatic {
@@ -3003,6 +3269,7 @@ impl OpStatic {
                     dtype: *dtype,
                     index_dtype: *index_dtype,
                     width: *width,
+                    has_dest: *has_dest,
                 }),
             })),
             (
@@ -3051,7 +3318,12 @@ impl OpStatic {
                 StaticFacts::Elementwise {
                     t_bucket,
                     fused_with,
-                    params: ElementwiseFacts::Norm { in_dtype, n },
+                    params:
+                        ElementwiseFacts::Norm {
+                            in_dtype,
+                            n,
+                            has_bias,
+                        },
                 },
             ) => Ok(Self::Elementwise(ElementwiseStatic {
                 t_bucket: *t_bucket,
@@ -3064,6 +3336,7 @@ impl OpStatic {
                     in_dtype: *in_dtype,
                     out_dtype: o.out_dtype,
                     n: *n,
+                    has_bias: *has_bias,
                 }),
             })),
             (
@@ -3071,12 +3344,19 @@ impl OpStatic {
                 StaticFacts::Elementwise {
                     t_bucket,
                     fused_with,
-                    params: ElementwiseFacts::ResidualAdd { n },
+                    params:
+                        ElementwiseFacts::ResidualAdd {
+                            a_dtype,
+                            b_dtype,
+                            n,
+                        },
                 },
             ) => Ok(Self::Elementwise(ElementwiseStatic {
                 t_bucket: *t_bucket,
                 fused_with: *fused_with,
                 op_params: ElementwiseParams::ResidualAdd(ResidualAddStatic {
+                    a_dtype: *a_dtype,
+                    b_dtype: *b_dtype,
                     out_dtype: o.out_dtype,
                     scale_bits: o.scale.to_bits(),
                     n: *n,
@@ -3159,12 +3439,16 @@ impl OpStatic {
                     s_bucket,
                     v,
                     q_bucket,
+                    has_history_counts,
+                    has_grammar_mask,
                 }),
             ) => Ok(Self::Sampling(SamplingStatic::LogitsPostprocess(
                 LogitsPostprocessStatic {
                     s_bucket: *s_bucket,
                     v: *v,
                     q_bucket: *q_bucket,
+                    has_history_counts: *has_history_counts,
+                    has_grammar_mask: *has_grammar_mask,
                 },
             ))),
             (
@@ -3182,6 +3466,7 @@ impl OpStatic {
                     v,
                     q_bucket,
                     tree,
+                    has_draft_probs,
                 }),
             ) => Ok(Self::Sampling(SamplingStatic::Verify(VerifyStatic {
                 s_bucket: *s_bucket,
@@ -3189,6 +3474,7 @@ impl OpStatic {
                 q_bucket: *q_bucket,
                 method: VerifyMethodStatic::from_ir(&o.method),
                 tree: *tree,
+                has_draft_probs: *has_draft_probs,
             }))),
             (
                 r9v_ir::Op::AllReduce(o),
@@ -3300,6 +3586,30 @@ impl OpStatic {
                         OpId::Recv,
                         "recv facts shape rank must match IR recv shape rank",
                     ));
+                }
+                // Exact per-extent agreement: a concrete IR extent must equal
+                // the resolved facts extent bit-for-bit; a symbolic extent
+                // resolves to whatever the facts carry. Zero extents and an
+                // overflowing element count fail typed here, not downstream.
+                let mut elements: u64 = 1;
+                for (axis, extent) in shape.iter().enumerate() {
+                    if *extent == 0 {
+                        return Err(facts_mismatch(
+                            OpId::Recv,
+                            "recv facts shape extents must all be > 0",
+                        ));
+                    }
+                    if let Dim::Concrete(concrete) = o.shape[axis] {
+                        if *extent != concrete {
+                            return Err(facts_mismatch(
+                                OpId::Recv,
+                                "recv facts shape extent must equal the concrete IR extent",
+                            ));
+                        }
+                    }
+                    elements = elements.checked_mul(u64::from(*extent)).ok_or_else(|| {
+                        facts_mismatch(OpId::Recv, "recv facts shape product overflows u64")
+                    })?;
                 }
                 Ok(Self::Collectives(CollectivesStatic::Recv(RecvStatic {
                     group: o.group.as_u64(),

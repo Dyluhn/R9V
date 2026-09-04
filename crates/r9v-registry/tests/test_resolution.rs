@@ -24,6 +24,7 @@ fn make_sample_matmul_static() -> OpStatic {
         act_scheme: QuantScheme::None,
         out_dtype: DType::F16,
         epilogue: Epilogue::None,
+        residual_dtype: None,
         transpose_w: false,
         interleave: false,
         sparse: false,
