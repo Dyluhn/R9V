@@ -19,6 +19,7 @@ pub mod graph;
 pub mod layout;
 pub mod numerics;
 pub mod op;
+pub mod plan;
 pub mod quant;
 pub mod sharding;
 pub mod state;
@@ -59,6 +60,10 @@ pub use op::{
     ReduceScatterOp, ResidualAddOp, RngAlgorithm, RopeOp, RopeScaling, RopeStyle, SampleOp,
     SamplingParams, ScatterAddRowsOp, SendOp, Smoothing, SplitOp, StateWriteKvOp, VerifyMethod,
     VerifyOp,
+};
+pub use plan::{
+    BucketCost, ExpertAssign, ExpertPlacement, LinkTransport, Plan, PlanExpected, PlanStage,
+    PlanStrategy, Transport,
 };
 pub use quant::{QuantScheme, SchemeId};
 pub use sharding::{

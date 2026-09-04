@@ -358,3 +358,21 @@ What: The metadata table shows `r9v.layout_id str = "L1"` (uppercase), while the
 Why it blocks or misleads: A reader implementing either spelling literally rejects files written per the other; the §6 example and the closed-set serialization rule disagree with no stated precedence.
 Option taken: Accept both spellings on read (`L1`/`l1`, `L0`/`l0`, `L1S`/`l1s`), always write lowercase; see the SI-74 comment in `crates/r9v-format/src/meta.rs`.
 Proposed resolution: Fix the §6 example to `"l1"`, or state that layout ids are case-insensitive on read.
+
+## SI-75 — A2.6 — spec 9 §3
+What: Spec 9 §3 defines `file_fp` per file (`xxh3(header ‖ tensor-info ‖ metadata KV ‖ file size ‖ shard count)`) but states no merge rule for a split shard set, even though step 1 supports splits and `file_fp` keys the repack cache lookup.
+Why it blocks or misleads: Each shard's own `file_fp` binds only its tables; hashing shard 0 alone would key the cache on a fraction of the model, while re-hashing raw bytes would duplicate the card A2.5 rule and admit order ambiguity.
+Option taken: Single shard reports its own `file_fp` unchanged; a split set reports `xxh3_128` over the per-shard values concatenated in shard order. See the `DECISION(A2.6)` at `merged_file_fp` in `crates/r9v-loader/src/open.rs`.
+Proposed resolution: State the merge explicitly in §3 (identity for one shard, ordered concatenation of per-shard values for splits), or name a different deterministic merge.
+
+## SI-76 — A2.6 — spec 8 §5
+What: Spec 8 §5 says "MTP weights bind inside `subgraph("mtp")`; absent MTP weights make `mtp = None`" but defines neither the absent trigger nor the partially-present case.
+Why it blocks or misleads: A loader cannot distinguish "checkpoint predates MTP, downgrade" from "checkpoint is corrupt, refuse" without a stated trigger; guessing wrong either blocks valid loads or silently drops half a head.
+Option taken: Zero `mtp`-subgraph weights present in the merged tables means absent (spec rebuilt with `mtp = None`, graph re-lowered); at least one present means required, and binding lists every missing member exactly. Only the subgraph named exactly `mtp` downgrades. See `downgrade_absent_mtp` in `crates/r9v-loader/src/validate.rs`.
+Proposed resolution: State the zero-present trigger and the partial-presence refusal in §5, or name a different trigger (e.g. metadata-key based).
+
+## SI-77 — A2.6 — spec 9 §2 step 1
+What: Step 1 supports split shards and §3 fingerprints the shard count, but no section states how a single path resolves its siblings (naming, order, or the missing-sibling failure).
+Why it blocks or misleads: Without a stated rule the loader could silently open shard 0 alone and bind a fraction of the model, or glob the directory nondeterministically.
+Option taken: A single path declaring `split.count = N > 1` derives siblings from the gguf `-NNNNN-of-MMMMM` file-name pattern (width-preserving, verified against `split.no`/`split.count`); a missing sibling fails as typed `MissingShard` with the exact expected path, and an explicit path set (`open_shard_set`) merges in declared `split.no` order. See `sibling_paths` in `crates/r9v-loader/src/open.rs`.
+Proposed resolution: State the sibling derivation and missing-shard failure in §2 step 1, or name a different discovery rule.

@@ -9,3 +9,8 @@ description = "R9V model loading pipeline, memory budgeting, and repack cache (S
 
 [dependencies]
 r9v-common = { path = "../r9v-common" }
+r9v-format = { path = "../r9v-format" }
+r9v-ir = { path = "../r9v-ir" }
+r9v-models = { path = "../r9v-models" }
+r9v-state = { path = "../r9v-state" }
+thiserror = "2.0"

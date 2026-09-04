@@ -1411,8 +1411,15 @@ fn build_ffn_with_ns(
 
             // Expert execution
             let gate_up_dim = checked_mul(2, *dff_e, "moe gate_up experts")?;
+            // DECISION(A2.6): stacked-expert identity is recorded on the
+            // builder at bind time (see `mark_stacked_expert`), so the
+            // loader's placement and budget rules consume a carried fact
+            // rather than re-parsing the `_exps` name segment. The shared
+            // experts below stay unmarked: they are dense per-layer
+            // weights, not `[E, ...]` residency units. Spec 8 §5.
+            let gate_up_exps_name = format!("blk.{layer_idx}.{weight_ns}ffn_gate_up_exps.weight");
             let w_gate_up_exps = builder.weight(
-                format!("blk.{layer_idx}.{weight_ns}ffn_gate_up_exps.weight"),
+                gate_up_exps_name.clone(),
                 WeightRole::Matmul,
                 &[
                     Dim::Concrete(*e),
@@ -1421,8 +1428,10 @@ fn build_ffn_with_ns(
                 ],
                 SchemeClass::Matmul,
             )?;
+            builder.mark_stacked_expert(&gate_up_exps_name);
+            let down_exps_name = format!("blk.{layer_idx}.{weight_ns}ffn_down_exps.weight");
             let w_down_exps = builder.weight(
-                format!("blk.{layer_idx}.{weight_ns}ffn_down_exps.weight"),
+                down_exps_name.clone(),
                 WeightRole::Matmul,
                 &[
                     Dim::Concrete(*e),
@@ -1431,6 +1440,7 @@ fn build_ffn_with_ns(
                 ],
                 SchemeClass::Matmul,
             )?;
+            builder.mark_stacked_expert(&down_exps_name);
 
             let shared_count = shared.map(|s| s.n).unwrap_or(0);
             let mut moe_out = builder.op_moe_ffn(

@@ -5,7 +5,7 @@
 //! tensor transformations, fusions, and exports. Sealing the builder guarantees that
 //! architecture definitions remain pure functions without side-effects or device access.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use r9v_ir::graph::{
     EdgeId, ExternalInputKind, ExternalOutputKind, Graph as IrGraph, PlanId, PositionsKind,
@@ -176,6 +176,7 @@ pub struct GraphBuilder {
     bound_weights: Vec<BoundWeight>,
     fusion_decls: Vec<FusionDecl>,
     tied_decls: Vec<TiedDecl>,
+    stacked_experts: BTreeSet<String>,
     state_specs: Vec<(u32, StateSpec, StateHandle)>,
     exports: Vec<(String, Value)>,
     subgraphs: BTreeMap<String, ModelGraph>,
@@ -285,6 +286,7 @@ impl GraphBuilder {
             bound_weights: Vec::new(),
             fusion_decls: Vec::new(),
             tied_decls: Vec::new(),
+            stacked_experts: BTreeSet::new(),
             state_specs: Vec::new(),
             exports: Vec::new(),
             subgraphs: BTreeMap::new(),
@@ -550,6 +552,20 @@ impl GraphBuilder {
         Ok(())
     }
 
+    /// Records a bound weight as a stacked-expert tensor (Spec 8 §5).
+    ///
+    /// Called by the generic MoE lowering immediately after binding each
+    /// `[E, ...]` expert tensor, so downstream crates learn expert identity
+    /// from this carried fact rather than re-parsing weight names. The name
+    /// must already be bound; an unknown name is a programming error.
+    pub(crate) fn mark_stacked_expert(&mut self, name: &str) {
+        debug_assert!(
+            self.bound_weights.iter().any(|w| w.name == name),
+            "mark_stacked_expert called for unbound weight '{name}'"
+        );
+        self.stacked_experts.insert(name.to_string());
+    }
+
     /// Spawns a child builder for a named subgraph (Spec 8 §2; e.g. MTP head, eagle head).
     pub fn subgraph(&mut self, name: &str) -> Result<GraphBuilder, ModelsError> {
         let sub_id = format!("{}.{}", self.model_id, name);
@@ -647,6 +663,7 @@ impl GraphBuilder {
             bound_weights: self.bound_weights,
             fusion_decls: self.fusion_decls,
             tied_decls: self.tied_decls,
+            stacked_experts: self.stacked_experts,
             state_specs: self.state_specs,
             exports: self.exports,
             subgraphs: self.subgraphs,
@@ -1260,6 +1277,7 @@ pub struct ModelGraph {
     bound_weights: Vec<BoundWeight>,
     fusion_decls: Vec<FusionDecl>,
     tied_decls: Vec<TiedDecl>,
+    stacked_experts: BTreeSet<String>,
     state_specs: Vec<(u32, StateSpec, StateHandle)>,
     exports: Vec<(String, Value)>,
     subgraphs: BTreeMap<String, ModelGraph>,
@@ -1295,6 +1313,16 @@ impl ModelGraph {
     /// Slices of all tied embedding declarations.
     pub fn tied_decls(&self) -> &[TiedDecl] {
         &self.tied_decls
+    }
+
+    /// Whether `name` is a stacked-expert (`[E, ...]`) tensor bound by the
+    /// generic MoE lowering (Spec 8 §5).
+    ///
+    /// The fact is recorded at build time by the MoE lowering, so callers
+    /// (notably the loader's placement and budget rules) must use this
+    /// instead of re-parsing weight-name segments.
+    pub fn is_stacked_expert(&self, name: &str) -> bool {
+        self.stacked_experts.contains(name)
     }
 
     /// Slices of all state specifications and handles.

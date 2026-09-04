@@ -142,6 +142,11 @@ name = "r9v-loader"
 version = "0.1.0"
 dependencies = [
  "r9v-common",
+ "r9v-format",
+ "r9v-ir",
+ "r9v-models",
+ "r9v-state",
+ "thiserror",
 ]
 
 [[package]]
