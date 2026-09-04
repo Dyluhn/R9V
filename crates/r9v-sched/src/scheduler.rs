@@ -1246,12 +1246,33 @@ impl Scheduler {
                     // Prompt complete: validate the device readback token
                     // through incremental detokenization BEFORE the commit
                     // (Spec 6 §3.3 step 3). A rejection aborts with no mutation.
+                    //
+                    // DECISION(A3.9): the phase flips to Decoding before
+                    // validation, so a detokenizer rejection must restore the
+                    // prior Prefilling `done` (plus any partial append
+                    // tracking) before `fail_step`: the prompt suffix is still
+                    // uncommitted and the retry must re-ingest the same final
+                    // chunk. Rejected: leaving the flipped phase (the retry
+                    // would admit a decode step and drop the suffix).
+                    // Spec 6 §3.3, §8.
+                    let prev_done = done;
                     active_seq.phase = SequencePhase::Decoding;
                     let (opt_finish, is_trimmed) = match active_seq
                         .append_generated_token(device_sample.token, &mut *self.detokenizer)
                     {
                         Ok(v) => v,
-                        Err(e) => return Err(self.fail_step(active_seq, e)),
+                        Err(e) => {
+                            Self::rollback_append(
+                                &mut active_seq,
+                                snap_gen,
+                                snap_tail_bytes,
+                                snap_spans,
+                                snap_pending,
+                                snap_tail_start,
+                            );
+                            active_seq.phase = SequencePhase::Prefilling { done: prev_done };
+                            return Err(self.fail_step(active_seq, e));
+                        }
                     };
                     // Commit the admitted chunk (consumes exactly the open tail).
                     if let Err(e) = self.state_manager.commit(seq_id, admitted_chunk) {

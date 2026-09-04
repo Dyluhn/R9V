@@ -843,3 +843,111 @@ fn identical_seeds_replay_bit_identically() {
     assert!(seeds_c.iter().all(|&s| s == 778));
     assert!(!seeds_a.is_empty());
 }
+
+// -----------------------------------------------------------------------------
+// Prompt-completing prefill detokenization boundary (Spec 6 §3.3, §8)
+// -----------------------------------------------------------------------------
+
+/// A detokenizer rejection on the prompt-completing prefill step is fully
+/// transactional: the prior Prefilling `done` restores before `fail_step`, so
+/// ctx, prompt progress, reservation, counters, and log are untouched — and
+/// the retry re-ingests the same final prompt chunk, transitioning to decode
+/// exactly once (Spec 6 §3.3 step 3, §8).
+#[test]
+fn prompt_completing_prefill_detok_failure_retries_same_final_chunk() {
+    /// Fails the next `append_token` once with a typed detokenize error,
+    /// then delegates to the inner byte detokenizer (Spec 6 §7).
+    struct FailOnceDetok {
+        fail: bool,
+        inner: ByteDetokenizer,
+    }
+    impl Detokenizer for FailOnceDetok {
+        fn append_token(
+            &mut self,
+            seq_id: SeqId,
+            token: u32,
+            output: &mut String,
+        ) -> SchedResult<usize> {
+            if self.fail {
+                self.fail = false;
+                return Err(SchedError::DetokenizeError {
+                    detail: "injected detokenize fault".to_owned(),
+                });
+            }
+            self.inner.append_token(seq_id, token, output)
+        }
+        fn buffered_len(&self, seq_id: SeqId) -> usize {
+            self.inner.buffered_len(seq_id)
+        }
+        fn reset(&mut self, seq_id: SeqId) {
+            self.inner.reset(seq_id);
+        }
+    }
+
+    let (mut scheduler, stub) = hostile_setup();
+    let seq_id = scheduler
+        .enqueue_request(hostile_req(520, 256, 10))
+        .expect("enqueue");
+
+    // Step 1 (intermediate, 128 tokens): no token sampled, detokenizer unused.
+    let mut exec = ProbeExecutor::new(&stub, vec![(42, 0), (43, 1), (44, 1), (45, 1)]);
+    scheduler.step(&mut exec).expect("step 1").expect("res");
+    assert_eq!(scheduler.state_manager().ctx_len(seq_id).expect("ctx"), 128);
+
+    // Arm the one-shot detokenizer fault for the prompt-completing step.
+    scheduler.set_detokenizer(Box::new(FailOnceDetok {
+        fail: true,
+        inner: ByteDetokenizer::new(),
+    }));
+
+    // Step 2 (final 128): readback succeeds, then detokenization rejects.
+    let err = scheduler.step(&mut exec).unwrap_err();
+    match err {
+        SchedError::DetokenizeError { detail } => assert!(detail.contains("detokenize")),
+        other => panic!("expected DetokenizeError, got {other:?}"),
+    }
+    // Transactional boundary: nothing committed, nothing appended, nothing
+    // logged, no tail stranded, candidate burned, sequence preserved.
+    assert_eq!(scheduler.state_manager().ctx_len(seq_id).expect("ctx"), 128);
+    assert_eq!(scheduler.state_manager().tail_len(seq_id).expect("tail"), 0);
+    assert_eq!(
+        scheduler.last_committed_step(),
+        Some(StepId::new(1)),
+        "failed step must not move the commit watermark"
+    );
+    assert!(scheduler.in_flight_step().is_none());
+    assert_eq!(scheduler.schedule_log().total_written(), 1);
+    assert!(!scheduler.is_idle());
+    // The failed upload still names the uncommitted final prompt chunk, with
+    // no generated token tracked.
+    assert_eq!(exec.seen_prefill, Some((128, 128)));
+    assert_eq!(exec.seen_ctx, 128);
+    assert_eq!(exec.seen_res_start, 128);
+    assert_eq!(exec.seen_res_len, 128);
+    assert_eq!(exec.seen_prompt_len, 256);
+    assert_eq!(exec.seen_generated_len, 0);
+    let failed_prefill = exec.seen_prefill;
+
+    // Retry burns the next candidate and re-ingests the SAME final chunk —
+    // a flipped-to-Decoding phase would have admitted a decode upload with
+    // `prefill: None` and dropped the suffix instead.
+    let res = scheduler.step(&mut exec).expect("retry").expect("res");
+    assert_eq!(res.step_id, StepId::new(3));
+    assert_eq!(exec.seen_prefill, failed_prefill);
+    assert_eq!(exec.seen_prefill, Some((128, 128)));
+    assert_eq!(
+        res.accepted_tokens
+            .get(0)
+            .and_then(|(_, toks)| toks.get(0).copied()),
+        Some(44)
+    );
+    assert_eq!(scheduler.state_manager().ctx_len(seq_id).expect("ctx"), 256);
+    assert_eq!(scheduler.state_manager().tail_len(seq_id).expect("tail"), 0);
+    assert_eq!(scheduler.last_committed_step(), Some(StepId::new(3)));
+    assert_eq!(scheduler.schedule_log().total_written(), 2);
+
+    // The transition fires exactly once, on the successful retry: the next
+    // step is a decode upload carrying no prefill chunk.
+    scheduler.step(&mut exec).expect("step 4").expect("res");
+    assert_eq!(exec.seen_prefill, None);
+}
