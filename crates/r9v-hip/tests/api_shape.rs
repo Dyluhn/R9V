@@ -3,10 +3,10 @@
 
 use r9v_hip::{
     default_library, device_count, enumerate_devices, inventory, is_available,
-    pcie_payload_bandwidth_gbps, Device, DeviceBuffer, DeviceIdentity, DeviceInventory,
-    DeviceProperties, DiscoveredDevice, Event, EventFlags, Function, Graph, GraphExec, HipError,
-    HipLibrary, HipOrdinal, HipUuid, HostBuffer, MemcpyKind, Module, PciBdf, PciLinkHop,
-    PciPathDiscovery, Result, Stream, StreamCaptureMode, StreamFlags,
+    pcie_payload_bandwidth_gbps, AllocationBudget, BudgetedDeviceBuffer, Device, DeviceBuffer,
+    DeviceIdentity, DeviceInventory, DeviceProperties, DiscoveredDevice, Event, EventFlags,
+    Function, Graph, GraphExec, HipError, HipLibrary, HipOrdinal, HipUuid, HostBuffer, MemcpyKind,
+    Module, PciBdf, PciLinkHop, PciPathDiscovery, Result, Stream, StreamCaptureMode, StreamFlags,
 };
 use std::fmt::Display;
 
@@ -125,6 +125,13 @@ fn test_api_shape_invariants() {
 
     assert_send::<DeviceBuffer>();
     assert_sync::<DeviceBuffer>();
+
+    assert_clone::<AllocationBudget>();
+    assert_send::<AllocationBudget>();
+    assert_sync::<AllocationBudget>();
+
+    assert_send::<BudgetedDeviceBuffer>();
+    assert_sync::<BudgetedDeviceBuffer>();
 
     assert_send::<HostBuffer>();
     assert_sync::<HostBuffer>();

@@ -124,6 +124,25 @@ pub enum HipError {
         /// Parse failure.
         details: String,
     },
+
+    /// A device allocation was refused by the process-local GPU allocation budget.
+    ///
+    /// Returned before any HIP allocation is attempted when `used + requested`
+    /// would exceed `limit` (including `u64` arithmetic overflow, which is
+    /// treated as a refusal, never a panic). No bytes are charged on refusal.
+    #[error(
+        "GPU allocation budget exceeded: requested {requested} bytes with {used}/{limit} bytes used ({available} available)"
+    )]
+    BudgetExceeded {
+        /// Immutable budget limit in bytes.
+        limit: u64,
+        /// Bytes currently charged against the budget.
+        used: u64,
+        /// Bytes requested by the refused allocation.
+        requested: u64,
+        /// Bytes remaining under the limit (`limit - used`, saturating).
+        available: u64,
+    },
 }
 
 impl HipError {

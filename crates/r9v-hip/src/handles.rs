@@ -348,6 +348,12 @@ unsafe impl Sync for DeviceBuffer {}
 
 impl DeviceBuffer {
     /// Allocates `size_bytes` of linear device memory (Spec 14 §3).
+    ///
+    /// This path performs no budget accounting. Constrained execution must
+    /// exclusively use the budgeted allocator path
+    /// ([`BudgetedDeviceBuffer::allocate`](crate::budget::BudgetedDeviceBuffer::allocate));
+    /// direct [`DeviceBuffer`] allocation is reserved for physical/unconstrained
+    /// callers that intentionally bypass the budget.
     pub fn allocate(lib: &Arc<HipLibrary>, size_bytes: usize) -> Result<Self> {
         let ptr = lib.malloc(size_bytes)?;
         Ok(Self {

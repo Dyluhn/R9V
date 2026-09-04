@@ -7,6 +7,7 @@
 mod raw;
 mod symbol;
 
+pub mod budget;
 pub mod device;
 pub mod error;
 pub mod handles;
@@ -15,6 +16,7 @@ pub mod pcie;
 
 use std::sync::Arc;
 
+pub use budget::{AllocationBudget, BudgetedDeviceBuffer};
 pub use device::{
     Device, DeviceIdentity, DeviceInventory, DeviceProperties, DiscoveredDevice, HipOrdinal,
     HipUuid, PciBdf,
