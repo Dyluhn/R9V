@@ -287,15 +287,17 @@ impl FormatError {
     where
         I: IntoIterator<Item = FormatError>,
     {
-        let problems: Box<[FormatError]> = problems.into_iter().collect();
-        if problems.is_empty() {
-            Ok(())
-        } else if problems.len() == 1 {
-            let mut problems = problems.into_vec();
-            // Internal invariant: this branch runs only when len == 1.
-            Err(problems.pop().expect("problems holds exactly one entry"))
-        } else {
-            Err(FormatError::Multiple { problems })
+        let mut iter = problems.into_iter();
+        match (iter.next(), iter.next()) {
+            (None, _) => Ok(()),
+            (Some(single), None) => Err(single),
+            (Some(first), Some(second)) => {
+                let mut all = vec![first, second];
+                all.extend(iter);
+                Err(FormatError::Multiple {
+                    problems: all.into_boxed_slice(),
+                })
+            }
         }
     }
 }

@@ -1359,3 +1359,46 @@ pub(crate) fn repacked_dequantize(t: &RepackedTensor) -> Result<Vec<f32>, Format
     FormatError::collect(problems)?;
     Ok(out)
 }
+
+/// Maps a [`crate::SchemeId`] to its [`IqKind`] where one exists (card A2.4, card A2.5).
+pub(crate) fn scheme_iq_kind(scheme: crate::SchemeId) -> Option<IqKind> {
+    match scheme {
+        crate::SchemeId::I4Nl => Some(IqKind::Iq4Nl),
+        crate::SchemeId::I4Xs => Some(IqKind::Iq4Xs),
+        crate::SchemeId::Iq3Xxs => Some(IqKind::Iq3Xxs),
+        crate::SchemeId::Iq3S => Some(IqKind::Iq3S),
+        crate::SchemeId::Iq2Xxs => Some(IqKind::Iq2Xxs),
+        crate::SchemeId::Iq2Xs => Some(IqKind::Iq2Xs),
+        crate::SchemeId::Iq2S => Some(IqKind::Iq2S),
+        crate::SchemeId::Iq1S => Some(IqKind::Iq1S),
+        crate::SchemeId::Iq1M => Some(IqKind::Iq1M),
+        crate::SchemeId::I8R
+        | crate::SchemeId::I8B128
+        | crate::SchemeId::I4K
+        | crate::SchemeId::E4M3B128
+        | crate::SchemeId::I8B32F
+        | crate::SchemeId::I4B32F
+        | crate::SchemeId::I4B32FM
+        | crate::SchemeId::I5B32F
+        | crate::SchemeId::I5B32FM
+        | crate::SchemeId::I5K
+        | crate::SchemeId::I6K
+        | crate::SchemeId::I3K
+        | crate::SchemeId::I2K => None,
+    }
+}
+
+/// Returns the value dimensions for IQ schemes (authoritative packed index dims
+/// for grid IQ types; original dims for IQ4 types).
+pub(crate) fn iq_value_dims(dims: &PaddedDims, kind: IqKind) -> Result<PaddedDims, FormatError> {
+    match kind {
+        IqKind::Iq4Nl | IqKind::Iq4Xs => Ok(*dims),
+        IqKind::Iq3Xxs
+        | IqKind::Iq3S
+        | IqKind::Iq2Xxs
+        | IqKind::Iq2Xs
+        | IqKind::Iq2S
+        | IqKind::Iq1S
+        | IqKind::Iq1M => index_dims(dims, kind),
+    }
+}

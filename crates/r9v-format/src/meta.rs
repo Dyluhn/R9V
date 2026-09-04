@@ -9,7 +9,7 @@
 //! additions (Spec 2 §9: a new flag with a default does not bump
 //! the version) keep loading on older readers.
 
-use crate::container::{GgufFile, KvValue};
+use crate::container::{GgufFile, KvValue, TensorType};
 use crate::{FormatError, Layout, SchemeId};
 
 /// Activation dtype of [`ActSpec`] (Spec 2 §3.4; card A2.5).
@@ -374,10 +374,16 @@ fn opt_scalar<T>(
 /// strictly type-checked, collecting all failures before returning
 /// (CONVENTIONS.md §1.4).
 pub fn parse_r9v_meta(file: &GgufFile) -> Result<Option<R9vMeta>, FormatError> {
-    if !file.kvs().iter().any(|kv| kv.key.starts_with("r9v.")) {
+    if !file.is_native() {
         return Ok(None);
     }
     let mut problems = Vec::new();
+
+    if file.alignment() != 4096 {
+        problems.push(FormatError::InvalidAlignment {
+            value: file.alignment(),
+        });
+    }
 
     let format_version = opt_scalar(
         file,
@@ -914,6 +920,86 @@ pub fn parse_r9v_meta(file: &GgufFile) -> Result<Option<R9vMeta>, FormatError> {
             offset: 0,
             detail: format!("r9v metadata names unknown tensor {name:?}"),
         });
+    }
+
+    for (i, meta) in tensors.iter_mut().enumerate() {
+        let file_tensor = &file.tensors()[i];
+        match file_tensor.dtype {
+            TensorType::R9v(r9v_type) => {
+                if let Some(meta_scheme) = meta.scheme {
+                    if meta_scheme != r9v_type.scheme() {
+                        problems.push(FormatError::SchemeMismatch {
+                            scheme: meta_scheme.name(),
+                            expected: r9v_type.scheme().name(),
+                            got: meta_scheme.name(),
+                        });
+                    }
+                } else {
+                    meta.scheme = Some(r9v_type.scheme());
+                }
+            }
+            TensorType::F16 | TensorType::BF16 => {
+                if meta.scheme.is_some() {
+                    problems.push(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!(
+                            "tensor {:?} of unquantized type {:?} cannot declare a quantization scheme",
+                            file_tensor.name, file_tensor.dtype
+                        ),
+                    });
+                }
+            }
+            TensorType::F32 => {
+                if file_tensor.dims.len() != 1 {
+                    problems.push(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!(
+                            "native F32 tensor {:?} must be 1D (got {} dims; Spec 2 §3.3)",
+                            file_tensor.name,
+                            file_tensor.dims.len(),
+                        ),
+                    });
+                }
+                if meta.scheme.is_some() {
+                    problems.push(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!(
+                            "tensor {:?} of unquantized type {:?} cannot declare a quantization scheme",
+                            file_tensor.name, file_tensor.dtype
+                        ),
+                    });
+                }
+                if meta.roles.as_slice() != [Role::Vector] {
+                    if meta.roles.is_empty() {
+                        problems.push(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "native F32 tensor {:?} is missing required explicit role [vector] (Spec 2 §3.3, §4)",
+                                file_tensor.name,
+                            ),
+                        });
+                    } else {
+                        problems.push(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "native F32 tensor {:?} declared roles {:?}, expected explicitly [vector] (Spec 2 §3.3, §4)",
+                                file_tensor.name,
+                                meta.roles,
+                            ),
+                        });
+                    }
+                }
+            }
+            _ => {
+                problems.push(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!(
+                        "native file contains unsupported tensor type {:?} for tensor {:?}",
+                        file_tensor.dtype, file_tensor.name
+                    ),
+                });
+            }
+        }
     }
 
     let Some(layout_id) = layout_id else {

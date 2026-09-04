@@ -9,9 +9,8 @@
 //! `GGMLQuantizationType` code of gguf-py 0.19.0 plus the R9V native
 //! range 1000–1099 ([`R9vTensorType`]); the closed [`crate::GgmlType`]
 //! set of cards A2.3/A2.4 is untouched. [`entry_regions`] derives the
-//! exact §6 value/scale/index region offsets, [`GgufFile::file_fp`]/
-//! [`model_fp`]
-//! implement the Spec 9 §3 fingerprints, and
+//! exact §6 value/scale/index region offsets, [`GgufFile::file_fp`] and
+//! [`model_fp`] implement the Spec 9 §3 fingerprints, and
 //! [`accept_format_version`] enforces the Spec 2 §9 version rule.
 //! Typed `r9v.*` metadata lives in [`mod@crate::meta`].
 //!
@@ -669,18 +668,27 @@ impl TensorType {
     /// Data bytes for file-order `dims` (product over dims in blocks
     /// times block bytes; `None` for R9V ids — whose entry sizes come
     /// from [`entry_regions`] — and unlisted codes).
+    ///
+    /// Validates nonempty/nonzero dims and dims[0] block divisibility.
     pub fn data_nbytes(self, dims: &[u64]) -> Option<u64> {
         let (block_len, block_bytes) = self.quant_size()?;
+        if dims.is_empty() {
+            return None;
+        }
+        for &d in dims {
+            if d == 0 {
+                return None;
+            }
+        }
+        let block_len = block_len as u64;
+        if block_len == 0 || !dims[0].is_multiple_of(block_len) {
+            return None;
+        }
         let mut elems: u64 = 1;
         for d in dims {
             elems = elems.checked_mul(*d)?;
         }
-        if block_len as u64 == 0 || !elems.is_multiple_of(block_len as u64) {
-            return None;
-        }
-        elems
-            .checked_div(block_len as u64)?
-            .checked_mul(block_bytes)
+        elems.checked_div(block_len)?.checked_mul(block_bytes)
     }
 }
 
@@ -920,6 +928,31 @@ impl GgufFile {
     /// unknown types) collects every problem before returning
     /// (CONVENTIONS.md §1.4).
     pub fn parse(bytes: &[u8]) -> Result<Self, FormatError> {
+        Self::parse_internal(bytes, bytes.len() as u64, false)
+    }
+
+    /// Parses only the header, metadata KV table, and tensor-info table from `bytes`,
+    /// with the actual logical on-disk file size supplied separately (card A2.5).
+    ///
+    /// Runs all structural and logical table validations (alignment, duplicates,
+    /// dimensions, types, schemes, explicit regions, and sweep overlap checks)
+    /// without requiring the full tensor payload data to be present in `bytes`.
+    /// Verifies logical tensor ranges against `file_size` and rejects impossible
+    /// logical file sizes.
+    pub fn parse_metadata_only(bytes: &[u8], file_size: u64) -> Result<Self, FormatError> {
+        Self::parse_internal(bytes, file_size, true)
+    }
+
+    /// Alias for [`GgufFile::parse_metadata_only`].
+    pub fn parse_table_only(bytes: &[u8], file_size: u64) -> Result<Self, FormatError> {
+        Self::parse_metadata_only(bytes, file_size)
+    }
+
+    fn parse_internal(
+        bytes: &[u8],
+        file_size: u64,
+        size_explicit: bool,
+    ) -> Result<Self, FormatError> {
         let mut cursor = Cursor::new(bytes);
         let magic = cursor.read_u32("magic")?;
         if magic != GGUF_MAGIC {
@@ -973,7 +1006,6 @@ impl GgufFile {
         }
         let ti_range = (ti_start, cursor.pos);
 
-        let file_size = bytes.len() as u64;
         let mut file = Self {
             version,
             alignment: GGUF_DEFAULT_ALIGNMENT,
@@ -987,7 +1019,7 @@ impl GgufFile {
             kv_range,
             ti_range,
         };
-        file.validate()?;
+        file.validate(size_explicit)?;
         Ok(file)
     }
 
@@ -1004,7 +1036,14 @@ impl GgufFile {
     /// Table-level validation: duplicate keys/tensors, alignment,
     /// and every tensor's data range (CONVENTIONS.md §1.4: all
     /// problems are collected before returning).
-    fn validate(&mut self) -> Result<(), FormatError> {
+    ///
+    /// When the logical file size was supplied separately
+    /// ([`GgufFile::parse_metadata_only`]), an impossible size below
+    /// the data-section start is the caller's malformed input, so it
+    /// fails as one `Malformed` without range follow-ons. Under
+    /// [`GgufFile::parse`] the same bytes are a truncated file and
+    /// keep the `BadTensorRange` report.
+    fn validate(&mut self, size_explicit: bool) -> Result<(), FormatError> {
         let mut problems = Vec::new();
 
         for (index, kv) in self.kvs.iter().enumerate() {
@@ -1053,6 +1092,161 @@ impl GgufFile {
         }
         self.alignment = alignment;
 
+        if self.is_native() {
+            if self.alignment != 4096 {
+                problems.push(FormatError::InvalidAlignment {
+                    value: self.alignment,
+                });
+            }
+
+            match self.kv("r9v.format_version") {
+                Some(KvValue::U32(v)) => {
+                    if let Err(e) = accept_format_version(Some(*v)) {
+                        problems.push(e);
+                    }
+                }
+                Some(other) => {
+                    problems.push(FormatError::KvTypeMismatch {
+                        key: "r9v.format_version".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: "UINT32",
+                    });
+                }
+                None => {
+                    problems.push(FormatError::MissingKey {
+                        key: "r9v.format_version".to_owned(),
+                    });
+                }
+            }
+
+            match self.kv("r9v.layout_id") {
+                Some(KvValue::Str(s)) => {
+                    let canonical = match s.as_str() {
+                        "L0" => "l0",
+                        "L1" => "l1",
+                        "L1S" => "l1s",
+                        _ => s.as_str(),
+                    };
+                    if let Err(e) = crate::Layout::from_name(canonical) {
+                        problems.push(e);
+                    }
+                }
+                Some(other) => {
+                    problems.push(FormatError::KvTypeMismatch {
+                        key: "r9v.layout_id".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: "STRING",
+                    });
+                }
+                None => {
+                    problems.push(FormatError::MissingKey {
+                        key: "r9v.layout_id".to_owned(),
+                    });
+                }
+            }
+        }
+
+        let has_split_decl = self.kv("split.no").is_some()
+            || self.kv("split.count").is_some()
+            || self.kv("split.tensors.count").is_some()
+            || self.kvs.iter().any(|kv| kv.key.starts_with("split."));
+        if has_split_decl {
+            let no = match self.kv("split.no") {
+                Some(KvValue::U16(no)) => Some(*no),
+                Some(other) => {
+                    problems.push(FormatError::KvTypeMismatch {
+                        key: "split.no".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: KvType::U16.name(),
+                    });
+                    None
+                }
+                None => {
+                    problems.push(FormatError::MissingKey {
+                        key: "split.no".to_owned(),
+                    });
+                    None
+                }
+            };
+            let count = match self.kv("split.count") {
+                Some(KvValue::U16(count)) => Some(*count),
+                Some(other) => {
+                    problems.push(FormatError::KvTypeMismatch {
+                        key: "split.count".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: KvType::U16.name(),
+                    });
+                    None
+                }
+                None => {
+                    problems.push(FormatError::MissingKey {
+                        key: "split.count".to_owned(),
+                    });
+                    None
+                }
+            };
+            let tensors_count = match self.kv("split.tensors.count") {
+                Some(KvValue::I32(count)) => Some(*count),
+                Some(other) => {
+                    problems.push(FormatError::KvTypeMismatch {
+                        key: "split.tensors.count".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: KvType::I32.name(),
+                    });
+                    None
+                }
+                None => {
+                    problems.push(FormatError::MissingKey {
+                        key: "split.tensors.count".to_owned(),
+                    });
+                    None
+                }
+            };
+            if let (Some(no), Some(count), Some(tensors_count)) = (no, count, tensors_count) {
+                if count == 0 {
+                    problems.push(FormatError::Malformed {
+                        offset: 0,
+                        detail: "split.count must be >= 1".to_owned(),
+                    });
+                } else if no >= count {
+                    problems.push(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!("split.no {no} must be < split.count {count}"),
+                    });
+                }
+                if tensors_count < 0 {
+                    problems.push(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!("split.tensors.count {tensors_count} must be >= 0"),
+                    });
+                } else if count == 1 {
+                    if no != 0 {
+                        problems.push(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!("single-shard split.no is {no}, expected 0"),
+                        });
+                    }
+                    if tensors_count as usize != self.tensors.len() {
+                        problems.push(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "split.tensors.count is {tensors_count}, expected {}",
+                                self.tensors.len()
+                            ),
+                        });
+                    }
+                } else if self.tensors.len() > tensors_count as usize {
+                    problems.push(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!(
+                            "shard tensor count {} exceeds total split.tensors.count {tensors_count}",
+                            self.tensors.len()
+                        ),
+                    });
+                }
+            }
+        }
+
         match align_up(self.ti_range.1, alignment) {
             Some(start) => self.data_start = start,
             None => problems.push(FormatError::Overflow {
@@ -1061,17 +1255,47 @@ impl GgufFile {
             }),
         }
 
+        if size_explicit && self.file_size < self.data_start {
+            problems.push(FormatError::Malformed {
+                offset: 0,
+                detail: format!(
+                    "logical file size {} is smaller than data section start {}",
+                    self.file_size, self.data_start
+                ),
+            });
+            return FormatError::collect(problems);
+        }
+
+        // A full parse of a native file with no tensors cannot
+        // report a per-tensor range, so an aligned data-section
+        // start past the actual bytes is its own `BadTensorRange`:
+        // a native container's data section is structural, so the
+        // file claims data begins past its own end (a truncated
+        // file). Standard zero-tensor files stay accepted: real
+        // vocab-only GGUF files end right after the tensor-info
+        // table with no trailing padding to align. Parses with
+        // tensors keep the per-tensor "beyond file size" reports
+        // below, and explicit logical sizes keep `Malformed` above.
+        if !size_explicit
+            && self.tensors.is_empty()
+            && self.is_native()
+            && self.file_size < self.data_start
+        {
+            problems.push(FormatError::BadTensorRange {
+                name: String::new(),
+                start: self.file_size,
+                end: self.data_start,
+                reason: format!(
+                    "data section start {} is beyond file size {}",
+                    self.data_start, self.file_size
+                ),
+            });
+        }
+
         // Range checks run against the aligned start even when the
         // alignment itself failed, so one bad file reports everything.
         let mut spans: Vec<(u64, u64, usize)> = Vec::new();
         for (index, tensor) in self.tensors.iter().enumerate() {
-            let nbytes = match self.tensor_nbytes(tensor) {
-                Ok(n) => n,
-                Err(e) => {
-                    problems.push(e);
-                    continue;
-                }
-            };
             let start = match self.data_start.checked_add(tensor.offset) {
                 Some(s) => s,
                 None => {
@@ -1084,6 +1308,24 @@ impl GgufFile {
                             self.data_start, tensor.offset
                         ),
                     });
+                    continue;
+                }
+            };
+            if !tensor.offset.is_multiple_of(alignment) {
+                problems.push(FormatError::BadTensorRange {
+                    name: tensor.name.clone(),
+                    start,
+                    end: start,
+                    reason: format!(
+                        "tensor offset {} is not a multiple of alignment {alignment}",
+                        tensor.offset
+                    ),
+                });
+            }
+            let nbytes = match self.tensor_nbytes(tensor) {
+                Ok(n) => n,
+                Err(e) => {
+                    problems.push(e);
                     continue;
                 }
             };
@@ -1111,24 +1353,116 @@ impl GgufFile {
             spans.push((start, end, index));
         }
         spans.sort();
-        let mut i = 1;
-        while i < spans.len() {
-            // Internal invariant: `spans` is sorted, so every pair of
-            // neighbors is the only possible overlap at this step.
-            let (prev_start, prev_end, prev_index) = spans[i - 1];
-            let (start, end, index) = spans[i];
-            if start < prev_end {
-                problems.push(FormatError::BadTensorRange {
-                    name: self.tensors[index].name.clone(),
-                    start,
-                    end,
-                    reason: format!(
-                        "overlaps {:?} [{prev_start}, {prev_end})",
-                        self.tensors[prev_index].name
-                    ),
-                });
+        if let Some(&(first_start, first_end, first_index)) = spans.first() {
+            let mut max_start = first_start;
+            let mut max_end = first_end;
+            let mut max_index = first_index;
+            for &(start, end, index) in &spans[1..] {
+                if start < max_end {
+                    problems.push(FormatError::BadTensorRange {
+                        name: self.tensors[index].name.clone(),
+                        start,
+                        end,
+                        reason: format!(
+                            "overlaps {:?} [{max_start}, {max_end})",
+                            self.tensors[max_index].name
+                        ),
+                    });
+                }
+                if end > max_end {
+                    max_start = start;
+                    max_end = end;
+                    max_index = index;
+                }
             }
-            i += 1;
+        }
+
+        // Native tensor span sequencing (Spec 2 §6; card A2.5):
+        // Enforces table order matches file order without dead 4KiB gaps or oversized payloads.
+        if self.is_native() {
+            let mut expected_offset = 0u64;
+            let mut sequencing_ok = true;
+            for tensor in &self.tensors {
+                if tensor.offset != expected_offset {
+                    sequencing_ok = false;
+                    let start = self.data_start.saturating_add(tensor.offset);
+                    if tensor.offset > expected_offset {
+                        problems.push(FormatError::BadTensorRange {
+                            name: tensor.name.clone(),
+                            start,
+                            end: start,
+                            reason: format!(
+                                "native tensor {:?} offset {} does not immediately follow previous tensor end offset {} (dead gap of {} bytes)",
+                                tensor.name,
+                                tensor.offset,
+                                expected_offset,
+                                tensor.offset - expected_offset
+                            ),
+                        });
+                    } else {
+                        problems.push(FormatError::BadTensorRange {
+                            name: tensor.name.clone(),
+                            start,
+                            end: start,
+                            reason: format!(
+                                "native tensor {:?} offset {} is out of sequence (expected offset {})",
+                                tensor.name,
+                                tensor.offset,
+                                expected_offset
+                            ),
+                        });
+                    }
+                }
+                if let Ok(nbytes) = self.tensor_nbytes(tensor) {
+                    match align_up(nbytes, alignment)
+                        .and_then(|padded| expected_offset.checked_add(padded))
+                    {
+                        Some(next_off) => expected_offset = next_off,
+                        None => {
+                            sequencing_ok = false;
+                            problems.push(FormatError::Overflow {
+                                what: "native expected_offset",
+                                detail: format!("tensor {:?} nbytes={nbytes}", tensor.name),
+                            });
+                        }
+                    }
+                } else {
+                    sequencing_ok = false;
+                }
+            }
+            if sequencing_ok {
+                let expected_file_size = match self.data_start.checked_add(expected_offset) {
+                    Some(s) => s,
+                    None => {
+                        problems.push(FormatError::Overflow {
+                            what: "native expected_file_size",
+                            detail: format!(
+                                "data_start={} expected_offset={expected_offset}",
+                                self.data_start
+                            ),
+                        });
+                        u64::MAX
+                    }
+                };
+                if self.file_size != expected_file_size && self.file_size > expected_file_size {
+                    let name = self
+                        .tensors
+                        .last()
+                        .map(|t| t.name.clone())
+                        .unwrap_or_default();
+                    problems.push(FormatError::BadTensorRange {
+                        name,
+                        start: expected_file_size,
+                        end: self.file_size,
+                        reason: format!(
+                            "native file size {} exceeds end of tensor data {} (dead gap of {} bytes)",
+                            self.file_size,
+                            expected_file_size,
+                            self.file_size - expected_file_size
+                        ),
+                    });
+                }
+            }
         }
 
         FormatError::collect(problems)
@@ -1189,328 +1523,525 @@ impl GgufFile {
         self.ti_range
     }
 
-    // DECISION(A2.5): native R9V tensor entry sizes in the container are
-    // derived via entry_regions from the tensor's scheme, layout, and dims;
-    // rejected leaving R9V tensors unsized because per-entry xxh3 validation
-    // (Spec 2 §10) and container bounds/overlap checks require entry slicing.
-    // Spec 2 §6, §10; card A2.5.
+    fn parse_tensor_roles(
+        &self,
+        name: &str,
+    ) -> Result<Option<Vec<crate::meta::Role>>, FormatError> {
+        parse_tensor_roles(|k| self.kv(k), name)
+    }
+
+    fn validate_explicit_regions(&self, name: &str, expected: [u64; 3]) -> Result<(), FormatError> {
+        validate_explicit_regions(|k| self.kv(k), name, expected)
+    }
+
+    fn validate_explicit_regions_retained(
+        &self,
+        name: &str,
+        entry_bytes: u64,
+    ) -> Result<(), FormatError> {
+        validate_explicit_regions_retained(|k| self.kv(k), name, entry_bytes)
+    }
+
+    fn check_tensor_scheme(&self, name: &str, r9v_type: R9vTensorType) -> Result<(), FormatError> {
+        check_r9v_tensor_scheme(|k| self.kv(k), name, r9v_type)
+    }
+
+    // DECISION(A2.5): native tensor entry sizes in the container are
+    // derived via entry_regions for R9V schemes and align_up(values_bytes, 4096)
+    // for retained unquantized standard types (F16/BF16 in L0/L1, F32 in L0);
+    // rejected leaving native entries unsized or admitting unsupported wire types
+    // because per-entry xxh3 validation (Spec 2 §10) and container bounds/overlap
+    // checks require exact entry slicing, and unsupported types cannot execute natively.
+    // Spec 2 §3.3, §6, §10.
     /// Returns the byte length of one tensor entry (Spec 2 §6, §10; card A2.5).
     ///
     /// For standard wire types, size is derived from wire block size
     /// and dimensions. For native R9V types, size is derived from
     /// [`entry_regions`] using the tensor's scheme, layout, and shape.
     pub fn tensor_nbytes(&self, info: &TensorInfo) -> Result<u64, FormatError> {
-        match info.dtype {
-            TensorType::Unknown(code) => Err(FormatError::UnknownTensorType {
+        if let TensorType::Unknown(code) = info.dtype {
+            return Err(FormatError::UnknownTensorType {
                 code,
                 tensor: info.name.clone(),
-            }),
-            TensorType::R9v(r9v_type) => {
-                if info.dims.is_empty() {
+            });
+        }
+
+        if !self.is_standard_gguf() {
+            if info.dims.is_empty() {
+                return Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!("tensor {:?} has zero dimensions", info.name),
+                });
+            }
+            for &d in &info.dims {
+                if d == 0 {
                     return Err(FormatError::Malformed {
                         offset: 0,
-                        detail: format!("tensor {:?} has zero dimensions", info.name),
+                        detail: format!(
+                            "tensor {:?} has zero dimension in {:?}",
+                            info.name, info.dims
+                        ),
                     });
                 }
-                let k = u32::try_from(info.dims[0]).map_err(|_| FormatError::Overflow {
-                    what: "tensor k dim",
-                    detail: format!("tensor {:?} dim[0]={}", info.name, info.dims[0]),
-                })?;
-                let n = if info.dims.len() == 1 {
-                    1u32
-                } else {
-                    let mut prod: u64 = 1;
-                    for d in &info.dims[1..] {
-                        prod = prod.checked_mul(*d).ok_or_else(|| FormatError::Overflow {
-                            what: "tensor n dims product",
-                            detail: format!("tensor {:?}", info.name),
-                        })?;
-                    }
-                    u32::try_from(prod).map_err(|_| FormatError::Overflow {
-                        what: "tensor n dim",
-                        detail: format!("tensor {:?} product={prod}", info.name),
-                    })?
-                };
+            }
 
-                let sparse_key = format!("r9v.tensor.{}.sparse", info.name);
-                let is_sparse = match self.kv(&sparse_key) {
-                    Some(KvValue::Str(s)) => match s.as_str() {
-                        "none" => false,
-                        "s24" => true,
-                        _ => {
-                            return Err(FormatError::Malformed {
-                                offset: 0,
-                                detail: format!(
-                                    "tensor {:?} sparse value {s:?}: expected none or s24 (Spec 2 §4)",
-                                    info.name
-                                ),
-                            });
+            match info.dtype {
+                TensorType::R9v(r9v_type) => {
+                    // A declared `r9v.tensor.<name>.scheme` must name a
+                    // closed-set scheme and agree with the tensor-info
+                    // type id; an absent key stays accepted and
+                    // `parse_r9v_meta` populates it from the type id.
+                    // Unknown names fail as `UnknownScheme`, disagreements
+                    // as `SchemeMismatch`, matching `parse_r9v_meta`.
+                    self.check_tensor_scheme(&info.name, r9v_type)?;
+                    let k = u32::try_from(info.dims[0]).map_err(|_| FormatError::Overflow {
+                        what: "tensor k dim",
+                        detail: format!("tensor {:?} dim[0]={}", info.name, info.dims[0]),
+                    })?;
+                    let n = if info.dims.len() == 1 {
+                        1u32
+                    } else {
+                        let mut prod: u64 = 1;
+                        for d in &info.dims[1..] {
+                            prod = prod.checked_mul(*d).ok_or_else(|| FormatError::Overflow {
+                                what: "tensor n dims product",
+                                detail: format!("tensor {:?}", info.name),
+                            })?;
                         }
-                    },
-                    Some(other) => {
-                        return Err(FormatError::KvTypeMismatch {
-                            key: sparse_key,
-                            found: other.kv_type().name(),
-                            expected: "STRING",
-                        });
-                    }
-                    None => false,
-                };
-
-                let roles_key = format!("r9v.tensor.{}.roles", info.name);
-                let parsed_roles = match self.kv(&roles_key) {
-                    Some(KvValue::Array { elem, items }) => {
-                        if *elem != KvType::Str {
+                        u32::try_from(prod).map_err(|_| FormatError::Overflow {
+                            what: "tensor n dim",
+                            detail: format!("tensor {:?} product={prod}", info.name),
+                        })?
+                    };
+                    let sparse_key = format!("r9v.tensor.{}.sparse", info.name);
+                    let is_sparse = match self.kv(&sparse_key) {
+                        Some(KvValue::Str(s)) => match s.as_str() {
+                            "none" => false,
+                            "s24" => true,
+                            _ => {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "tensor {:?} sparse value {s:?}: expected none or s24 (Spec 2 §4)",
+                                        info.name
+                                    ),
+                                });
+                            }
+                        },
+                        Some(other) => {
                             return Err(FormatError::KvTypeMismatch {
-                                key: roles_key,
-                                found: elem.name(),
+                                key: sparse_key,
+                                found: other.kv_type().name(),
                                 expected: "STRING",
                             });
                         }
-                        if items.is_empty() {
+                        None => false,
+                    };
+
+                    let parsed_roles = self.parse_tensor_roles(&info.name)?;
+
+                    // Closed-set validation on 1D vectors and sparsity
+                    if info.dims.len() == 1 {
+                        if is_sparse {
                             return Err(FormatError::Malformed {
                                 offset: 0,
                                 detail: format!(
-                                    "tensor {:?} roles array is empty (Spec 2 §4)",
+                                    "1D vector {:?} cannot be sparse (Spec 2 §4, §5)",
                                     info.name
                                 ),
                             });
                         }
-                        let mut parsed = Vec::with_capacity(items.len());
-                        for item in items {
-                            match item {
-                                KvValue::Str(s) => match crate::meta::Role::parse(s) {
-                                    Ok(role) => parsed.push(role),
-                                    Err(_) => {
-                                        return Err(FormatError::Malformed {
-                                            offset: 0,
-                                            detail: format!(
-                                                "tensor {:?} has unknown role {s:?} (Spec 2 §4)",
-                                                info.name
-                                            ),
-                                        });
-                                    }
-                                },
-                                other => {
-                                    return Err(FormatError::KvTypeMismatch {
-                                        key: roles_key,
-                                        found: other.kv_type().name(),
-                                        expected: "STRING",
-                                    });
-                                }
+                        if let Some(roles) = &parsed_roles {
+                            if roles != &[crate::meta::Role::Vector] {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "1D tensor {:?} has non-vector role {roles:?} (Spec 2 §4, §5)",
+                                        info.name
+                                    ),
+                                });
                             }
                         }
-                        // Spec 2 §4 closed set: [matmul] | [embed] | [lm_head] | [embed, lm_head] | [ngram_table] | [vector]
-                        let is_valid_combo = matches!(
-                            parsed.as_slice(),
-                            [crate::meta::Role::Matmul]
-                                | [crate::meta::Role::Embed]
-                                | [crate::meta::Role::LmHead]
-                                | [crate::meta::Role::NgramTable]
-                                | [crate::meta::Role::Vector]
-                                | [crate::meta::Role::Embed, crate::meta::Role::LmHead]
-                        );
-                        if !is_valid_combo {
-                            return Err(FormatError::Malformed {
-                                offset: 0,
-                                detail: format!(
-                                    "tensor {:?} has invalid roles combination {parsed:?} (Spec 2 §4)",
-                                    info.name
-                                ),
+                    }
+
+                    if is_sparse {
+                        if let Some(roles) = &parsed_roles {
+                            if roles != &[crate::meta::Role::Matmul] {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "sparse tensor {:?} has non-matmul role {roles:?} (Spec 2 §4, §5)",
+                                        info.name
+                                    ),
+                                });
+                            }
+                        }
+                        if !matches!(
+                            r9v_type.scheme(),
+                            crate::SchemeId::I8R
+                                | crate::SchemeId::I8B128
+                                | crate::SchemeId::I4K
+                                | crate::SchemeId::E4M3B128
+                        ) {
+                            return Err(FormatError::UnsupportedLayout {
+                                scheme: r9v_type.scheme().name(),
+                                layout: crate::Layout::L1S.name(),
                             });
                         }
-                        Some(parsed)
                     }
-                    Some(other) => {
-                        return Err(FormatError::KvTypeMismatch {
-                            key: roles_key,
-                            found: other.kv_type().name(),
-                            expected: "ARRAY",
-                        });
-                    }
-                    None => None,
-                };
 
-                // Closed-set validation on 1D vectors and sparsity
-                if info.dims.len() == 1 {
-                    if is_sparse {
+                    // Layout determination:
+                    // 1. Sparse is L1S
+                    // 2. 1D tensors are vectors -> L0 (Spec 2 §5, §7)
+                    // 3. Roles:
+                    //    - Tied [embed, lm_head] is stored once, in L1 (Spec 2 §4)
+                    //    - Standalone embed / ngram_table / vector -> L0 (Spec 2 §5, §7)
+                    //    - matmul / standalone lm_head -> L1
+                    // 4. Missing roles:
+                    //    - file-level r9v.layout_id (L0 / L1 / L1S)
+                    //    - default L1
+                    let layout = if is_sparse {
+                        crate::Layout::L1S
+                    } else if info.dims.len() == 1 {
+                        crate::Layout::L0
+                    } else if let Some(roles) = &parsed_roles {
+                        if roles.as_slice() == [crate::meta::Role::Embed, crate::meta::Role::LmHead] {
+                            crate::Layout::L1
+                        } else if roles.contains(&crate::meta::Role::Embed)
+                            || roles.contains(&crate::meta::Role::NgramTable)
+                            || roles.contains(&crate::meta::Role::Vector)
+                        {
+                            crate::Layout::L0
+                        } else {
+                            crate::Layout::L1
+                        }
+                    } else if let Some(val) = self.kv("r9v.layout_id") {
+                        match val {
+                            KvValue::Str(s) => match s.to_ascii_lowercase().as_str() {
+                                "l0" => crate::Layout::L0,
+                                "l1s" => crate::Layout::L1S,
+                                "l1" => crate::Layout::L1,
+                                _ => return Err(FormatError::UnknownLayout { value: s.clone() }),
+                            },
+                            other => {
+                                return Err(FormatError::KvTypeMismatch {
+                                    key: "r9v.layout_id".to_owned(),
+                                    found: other.kv_type().name(),
+                                    expected: "STRING",
+                                });
+                            }
+                        }
+                    } else {
+                        return Err(FormatError::MissingKey {
+                            key: "r9v.layout_id".to_owned(),
+                        });
+                    };
+
+                    let regions = entry_regions(r9v_type.scheme(), layout, n, k)?;
+                    self.validate_explicit_regions(&info.name, regions.offsets())?;
+                    Ok(regions.entry_bytes)
+                }
+                TensorType::F16 | TensorType::BF16 => {
+                    let scheme_key = format!("r9v.tensor.{}.scheme", info.name);
+                    if self.kv(&scheme_key).is_some() {
                         return Err(FormatError::Malformed {
                             offset: 0,
                             detail: format!(
-                                "1D vector {:?} cannot be sparse (Spec 2 §4, §5)",
-                                info.name
+                                "unquantized tensor {:?} ({}) cannot declare a quantization scheme",
+                                info.name,
+                                info.dtype.name(),
                             ),
                         });
                     }
-                    if let Some(roles) = &parsed_roles {
-                        if roles != &[crate::meta::Role::Vector] {
-                            return Err(FormatError::Malformed {
-                                offset: 0,
-                                detail: format!(
-                                    "1D tensor {:?} has non-vector role {roles:?} (Spec 2 §4, §5)",
-                                    info.name
-                                ),
-                            });
-                        }
-                    }
-                }
 
-                if is_sparse {
-                    if let Some(roles) = &parsed_roles {
-                        if roles != &[crate::meta::Role::Matmul] {
-                            return Err(FormatError::Malformed {
-                                offset: 0,
-                                detail: format!(
-                                    "sparse tensor {:?} has non-matmul role {roles:?} (Spec 2 §4, §5)",
-                                    info.name
-                                ),
-                            });
+                    let sparse_key = format!("r9v.tensor.{}.sparse", info.name);
+                    if let Some(val) = self.kv(&sparse_key) {
+                        match val {
+                            KvValue::Str(s) if s == "none" => {}
+                            KvValue::Str(s) if s == "s24" => {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "unquantized tensor {:?} cannot be sparse (Spec 2 §4)",
+                                        info.name,
+                                    ),
+                                });
+                            }
+                            KvValue::Str(s) => {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "tensor {:?} sparse value {s:?}: expected none or s24 (Spec 2 §4)",
+                                        info.name
+                                    ),
+                                });
+                            }
+                            other => {
+                                return Err(FormatError::KvTypeMismatch {
+                                    key: sparse_key,
+                                    found: other.kv_type().name(),
+                                    expected: "STRING",
+                                });
+                            }
                         }
                     }
-                    if !matches!(
-                        r9v_type.scheme(),
-                        crate::SchemeId::I8R
-                            | crate::SchemeId::I8B128
-                            | crate::SchemeId::I4K
-                            | crate::SchemeId::E4M3B128
-                    ) {
-                        return Err(FormatError::UnsupportedLayout {
-                            scheme: r9v_type.scheme().name(),
-                            layout: crate::Layout::L1S.name(),
+
+                    let parsed_roles = self.parse_tensor_roles(&info.name)?;
+                    if info.dims.len() == 1 {
+                        if let Some(roles) = &parsed_roles {
+                            if roles != &[crate::meta::Role::Vector] {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "1D tensor {:?} has non-vector role {roles:?} (Spec 2 §4, §5)",
+                                        info.name
+                                    ),
+                                });
+                            }
+                        }
+                    }
+
+                    let layout = if info.dims.len() == 1 {
+                        crate::Layout::L0
+                    } else if let Some(roles) = &parsed_roles {
+                        if roles.as_slice() == [crate::meta::Role::Embed, crate::meta::Role::LmHead] {
+                            crate::Layout::L1
+                        } else if roles.contains(&crate::meta::Role::Embed)
+                            || roles.contains(&crate::meta::Role::NgramTable)
+                            || roles.contains(&crate::meta::Role::Vector)
+                        {
+                            crate::Layout::L0
+                        } else {
+                            crate::Layout::L1
+                        }
+                    } else if let Some(val) = self.kv("r9v.layout_id") {
+                        match val {
+                            KvValue::Str(s) => match s.to_ascii_lowercase().as_str() {
+                                "l0" => crate::Layout::L0,
+                                "l1" => crate::Layout::L1,
+                                "l1s" => {
+                                    let type_name = match info.dtype {
+                                        TensorType::F16 => "f16",
+                                        TensorType::BF16 => "bf16",
+                                        _ => "unquantized",
+                                    };
+                                    return Err(FormatError::UnsupportedLayout {
+                                        scheme: type_name,
+                                        layout: crate::Layout::L1S.name(),
+                                    });
+                                }
+                                _ => return Err(FormatError::UnknownLayout { value: s.clone() }),
+                            },
+                            other => {
+                                return Err(FormatError::KvTypeMismatch {
+                                    key: "r9v.layout_id".to_owned(),
+                                    found: other.kv_type().name(),
+                                    expected: "STRING",
+                                });
+                            }
+                        }
+                    } else {
+                        return Err(FormatError::MissingKey {
+                            key: "r9v.layout_id".to_owned(),
+                        });
+                    };
+
+                    let entry_bytes = match layout {
+                        crate::Layout::L0 => {
+                            let elems = info.n_elems().ok_or_else(|| FormatError::Overflow {
+                                what: "tensor n_elems",
+                                detail: format!("tensor {:?}", info.name),
+                            })?;
+                            let values_bytes = elems.checked_mul(2).ok_or_else(|| FormatError::Overflow {
+                                what: "tensor values_bytes",
+                                detail: format!("tensor {:?}", info.name),
+                            })?;
+                            align_up(values_bytes, NATIVE_ALIGNMENT).ok_or_else(|| {
+                                FormatError::Overflow {
+                                    what: "tensor entry_bytes",
+                                    detail: format!("values_bytes={values_bytes}"),
+                                }
+                            })?
+                        }
+                        crate::Layout::L1 => {
+                            let k = u32::try_from(info.dims[0]).map_err(|_| FormatError::Overflow {
+                                what: "tensor k dim",
+                                detail: format!("tensor {:?} dim[0]={}", info.name, info.dims[0]),
+                            })?;
+                            let n = if info.dims.len() == 1 {
+                                1u32
+                            } else {
+                                let mut prod: u64 = 1;
+                                for d in &info.dims[1..] {
+                                    prod = prod.checked_mul(*d).ok_or_else(|| FormatError::Overflow {
+                                        what: "tensor n dims product",
+                                        detail: format!("tensor {:?}", info.name),
+                                    })?;
+                                }
+                                u32::try_from(prod).map_err(|_| FormatError::Overflow {
+                                    what: "tensor n dim",
+                                    detail: format!("tensor {:?} product={prod}", info.name),
+                                })?
+                            };
+                            let dims = crate::layout::PaddedDims::new(n, k, None)?;
+                            let values_bytes = dims.value_region_bytes(crate::layout::Packing::Half16)?;
+                            align_up(values_bytes, NATIVE_ALIGNMENT).ok_or_else(|| {
+                                FormatError::Overflow {
+                                    what: "tensor entry_bytes",
+                                    detail: format!("values_bytes={values_bytes}"),
+                                }
+                            })?
+                        }
+                        crate::Layout::L1S => {
+                            let type_name = match info.dtype {
+                                TensorType::F16 => "f16",
+                                TensorType::BF16 => "bf16",
+                                _ => "unquantized",
+                            };
+                            return Err(FormatError::UnsupportedLayout {
+                                scheme: type_name,
+                                layout: crate::Layout::L1S.name(),
+                            });
+                        }
+                    };
+                    self.validate_explicit_regions_retained(&info.name, entry_bytes)?;
+                    Ok(entry_bytes)
+                }
+                TensorType::F32 => {
+                    let scheme_key = format!("r9v.tensor.{}.scheme", info.name);
+                    if self.kv(&scheme_key).is_some() {
+                        return Err(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "unquantized tensor {:?} ({}) cannot declare a quantization scheme",
+                                info.name,
+                                info.dtype.name(),
+                            ),
                         });
                     }
-                }
 
-                // Layout determination:
-                // 1. Sparse is L1S
-                // 2. 1D tensors are vectors -> L0 (Spec 2 §5, §7)
-                // 3. Roles:
-                //    - Tied [embed, lm_head] is stored once, in L1 (Spec 2 §4)
-                //    - Standalone embed / ngram_table / vector -> L0 (Spec 2 §5, §7)
-                //    - matmul / standalone lm_head -> L1
-                // 4. Missing roles:
-                //    - file-level r9v.layout_id (L0 / L1 / L1S) (note: layout_id is file-level only per Spec 2 §6; no per-tensor layout_id key)
-                //    - default L1
-                let layout = if is_sparse {
-                    crate::Layout::L1S
-                } else if info.dims.len() == 1 {
-                    crate::Layout::L0
-                } else if let Some(roles) = &parsed_roles {
-                    if roles.as_slice() == [crate::meta::Role::Embed, crate::meta::Role::LmHead] {
-                        crate::Layout::L1
-                    } else if roles.contains(&crate::meta::Role::Embed)
-                        || roles.contains(&crate::meta::Role::NgramTable)
-                        || roles.contains(&crate::meta::Role::Vector)
-                    {
-                        crate::Layout::L0
-                    } else {
-                        crate::Layout::L1
-                    }
-                } else if let Some(val) = self.kv("r9v.layout_id") {
-                    match val {
-                        KvValue::Str(s) => match s.to_ascii_lowercase().as_str() {
-                            "l0" => crate::Layout::L0,
-                            "l1s" => crate::Layout::L1S,
-                            "l1" => crate::Layout::L1,
-                            _ => return Err(FormatError::UnknownLayout { value: s.clone() }),
-                        },
-                        other => {
-                            return Err(FormatError::KvTypeMismatch {
-                                key: "r9v.layout_id".to_owned(),
-                                found: other.kv_type().name(),
-                                expected: "STRING",
-                            });
-                        }
-                    }
-                } else {
-                    crate::Layout::L1
-                };
-
-                let regions = entry_regions(r9v_type.scheme(), layout, n, k)?;
-
-                // If explicit r9v.tensor.<name>.regions metadata is present,
-                // strictly validate typing, offset consistency, and agreement
-                // with derived entry geometry (Spec 2 §6; card A2.5).
-                let regions_key = format!("r9v.tensor.{}.regions", info.name);
-                if let Some(val) = self.kv(&regions_key) {
-                    match val {
-                        KvValue::Array { elem, items } => {
-                            if *elem != KvType::U64 {
-                                return Err(FormatError::KvTypeMismatch {
-                                    key: regions_key,
-                                    found: elem.name(),
-                                    expected: "UINT64",
-                                });
-                            }
-                            if items.len() != 3 {
+                    let sparse_key = format!("r9v.tensor.{}.sparse", info.name);
+                    if let Some(val) = self.kv(&sparse_key) {
+                        match val {
+                            KvValue::Str(s) if s == "none" => {}
+                            KvValue::Str(s) if s == "s24" => {
                                 return Err(FormatError::Malformed {
                                     offset: 0,
                                     detail: format!(
-                                        "tensor {:?} regions has {} item(s), expected 3 (Spec 2 §6)",
+                                        "unquantized tensor {:?} cannot be sparse (Spec 2 §4)",
                                         info.name,
-                                        items.len()
                                     ),
                                 });
                             }
-                            let mut explicit = [0u64; 3];
-                            for (i, item) in items.iter().enumerate() {
-                                match item {
-                                    KvValue::U64(v) => explicit[i] = *v,
-                                    other => {
-                                        return Err(FormatError::KvTypeMismatch {
-                                            key: regions_key,
-                                            found: other.kv_type().name(),
-                                            expected: "UINT64",
-                                        });
-                                    }
-                                }
-                            }
-                            if explicit[0] != 0
-                                || explicit[0] > explicit[1]
-                                || explicit[1] > explicit[2]
-                                || explicit[1] % 256 != 0
-                            {
+                            KvValue::Str(s) => {
                                 return Err(FormatError::Malformed {
                                     offset: 0,
                                     detail: format!(
-                                        "tensor {:?} has invalid explicit region offsets {explicit:?} (Spec 2 §6)",
+                                        "tensor {:?} sparse value {s:?}: expected none or s24 (Spec 2 §4)",
                                         info.name
                                     ),
                                 });
                             }
-                            let expected = regions.offsets();
-                            if explicit != expected {
-                                return Err(FormatError::Malformed {
-                                    offset: 0,
-                                    detail: format!(
-                                        "tensor {:?} explicit regions {explicit:?} do not match derived regions {expected:?} (Spec 2 §6)",
-                                        info.name
-                                    ),
+                            other => {
+                                return Err(FormatError::KvTypeMismatch {
+                                    key: sparse_key,
+                                    found: other.kv_type().name(),
+                                    expected: "STRING",
                                 });
                             }
                         }
-                        other => {
-                            return Err(FormatError::KvTypeMismatch {
-                                key: regions_key,
-                                found: other.kv_type().name(),
-                                expected: "ARRAY",
+                    }
+
+                    if info.dims.len() != 1 {
+                        return Err(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "native F32 tensor {:?} must be 1D (got {} dims; Spec 2 §3.3)",
+                                info.name,
+                                info.dims.len(),
+                            ),
+                        });
+                    }
+
+                    let parsed_roles = self.parse_tensor_roles(&info.name)?;
+                    match parsed_roles.as_deref() {
+                        Some([crate::meta::Role::Vector]) => {}
+                        Some(roles) => {
+                            return Err(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "native F32 tensor {:?} declared roles {:?}, expected explicitly [vector] (Spec 2 §3.3, §4)",
+                                    info.name,
+                                    roles,
+                                ),
+                            });
+                        }
+                        None => {
+                            return Err(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "native F32 tensor {:?} is missing required explicit role [vector] (Spec 2 §3.3, §4)",
+                                    info.name,
+                                ),
                             });
                         }
                     }
-                }
 
-                Ok(regions.entry_bytes)
+                    let elems = info.n_elems().ok_or_else(|| FormatError::Overflow {
+                        what: "tensor n_elems",
+                        detail: format!("tensor {:?}", info.name),
+                    })?;
+                    let values_bytes = elems.checked_mul(4).ok_or_else(|| FormatError::Overflow {
+                        what: "tensor values_bytes",
+                        detail: format!("tensor {:?}", info.name),
+                    })?;
+                    let entry_bytes =
+                        align_up(values_bytes, NATIVE_ALIGNMENT).ok_or_else(|| {
+                            FormatError::Overflow {
+                                what: "tensor entry_bytes",
+                                detail: format!("values_bytes={values_bytes}"),
+                            }
+                        })?;
+                    self.validate_explicit_regions_retained(&info.name, entry_bytes)?;
+                    Ok(entry_bytes)
+                }
+                _ => Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!(
+                        "native container contains unsupported tensor type {:?} for tensor {:?} (Spec 2 §3.3, §6)",
+                        info.dtype.name(),
+                        info.name
+                    ),
+                }),
             }
-            _ => {
-                if let Some(nbytes) = info.dtype.data_nbytes(&info.dims) {
-                    Ok(nbytes)
-                } else if info.dtype.quant_size().is_none() {
+        } else {
+            // Standard no-r9v GGUF retains wire semantics
+            if let Some(nbytes) = info.dtype.data_nbytes(&info.dims) {
+                Ok(nbytes)
+            } else if info.dims.is_empty() {
+                Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!("tensor {:?} has zero dimensions", info.name),
+                })
+            } else if info.dims.contains(&0) {
+                Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!(
+                        "tensor {:?} has zero dimension in {:?}",
+                        info.name, info.dims
+                    ),
+                })
+            } else if let Some((block_len, _)) = info.dtype.quant_size() {
+                let block_len = block_len as u64;
+                if block_len == 0 || !info.dims[0].is_multiple_of(block_len) {
                     Err(FormatError::Malformed {
                         offset: 0,
                         detail: format!(
-                            "tensor {:?} ({}): no wire block size is known",
+                            "tensor {:?} ({}): innermost dimension {} is not a multiple of block length {}",
                             info.name,
                             info.dtype.name(),
+                            info.dims[0],
+                            block_len,
                         ),
                     })
                 } else {
@@ -1525,6 +2056,15 @@ impl GgufFile {
                         ),
                     })
                 }
+            } else {
+                Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!(
+                        "tensor {:?} ({}): no wire block size is known",
+                        info.name,
+                        info.dtype.name(),
+                    ),
+                })
             }
         }
     }
@@ -1536,7 +2076,6 @@ impl GgufFile {
             offset: 0,
             detail: format!("no tensor named {name:?} in this shard"),
         })?;
-        let nbytes = self.tensor_nbytes(info)?;
         let start = self.data_start.checked_add(info.offset).ok_or_else(|| {
             FormatError::BadTensorRange {
                 name: info.name.clone(),
@@ -1545,6 +2084,18 @@ impl GgufFile {
                 reason: "data_start + offset overflows".to_owned(),
             }
         })?;
+        if !info.offset.is_multiple_of(self.alignment) {
+            return Err(FormatError::BadTensorRange {
+                name: info.name.clone(),
+                start,
+                end: start,
+                reason: format!(
+                    "tensor offset {} is not a multiple of alignment {}",
+                    info.offset, self.alignment
+                ),
+            });
+        }
+        let nbytes = self.tensor_nbytes(info)?;
         let end = start
             .checked_add(nbytes)
             .ok_or_else(|| FormatError::BadTensorRange {
@@ -1564,16 +2115,20 @@ impl GgufFile {
         Ok(&bytes[start as usize..end as usize])
     }
 
+    /// `true` when this file is a native R9V container (Spec 2 §6; card A2.5).
+    pub fn is_native(&self) -> bool {
+        self.kvs.iter().any(|kv| kv.key.starts_with("r9v."))
+            || self
+                .tensors
+                .iter()
+                .any(|t| matches!(t.dtype, TensorType::R9v(_)))
+    }
+
     /// `true` when every tensor has a standard upstream id and no
     /// `r9v.*` key is present: a standard GGUF that loads through
     /// repack (Spec 2 §6; card A2.5).
     pub fn is_standard_gguf(&self) -> bool {
-        let no_r9v = !self.kvs.iter().any(|kv| kv.key.starts_with("r9v."));
-        let all_standard = self
-            .tensors
-            .iter()
-            .all(|t| !matches!(t.dtype, TensorType::R9v(_) | TensorType::Unknown(_)));
-        no_r9v && all_standard
+        !self.is_native()
     }
 
     /// `xxh3` of one tensor entry's bytes (Spec 2 §7 step 6, §10:
@@ -1587,24 +2142,238 @@ impl GgufFile {
     /// size ‖ shard count)`. The hashed slices are the exact raw
     /// ranges recorded at parse, so the fingerprint is stable across
     /// runs and machines for identical files.
-    pub fn file_fp(&self, bytes: &[u8], shard_count: u64) -> u128 {
+    pub fn file_fp(&self, bytes: &[u8], shard_count: u64) -> Result<u128, FormatError> {
+        let max_needed = self
+            .header_range
+            .1
+            .max(self.ti_range.1)
+            .max(self.kv_range.1);
+        if (bytes.len() as u64) < max_needed {
+            return Err(FormatError::Truncated {
+                offset: bytes.len() as u64,
+                need: max_needed - bytes.len() as u64,
+                what: "file_fp metadata bytes",
+            });
+        }
         let slice = |range: (u64, u64)| -> &[u8] {
             let (start, end) = range;
-            let len = bytes.len() as u64;
-            let start = start.min(len) as usize;
-            let end = end.min(len).max(start as u64) as usize;
-            &bytes[start..end]
+            &bytes[start as usize..end as usize]
         };
-        // Internal invariant: the hasher accepts any byte string, so
-        // these writes cannot fail; lengths are fixed below.
         let mut input = Vec::new();
         input.extend_from_slice(slice(self.header_range));
         input.extend_from_slice(slice(self.ti_range));
         input.extend_from_slice(slice(self.kv_range));
         input.extend_from_slice(&self.file_size.to_le_bytes());
         input.extend_from_slice(&shard_count.to_le_bytes());
-        r9v_common::xxh3_128(&input)
+        Ok(r9v_common::xxh3_128(&input))
     }
+}
+
+/// Checks one native tensor's declared `r9v.tensor.<name>.scheme`
+/// against its tensor-info type id (Spec 2 §4, §6; card A2.5).
+///
+/// An absent key is accepted (`parse_r9v_meta` populates it from the
+/// type id). A present key must be a string (`KvTypeMismatch`
+/// otherwise), must parse through the closed [`crate::SchemeId`] set
+/// (`UnknownScheme` otherwise), and must equal the type id's scheme
+/// (`SchemeMismatch` otherwise, with the same field shape
+/// `parse_r9v_meta` reports).
+fn check_r9v_tensor_scheme<'a>(
+    lookup: impl Fn(&str) -> Option<&'a KvValue>,
+    name: &str,
+    r9v_type: R9vTensorType,
+) -> Result<(), FormatError> {
+    let scheme_key = format!("r9v.tensor.{name}.scheme");
+    match lookup(&scheme_key) {
+        None => Ok(()),
+        Some(KvValue::Str(s)) => {
+            let declared = crate::SchemeId::from_name(s)?;
+            if declared != r9v_type.scheme() {
+                return Err(FormatError::SchemeMismatch {
+                    scheme: declared.name(),
+                    expected: r9v_type.scheme().name(),
+                    got: declared.name(),
+                });
+            }
+            Ok(())
+        }
+        Some(other) => Err(FormatError::KvTypeMismatch {
+            key: scheme_key,
+            found: other.kv_type().name(),
+            expected: "STRING",
+        }),
+    }
+}
+
+fn parse_tensor_roles<'a>(
+    lookup: impl Fn(&str) -> Option<&'a KvValue>,
+    name: &str,
+) -> Result<Option<Vec<crate::meta::Role>>, FormatError> {
+    let roles_key = format!("r9v.tensor.{name}.roles");
+    match lookup(&roles_key) {
+        Some(KvValue::Array { elem, items }) => {
+            if *elem != KvType::Str {
+                return Err(FormatError::KvTypeMismatch {
+                    key: roles_key.clone(),
+                    found: elem.name(),
+                    expected: "STRING",
+                });
+            }
+            if items.is_empty() {
+                return Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!("tensor {name:?} roles array is empty (Spec 2 §4)"),
+                });
+            }
+            let mut parsed = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    KvValue::Str(s) => match crate::meta::Role::parse(s) {
+                        Ok(role) => parsed.push(role),
+                        Err(_) => {
+                            return Err(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "tensor {name:?} has unknown role {s:?} (Spec 2 §4)"
+                                ),
+                            });
+                        }
+                    },
+                    other => {
+                        return Err(FormatError::KvTypeMismatch {
+                            key: roles_key.clone(),
+                            found: other.kv_type().name(),
+                            expected: "STRING",
+                        });
+                    }
+                }
+            }
+            // Spec 2 §4 closed set: [matmul] | [embed] | [lm_head] | [embed, lm_head] | [ngram_table] | [vector]
+            let is_valid_combo = matches!(
+                parsed.as_slice(),
+                [crate::meta::Role::Matmul]
+                    | [crate::meta::Role::Embed]
+                    | [crate::meta::Role::LmHead]
+                    | [crate::meta::Role::NgramTable]
+                    | [crate::meta::Role::Vector]
+                    | [crate::meta::Role::Embed, crate::meta::Role::LmHead]
+            );
+            if !is_valid_combo {
+                return Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!(
+                        "tensor {name:?} has invalid roles combination {parsed:?} (Spec 2 §4)"
+                    ),
+                });
+            }
+            Ok(Some(parsed))
+        }
+        Some(other) => Err(FormatError::KvTypeMismatch {
+            key: roles_key.clone(),
+            found: other.kv_type().name(),
+            expected: "ARRAY",
+        }),
+        None => Ok(None),
+    }
+}
+
+fn parse_explicit_regions(
+    val: &KvValue,
+    regions_key: &str,
+    name: &str,
+) -> Result<[u64; 3], FormatError> {
+    match val {
+        KvValue::Array { elem, items } => {
+            if *elem != KvType::U64 {
+                return Err(FormatError::KvTypeMismatch {
+                    key: regions_key.to_owned(),
+                    found: elem.name(),
+                    expected: "UINT64",
+                });
+            }
+            if items.len() != 3 {
+                return Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!(
+                        "tensor {name:?} regions has {} item(s), expected 3 (Spec 2 §6)",
+                        items.len()
+                    ),
+                });
+            }
+            let mut explicit = [0u64; 3];
+            for (i, item) in items.iter().enumerate() {
+                match item {
+                    KvValue::U64(v) => explicit[i] = *v,
+                    other => {
+                        return Err(FormatError::KvTypeMismatch {
+                            key: regions_key.to_owned(),
+                            found: other.kv_type().name(),
+                            expected: "UINT64",
+                        });
+                    }
+                }
+            }
+            if explicit[0] != 0
+                || explicit[0] > explicit[1]
+                || explicit[1] > explicit[2]
+                || explicit[1] % 256 != 0
+            {
+                return Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!(
+                        "tensor {name:?} has invalid explicit region offsets {explicit:?} (Spec 2 §6)"
+                    ),
+                });
+            }
+            Ok(explicit)
+        }
+        other => Err(FormatError::KvTypeMismatch {
+            key: regions_key.to_owned(),
+            found: other.kv_type().name(),
+            expected: "ARRAY",
+        }),
+    }
+}
+
+fn validate_explicit_regions<'a>(
+    lookup: impl Fn(&str) -> Option<&'a KvValue>,
+    name: &str,
+    expected: [u64; 3],
+) -> Result<(), FormatError> {
+    let regions_key = format!("r9v.tensor.{name}.regions");
+    if let Some(val) = lookup(&regions_key) {
+        let explicit = parse_explicit_regions(val, &regions_key, name)?;
+        if explicit != expected {
+            return Err(FormatError::Malformed {
+                offset: 0,
+                detail: format!(
+                    "tensor {name:?} explicit regions {explicit:?} do not match derived regions {expected:?} (Spec 2 §6)"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_explicit_regions_retained<'a>(
+    lookup: impl Fn(&str) -> Option<&'a KvValue>,
+    name: &str,
+    entry_bytes: u64,
+) -> Result<(), FormatError> {
+    let regions_key = format!("r9v.tensor.{name}.regions");
+    if let Some(val) = lookup(&regions_key) {
+        let explicit = parse_explicit_regions(val, &regions_key, name)?;
+        let expected = [0, entry_bytes, entry_bytes];
+        if explicit != expected {
+            return Err(FormatError::Malformed {
+                offset: 0,
+                detail: format!(
+                    "tensor {name:?} explicit regions {explicit:?} do not match derived regions {expected:?} (Spec 2 §6)"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Encodes one metadata value in gguf-py `_pack_val` order (card
@@ -1701,7 +2470,15 @@ impl GgufWriter {
                 key: key.to_owned(),
             });
         }
-        if let KvValue::Array { items, .. } = &value {
+        if let KvValue::Array { elem, items } = &value {
+            if *elem == KvType::Array {
+                return Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!(
+                        "metadata key {key:?}: declared array element type cannot be Array"
+                    ),
+                });
+            }
             for item in items {
                 if matches!(item, KvValue::Array { .. }) {
                     return Err(FormatError::Malformed {
@@ -1709,6 +2486,13 @@ impl GgufWriter {
                         detail: format!(
                             "metadata key {key:?}: nested arrays are not valid GGUF metadata"
                         ),
+                    });
+                }
+                if item.kv_type() != *elem {
+                    return Err(FormatError::KvTypeMismatch {
+                        key: key.to_owned(),
+                        found: item.kv_type().name(),
+                        expected: elem.name(),
                     });
                 }
             }
@@ -1736,15 +2520,134 @@ impl GgufWriter {
                 name: name.to_owned(),
             });
         }
+        if shape.is_empty() {
+            return Err(FormatError::Malformed {
+                offset: 0,
+                detail: format!("tensor {name:?}: shape cannot be empty"),
+            });
+        }
+        for &dim in shape {
+            if dim == 0 {
+                return Err(FormatError::Malformed {
+                    offset: 0,
+                    detail: format!("tensor {name:?}: shape contains zero dimension"),
+                });
+            }
+        }
         let mut file_dims = shape.to_vec();
         file_dims.reverse();
-        if let Some(expected) = dtype.data_nbytes(&file_dims) {
-            if expected != data.len() as u64 {
-                return Err(FormatError::LengthMismatch {
-                    what: "tensor data",
-                    expected,
-                    got: data.len() as u64,
-                });
+        match dtype {
+            TensorType::R9v(_) => {
+                if data.is_empty() || !((data.len() as u64).is_multiple_of(NATIVE_ALIGNMENT)) {
+                    return Err(FormatError::LengthMismatch {
+                        what: "native tensor data",
+                        expected: NATIVE_ALIGNMENT,
+                        got: data.len() as u64,
+                    });
+                }
+            }
+            TensorType::F16 | TensorType::BF16 => {
+                let wire_len =
+                    dtype
+                        .data_nbytes(&file_dims)
+                        .ok_or_else(|| FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "tensor {name:?}: invalid shape {shape:?} for type {dtype:?}"
+                            ),
+                        })?;
+                let l0_len =
+                    align_up(wire_len, NATIVE_ALIGNMENT).ok_or_else(|| FormatError::Overflow {
+                        what: "tensor l0 len",
+                        detail: format!("wire_len={wire_len}"),
+                    })?;
+                let k_res = u32::try_from(file_dims[0]).ok();
+                let n_res = if file_dims.len() == 1 {
+                    Some(1u32)
+                } else {
+                    let mut prod: Option<u64> = Some(1);
+                    for d in &file_dims[1..] {
+                        prod = prod.and_then(|p| p.checked_mul(*d));
+                    }
+                    prod.and_then(|p| u32::try_from(p).ok())
+                };
+                let l1_len = match (k_res, n_res) {
+                    (Some(k), Some(n)) => crate::layout::PaddedDims::new(n, k, None)
+                        .ok()
+                        .and_then(|dims| {
+                            dims.value_region_bytes(crate::layout::Packing::Half16).ok()
+                        })
+                        .and_then(|vb| align_up(vb, NATIVE_ALIGNMENT)),
+                    _ => None,
+                };
+                let actual = data.len() as u64;
+                let is_valid = actual == wire_len || actual == l0_len || l1_len == Some(actual);
+                if !is_valid {
+                    return Err(FormatError::LengthMismatch {
+                        what: "tensor data",
+                        expected: wire_len,
+                        got: actual,
+                    });
+                }
+            }
+            TensorType::F32 => {
+                let wire_len =
+                    dtype
+                        .data_nbytes(&file_dims)
+                        .ok_or_else(|| FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "tensor {name:?}: invalid shape {shape:?} for type {dtype:?}"
+                            ),
+                        })?;
+                let l0_len = if file_dims.len() == 1 {
+                    align_up(wire_len, NATIVE_ALIGNMENT)
+                } else {
+                    None
+                };
+                let actual = data.len() as u64;
+                let is_valid = actual == wire_len || l0_len == Some(actual);
+                if !is_valid {
+                    return Err(FormatError::LengthMismatch {
+                        what: "tensor data",
+                        expected: wire_len,
+                        got: actual,
+                    });
+                }
+            }
+            _ => {
+                if let Some((block_len, _)) = dtype.quant_size() {
+                    let file_dim0 = file_dims[0];
+                    if block_len == 0 || !file_dim0.is_multiple_of(block_len as u64) {
+                        return Err(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "tensor {name:?}: innermost dimension {file_dim0} is not a multiple of block length {block_len}",
+                            ),
+                        });
+                    }
+                    let expected =
+                        dtype
+                            .data_nbytes(&file_dims)
+                            .ok_or_else(|| FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "tensor {name:?}: invalid shape {shape:?} for type {dtype:?}"
+                                ),
+                            })?;
+                    if expected != data.len() as u64 {
+                        return Err(FormatError::LengthMismatch {
+                            what: "tensor data",
+                            expected,
+                            got: data.len() as u64,
+                        });
+                    }
+                } else {
+                    return Err(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!("tensor {name:?}: unsupported type {dtype:?}"),
+                    });
+                }
             }
         }
         self.tensors.push(OutTensor {
@@ -1754,6 +2657,11 @@ impl GgufWriter {
             data,
         });
         Ok(())
+    }
+
+    /// Returns the metadata value for `key`, if present.
+    pub fn kv(&self, key: &str) -> Option<&KvValue> {
+        self.kvs.iter().find(|kv| kv.key == key).map(|kv| &kv.value)
     }
 
     /// Returns the queued metadata entries in order.
@@ -1775,6 +2683,510 @@ impl GgufWriter {
     /// arithmetic is checked; sizes that overflow fail instead of
     /// wrapping.
     pub fn emit(&self) -> Result<Vec<u8>, FormatError> {
+        let is_native = self.kvs.iter().any(|kv| kv.key.starts_with("r9v."))
+            || self
+                .tensors
+                .iter()
+                .any(|t| matches!(t.dtype, TensorType::R9v(_)));
+
+        if is_native {
+            if self.alignment != 4096 {
+                return Err(FormatError::InvalidAlignment {
+                    value: self.alignment,
+                });
+            }
+
+            match self.kv("r9v.format_version") {
+                Some(KvValue::U32(v)) => accept_format_version(Some(*v))?,
+                Some(other) => {
+                    return Err(FormatError::KvTypeMismatch {
+                        key: "r9v.format_version".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: "UINT32",
+                    });
+                }
+                None => {
+                    return Err(FormatError::MissingKey {
+                        key: "r9v.format_version".to_owned(),
+                    });
+                }
+            }
+
+            let global_layout = match self.kv("r9v.layout_id") {
+                Some(KvValue::Str(s)) => {
+                    let canonical = match s.as_str() {
+                        "L0" => "l0",
+                        "L1" => "l1",
+                        "L1S" => "l1s",
+                        _ => s.as_str(),
+                    };
+                    crate::Layout::from_name(canonical)?
+                }
+                Some(other) => {
+                    return Err(FormatError::KvTypeMismatch {
+                        key: "r9v.layout_id".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: "STRING",
+                    });
+                }
+                None => {
+                    return Err(FormatError::MissingKey {
+                        key: "r9v.layout_id".to_owned(),
+                    });
+                }
+            };
+
+            for t in &self.tensors {
+                let mut file_dims = t.shape.clone();
+                file_dims.reverse();
+
+                match t.dtype {
+                    TensorType::R9v(r9v_type) => {
+                        let k = u32::try_from(file_dims[0]).map_err(|_| FormatError::Overflow {
+                            what: "tensor k dim",
+                            detail: format!("tensor {:?} dim[0]={}", t.name, file_dims[0]),
+                        })?;
+                        let n = if file_dims.len() == 1 {
+                            1u32
+                        } else {
+                            let mut prod: u64 = 1;
+                            for d in &file_dims[1..] {
+                                prod =
+                                    prod.checked_mul(*d).ok_or_else(|| FormatError::Overflow {
+                                        what: "tensor n dims product",
+                                        detail: format!("tensor {:?}", t.name),
+                                    })?;
+                            }
+                            u32::try_from(prod).map_err(|_| FormatError::Overflow {
+                                what: "tensor n dim",
+                                detail: format!("tensor {:?} product={prod}", t.name),
+                            })?
+                        };
+
+                        let scheme_key = format!("r9v.tensor.{}.scheme", t.name);
+                        if let Some(val) = self.kv(&scheme_key) {
+                            match val {
+                                KvValue::Str(s) => {
+                                    if s != r9v_type.scheme().name() {
+                                        return Err(FormatError::Malformed {
+                                            offset: 0,
+                                            detail: format!(
+                                                "tensor {:?} declared scheme {:?}, expected {:?} (Spec 2 §4)",
+                                                t.name,
+                                                s,
+                                                r9v_type.scheme().name()
+                                            ),
+                                        });
+                                    }
+                                }
+                                other => {
+                                    return Err(FormatError::KvTypeMismatch {
+                                        key: scheme_key,
+                                        found: other.kv_type().name(),
+                                        expected: "STRING",
+                                    });
+                                }
+                            }
+                        }
+
+                        let sparse_key = format!("r9v.tensor.{}.sparse", t.name);
+                        let is_sparse = match self.kv(&sparse_key) {
+                            Some(KvValue::Str(s)) => match s.as_str() {
+                                "none" => false,
+                                "s24" => true,
+                                _ => {
+                                    return Err(FormatError::Malformed {
+                                        offset: 0,
+                                        detail: format!(
+                                            "tensor {:?} sparse value {s:?}: expected none or s24 (Spec 2 §4)",
+                                            t.name
+                                        ),
+                                    });
+                                }
+                            },
+                            Some(other) => {
+                                return Err(FormatError::KvTypeMismatch {
+                                    key: sparse_key,
+                                    found: other.kv_type().name(),
+                                    expected: "STRING",
+                                });
+                            }
+                            None => false,
+                        };
+
+                        let parsed_roles = parse_tensor_roles(|k| self.kv(k), &t.name)?;
+
+                        if file_dims.len() == 1 {
+                            if is_sparse {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "1D vector {:?} cannot be sparse (Spec 2 §4, §5)",
+                                        t.name
+                                    ),
+                                });
+                            }
+                            if let Some(roles) = &parsed_roles {
+                                if roles != &[crate::meta::Role::Vector] {
+                                    return Err(FormatError::Malformed {
+                                        offset: 0,
+                                        detail: format!(
+                                            "1D tensor {:?} has non-vector role {roles:?} (Spec 2 §4, §5)",
+                                            t.name
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+
+                        if is_sparse {
+                            if let Some(roles) = &parsed_roles {
+                                if roles != &[crate::meta::Role::Matmul] {
+                                    return Err(FormatError::Malformed {
+                                        offset: 0,
+                                        detail: format!(
+                                            "sparse tensor {:?} has non-matmul role {roles:?} (Spec 2 §4, §5)",
+                                            t.name
+                                        ),
+                                    });
+                                }
+                            }
+                            if !matches!(
+                                r9v_type.scheme(),
+                                crate::SchemeId::I8R
+                                    | crate::SchemeId::I8B128
+                                    | crate::SchemeId::I4K
+                                    | crate::SchemeId::E4M3B128
+                            ) {
+                                return Err(FormatError::UnsupportedLayout {
+                                    scheme: r9v_type.scheme().name(),
+                                    layout: crate::Layout::L1S.name(),
+                                });
+                            }
+                        }
+
+                        let layout = if is_sparse {
+                            crate::Layout::L1S
+                        } else if file_dims.len() == 1 {
+                            crate::Layout::L0
+                        } else if let Some(roles) = &parsed_roles {
+                            if roles.as_slice()
+                                == [crate::meta::Role::Embed, crate::meta::Role::LmHead]
+                            {
+                                crate::Layout::L1
+                            } else if roles.contains(&crate::meta::Role::Embed)
+                                || roles.contains(&crate::meta::Role::NgramTable)
+                                || roles.contains(&crate::meta::Role::Vector)
+                            {
+                                crate::Layout::L0
+                            } else {
+                                crate::Layout::L1
+                            }
+                        } else {
+                            global_layout
+                        };
+
+                        let regions = entry_regions(r9v_type.scheme(), layout, n, k)?;
+                        validate_explicit_regions(|k| self.kv(k), &t.name, regions.offsets())?;
+                        if (t.data.len() as u64) != regions.entry_bytes {
+                            return Err(FormatError::LengthMismatch {
+                                what: "native tensor data",
+                                expected: regions.entry_bytes,
+                                got: t.data.len() as u64,
+                            });
+                        }
+                    }
+                    TensorType::F16 | TensorType::BF16 => {
+                        let scheme_key = format!("r9v.tensor.{}.scheme", t.name);
+                        if self.kv(&scheme_key).is_some() {
+                            return Err(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "unquantized tensor {:?} ({}) cannot declare a quantization scheme",
+                                    t.name,
+                                    t.dtype.name(),
+                                ),
+                            });
+                        }
+
+                        let sparse_key = format!("r9v.tensor.{}.sparse", t.name);
+                        if let Some(val) = self.kv(&sparse_key) {
+                            match val {
+                                KvValue::Str(s) if s == "none" => {}
+                                KvValue::Str(s) if s == "s24" => {
+                                    return Err(FormatError::Malformed {
+                                        offset: 0,
+                                        detail: format!(
+                                            "unquantized tensor {:?} cannot be sparse (Spec 2 §4)",
+                                            t.name,
+                                        ),
+                                    });
+                                }
+                                KvValue::Str(s) => {
+                                    return Err(FormatError::Malformed {
+                                        offset: 0,
+                                        detail: format!(
+                                            "tensor {:?} sparse value {s:?}: expected none or s24 (Spec 2 §4)",
+                                            t.name,
+                                        ),
+                                    });
+                                }
+                                other => {
+                                    return Err(FormatError::KvTypeMismatch {
+                                        key: sparse_key,
+                                        found: other.kv_type().name(),
+                                        expected: "STRING",
+                                    });
+                                }
+                            }
+                        }
+
+                        let parsed_roles = parse_tensor_roles(|k| self.kv(k), &t.name)?;
+                        if file_dims.len() == 1 {
+                            if let Some(roles) = &parsed_roles {
+                                if roles != &[crate::meta::Role::Vector] {
+                                    return Err(FormatError::Malformed {
+                                        offset: 0,
+                                        detail: format!(
+                                            "1D tensor {:?} has non-vector role {roles:?} (Spec 2 §4, §5)",
+                                            t.name,
+                                        ),
+                                    });
+                                }
+                            }
+                        }
+
+                        let layout = if file_dims.len() == 1 {
+                            crate::Layout::L0
+                        } else if let Some(roles) = &parsed_roles {
+                            if roles.as_slice()
+                                == [crate::meta::Role::Embed, crate::meta::Role::LmHead]
+                            {
+                                crate::Layout::L1
+                            } else if roles.contains(&crate::meta::Role::Embed)
+                                || roles.contains(&crate::meta::Role::NgramTable)
+                                || roles.contains(&crate::meta::Role::Vector)
+                            {
+                                crate::Layout::L0
+                            } else {
+                                crate::Layout::L1
+                            }
+                        } else {
+                            global_layout
+                        };
+
+                        let entry_bytes = match layout {
+                            crate::Layout::L0 => {
+                                let mut elems: u64 = 1;
+                                for d in &file_dims {
+                                    elems = elems.checked_mul(*d).ok_or_else(|| {
+                                        FormatError::Overflow {
+                                            what: "tensor elems",
+                                            detail: format!("tensor {:?}", t.name),
+                                        }
+                                    })?;
+                                }
+                                let values_bytes =
+                                    elems.checked_mul(2).ok_or_else(|| FormatError::Overflow {
+                                        what: "tensor values_bytes",
+                                        detail: format!("tensor {:?}", t.name),
+                                    })?;
+                                align_up(values_bytes, NATIVE_ALIGNMENT).ok_or_else(|| {
+                                    FormatError::Overflow {
+                                        what: "tensor entry_bytes",
+                                        detail: format!("values_bytes={values_bytes}"),
+                                    }
+                                })?
+                            }
+                            crate::Layout::L1 => {
+                                let k = u32::try_from(file_dims[0]).map_err(|_| {
+                                    FormatError::Overflow {
+                                        what: "tensor k dim",
+                                        detail: format!(
+                                            "tensor {:?} dim[0]={}",
+                                            t.name, file_dims[0]
+                                        ),
+                                    }
+                                })?;
+                                let n = if file_dims.len() == 1 {
+                                    1u32
+                                } else {
+                                    let mut prod: u64 = 1;
+                                    for d in &file_dims[1..] {
+                                        prod = prod.checked_mul(*d).ok_or_else(|| {
+                                            FormatError::Overflow {
+                                                what: "tensor n dims product",
+                                                detail: format!("tensor {:?}", t.name),
+                                            }
+                                        })?;
+                                    }
+                                    u32::try_from(prod).map_err(|_| FormatError::Overflow {
+                                        what: "tensor n dim",
+                                        detail: format!("tensor {:?} product={prod}", t.name),
+                                    })?
+                                };
+                                let dims = crate::layout::PaddedDims::new(n, k, None)?;
+                                let values_bytes =
+                                    dims.value_region_bytes(crate::layout::Packing::Half16)?;
+                                align_up(values_bytes, NATIVE_ALIGNMENT).ok_or_else(|| {
+                                    FormatError::Overflow {
+                                        what: "tensor entry_bytes",
+                                        detail: format!("values_bytes={values_bytes}"),
+                                    }
+                                })?
+                            }
+                            crate::Layout::L1S => {
+                                let type_name = match t.dtype {
+                                    TensorType::F16 => "f16",
+                                    TensorType::BF16 => "bf16",
+                                    _ => "unquantized",
+                                };
+                                return Err(FormatError::UnsupportedLayout {
+                                    scheme: type_name,
+                                    layout: crate::Layout::L1S.name(),
+                                });
+                            }
+                        };
+                        validate_explicit_regions_retained(|k| self.kv(k), &t.name, entry_bytes)?;
+                        if (t.data.len() as u64) != entry_bytes {
+                            return Err(FormatError::LengthMismatch {
+                                what: "native tensor data",
+                                expected: entry_bytes,
+                                got: t.data.len() as u64,
+                            });
+                        }
+                    }
+                    TensorType::F32 => {
+                        let scheme_key = format!("r9v.tensor.{}.scheme", t.name);
+                        if self.kv(&scheme_key).is_some() {
+                            return Err(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "unquantized tensor {:?} ({}) cannot declare a quantization scheme",
+                                    t.name,
+                                    t.dtype.name(),
+                                ),
+                            });
+                        }
+
+                        let sparse_key = format!("r9v.tensor.{}.sparse", t.name);
+                        if let Some(val) = self.kv(&sparse_key) {
+                            match val {
+                                KvValue::Str(s) if s == "none" => {}
+                                KvValue::Str(s) if s == "s24" => {
+                                    return Err(FormatError::Malformed {
+                                        offset: 0,
+                                        detail: format!(
+                                            "unquantized tensor {:?} cannot be sparse (Spec 2 §4)",
+                                            t.name,
+                                        ),
+                                    });
+                                }
+                                KvValue::Str(s) => {
+                                    return Err(FormatError::Malformed {
+                                        offset: 0,
+                                        detail: format!(
+                                            "tensor {:?} sparse value {s:?}: expected none or s24 (Spec 2 §4)",
+                                            t.name,
+                                        ),
+                                    });
+                                }
+                                other => {
+                                    return Err(FormatError::KvTypeMismatch {
+                                        key: sparse_key,
+                                        found: other.kv_type().name(),
+                                        expected: "STRING",
+                                    });
+                                }
+                            }
+                        }
+
+                        if file_dims.len() != 1 {
+                            return Err(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "native F32 tensor {:?} must be 1D (got {} dims; Spec 2 §3.3)",
+                                    t.name,
+                                    file_dims.len(),
+                                ),
+                            });
+                        }
+
+                        let parsed_roles = parse_tensor_roles(|k| self.kv(k), &t.name)?;
+                        match parsed_roles.as_deref() {
+                            Some([crate::meta::Role::Vector]) => {}
+                            Some(roles) => {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "native F32 tensor {:?} declared roles {:?}, expected explicitly [vector] (Spec 2 §3.3, §4)",
+                                        t.name,
+                                        roles,
+                                    ),
+                                });
+                            }
+                            None => {
+                                return Err(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "native F32 tensor {:?} is missing required explicit role [vector] (Spec 2 §3.3, §4)",
+                                        t.name,
+                                    ),
+                                });
+                            }
+                        }
+
+                        let values_bytes =
+                            file_dims[0]
+                                .checked_mul(4)
+                                .ok_or_else(|| FormatError::Overflow {
+                                    what: "tensor values_bytes",
+                                    detail: format!("tensor {:?}", t.name),
+                                })?;
+                        let entry_bytes =
+                            align_up(values_bytes, NATIVE_ALIGNMENT).ok_or_else(|| {
+                                FormatError::Overflow {
+                                    what: "tensor entry_bytes",
+                                    detail: format!("values_bytes={values_bytes}"),
+                                }
+                            })?;
+                        validate_explicit_regions_retained(|k| self.kv(k), &t.name, entry_bytes)?;
+                        if (t.data.len() as u64) != entry_bytes {
+                            return Err(FormatError::LengthMismatch {
+                                what: "native tensor data",
+                                expected: entry_bytes,
+                                got: t.data.len() as u64,
+                            });
+                        }
+                    }
+                    _ => {
+                        return Err(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!(
+                                "native container contains unsupported tensor type {:?} for tensor {:?} (Spec 2 §3.3, §6)",
+                                t.dtype.name(),
+                                t.name,
+                            ),
+                        });
+                    }
+                }
+            }
+        } else {
+            for t in &self.tensors {
+                let mut file_dims = t.shape.clone();
+                file_dims.reverse();
+                if let Some(expected) = t.dtype.data_nbytes(&file_dims) {
+                    if (t.data.len() as u64) != expected {
+                        return Err(FormatError::LengthMismatch {
+                            what: "tensor data",
+                            expected,
+                            got: t.data.len() as u64,
+                        });
+                    }
+                }
+            }
+        }
+
         let mut out = Vec::new();
         out.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
         out.extend_from_slice(&GGUF_VERSION.to_le_bytes());
@@ -1882,27 +3294,18 @@ pub fn entry_regions(
     n: u32,
     k: u32,
 ) -> Result<EntryRegions, FormatError> {
-    use crate::layout::{l0_region_bytes, l0_row_stride_bytes, PaddedDims};
+    use crate::layout::{l0_region_bytes, PaddedDims};
     use crate::{l1s_index_region_bytes, l1s_value_dims};
     match layout {
         crate::Layout::L0 => {
-            let packing = crate::repack_packing(scheme)?;
-            let elem_bytes: u32 = match packing {
-                crate::Packing::Byte => 1,
-                crate::Packing::Half16 => 2,
-                crate::Packing::Nibble4 | crate::Packing::BitPlanes { .. } => {
-                    return Err(FormatError::UnsupportedLayout {
-                        scheme: scheme.name(),
-                        layout: layout.name(),
-                    });
-                }
-            };
-            // DECISION(A2.5): L0 stride carries one f16 record slot
-            // per row, the minimal stride under the A2.1 law that
-            // every L0 row carries trailing scale records; rejected
-            // scaleless rows because l0_row_stride_bytes requires a
-            // record slot. Spec 2 §2.1, §6.
-            let values_bytes = l0_region_bytes(n, l0_row_stride_bytes(k, elem_bytes, 1, 2)?)?;
+            // DECISION(A2.5): L0 entry geometry derives exact per-row bits via
+            // repack_bits_per_weight for every SchemeId (divisible by 8),
+            // accounting for scheme-defined scale overhead and multi-block rows;
+            // rejected fixed 1-record f16 stride because rows with multiple blocks
+            // or non-f16 records carry scheme-defined scale overhead. Spec 2 §2.1, §6, §8.
+            let (bits, _) = crate::repack_bits_per_weight(scheme, k)?;
+            let row_bytes = bits / 8;
+            let values_bytes = l0_region_bytes(n, row_bytes)?;
             let entry_bytes =
                 align_up(values_bytes, NATIVE_ALIGNMENT).ok_or_else(|| FormatError::Overflow {
                     what: "l0 entry_bytes",
@@ -1963,7 +3366,13 @@ pub fn entry_regions(
                     let indices_bytes = l1s_index_region_bytes(value_dims.tile_count())?;
                     (values_bytes, indices_bytes)
                 }
-                crate::Layout::L0 | crate::Layout::L1 => (dims.value_region_bytes(packing)?, 0),
+                crate::Layout::L0 | crate::Layout::L1 => {
+                    let value_dims = match crate::iq::scheme_iq_kind(scheme) {
+                        Some(kind) => crate::iq::iq_value_dims(&dims, kind)?,
+                        None => dims,
+                    };
+                    (value_dims.value_region_bytes(packing)?, 0)
+                }
             };
             let scales_offset =
                 align_up(values_bytes, SCALE_ALIGN).ok_or_else(|| FormatError::Overflow {
@@ -2064,9 +3473,6 @@ pub struct ShardSet {
 
 impl ShardSet {
     /// Opens an ordered shard set from already-parsed shards.
-    /// `bytes[i]` is the raw buffer shard `i` was parsed from and
-    /// is only used for fingerprint cross-checks (it may be empty
-    /// to skip them).
     pub fn open(shards: Vec<GgufFile>) -> Result<Self, FormatError> {
         if shards.is_empty() {
             return Err(FormatError::Malformed {
@@ -2090,44 +3496,79 @@ impl ShardSet {
             }
         }
         // Shard KV cross-checks: every shard's split.count must agree
-        // with the set size, and split.no must sequence 0..N.
-        for (shard_index, shard) in shards.iter().enumerate() {
-            match shard.kv("split.count") {
-                Some(KvValue::U16(count)) => {
-                    if *count as usize != shards.len() {
-                        problems.push(FormatError::Malformed {
-                            offset: 0,
-                            detail: format!(
-                                "shard {shard_index}: split.count is {count}, set holds {} shards",
-                                shards.len(),
-                            ),
-                        });
+        // with the set size, split.no must sequence 0..N, and split.tensors.count
+        // must agree with total tensors across shards (Spec 9 §3, gguf-py).
+        let has_split_decl = shards.iter().any(|s| {
+            s.kv("split.no").is_some()
+                || s.kv("split.count").is_some()
+                || s.kv("split.tensors.count").is_some()
+                || s.kvs().iter().any(|kv| kv.key.starts_with("split."))
+        });
+        let is_split_set = shards.len() > 1 || has_split_decl;
+        if is_split_set {
+            for (shard_index, shard) in shards.iter().enumerate() {
+                match shard.kv("split.count") {
+                    Some(KvValue::U16(count)) => {
+                        if *count as usize != shards.len() {
+                            problems.push(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "shard {shard_index}: split.count is {count}, set holds {} shards",
+                                    shards.len(),
+                                ),
+                            });
+                        }
                     }
+                    Some(other) => problems.push(FormatError::KvTypeMismatch {
+                        key: "split.count".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: KvType::U16.name(),
+                    }),
+                    None => problems.push(FormatError::MissingKey {
+                        key: "split.count".to_owned(),
+                    }),
                 }
-                Some(other) => problems.push(FormatError::KvTypeMismatch {
-                    key: "split.count".to_owned(),
-                    found: other.kv_type().name(),
-                    expected: KvType::U16.name(),
-                }),
-                None => {}
-            }
-            match shard.kv("split.no") {
-                Some(KvValue::U16(no)) => {
-                    if *no as usize != shard_index {
-                        problems.push(FormatError::Malformed {
-                            offset: 0,
-                            detail: format!(
-                                "shard {shard_index}: split.no is {no}, expected {shard_index}"
-                            ),
-                        });
+                match shard.kv("split.no") {
+                    Some(KvValue::U16(no)) => {
+                        if *no as usize != shard_index {
+                            problems.push(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "shard {shard_index}: split.no is {no}, expected {shard_index}"
+                                ),
+                            });
+                        }
                     }
+                    Some(other) => problems.push(FormatError::KvTypeMismatch {
+                        key: "split.no".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: KvType::U16.name(),
+                    }),
+                    None => problems.push(FormatError::MissingKey {
+                        key: "split.no".to_owned(),
+                    }),
                 }
-                Some(other) => problems.push(FormatError::KvTypeMismatch {
-                    key: "split.no".to_owned(),
-                    found: other.kv_type().name(),
-                    expected: KvType::U16.name(),
-                }),
-                None => {}
+                match shard.kv("split.tensors.count") {
+                    Some(KvValue::I32(count)) => {
+                        if *count < 0 || (*count as usize) != seen.len() {
+                            problems.push(FormatError::Malformed {
+                                offset: 0,
+                                detail: format!(
+                                    "shard {shard_index}: split.tensors.count is {count}, expected total tensor count {}",
+                                    seen.len(),
+                                ),
+                            });
+                        }
+                    }
+                    Some(other) => problems.push(FormatError::KvTypeMismatch {
+                        key: "split.tensors.count".to_owned(),
+                        found: other.kv_type().name(),
+                        expected: KvType::I32.name(),
+                    }),
+                    None => problems.push(FormatError::MissingKey {
+                        key: "split.tensors.count".to_owned(),
+                    }),
+                }
             }
         }
         FormatError::collect(problems)?;

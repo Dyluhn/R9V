@@ -19,9 +19,10 @@
 //!   with tensor table (via `llama-quantize` Q8_0); 4 tensors, 15 metadata fields.
 
 use r9v_format::{
-    accept_format_version, entry_regions, model_fp, parse_r9v_meta, r9v_tensor_type_id,
-    EntryRegions, FormatError, GgufFile, GgufWriter, Interleave, KvType, KvValue, Layout,
-    R9vTensorType, Role, SchemeId, ShardSet, Sparse, TensorType,
+    accept_format_version, entry_regions, l0_region_bytes, model_fp, parse_r9v_meta,
+    r9v_tensor_type_id, repack, EntryRegions, FormatError, GgmlType, GgufFile, GgufWriter,
+    Interleave, KvType, KvValue, Layout, R9vTensorType, Role, SchemeId, ShardSet, Sparse,
+    TensorType,
 };
 
 /// Loads a hex-encoded fixture (`*.gguf.hex`; binaries are
@@ -605,9 +606,29 @@ fn native_file_round_trip_with_full_r9v_keys() {
     assert_eq!(computed_hash, hashes[0]);
     assert_eq!(Some(computed_hash), tensor.xxh3);
 
-    let fp = file.file_fp(&bytes, 1);
+    let fp = file.file_fp(&bytes, 1).expect("file_fp");
     let model = model_fp(fp, &hashes);
-    assert_eq!(model, model_fp(file.file_fp(&bytes, 1), &hashes));
+
+    // Independent golden computation of file_fp and model_fp (Spec 9 §3):
+    let mut manual_fp_input = Vec::new();
+    manual_fp_input
+        .extend_from_slice(&bytes[file.header_range().0 as usize..file.header_range().1 as usize]);
+    manual_fp_input
+        .extend_from_slice(&bytes[file.ti_range().0 as usize..file.ti_range().1 as usize]);
+    manual_fp_input
+        .extend_from_slice(&bytes[file.kv_range().0 as usize..file.kv_range().1 as usize]);
+    manual_fp_input.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    manual_fp_input.extend_from_slice(&1u64.to_le_bytes());
+    let expected_file_fp = r9v_common::xxh3_128(&manual_fp_input);
+    assert_eq!(fp, expected_file_fp);
+
+    let mut manual_model_input = Vec::new();
+    manual_model_input.extend_from_slice(&expected_file_fp.to_le_bytes());
+    for h in &hashes {
+        manual_model_input.extend_from_slice(&h.to_le_bytes());
+    }
+    let expected_model_fp = r9v_common::xxh3_128(&manual_model_input);
+    assert_eq!(model, expected_model_fp);
     assert_ne!(model, fp);
 }
 
@@ -684,8 +705,8 @@ fn metadata_only_operations_do_not_read_tensor_payloads() {
     // File fingerprint (Spec 9 §3) covers header, table, metadata, size, shards;
     // it never reads tensor payloads, so it must be identical.
     assert_eq!(
-        poisoned_file.file_fp(&poisoned, 1),
-        orig_file.file_fp(&orig_bytes, 1)
+        poisoned_file.file_fp(&poisoned, 1).unwrap(),
+        orig_file.file_fp(&orig_bytes, 1).unwrap()
     );
 
     // R9V metadata accessors never read tensor payloads
@@ -777,20 +798,24 @@ fn tensor_type_codes_cover_the_ggufpy_table() {
 
 #[test]
 fn file_fp_and_model_fp_are_stable_and_sensitive() {
+    const GOLDEN_STANDARD_FILE_FP: u128 = 0x16236d2d1f887bbfc508ac93de6966df;
+    const GOLDEN_STANDARD_MODEL_FP: u128 = 0xd4328ed0b095fdb0d59f0d69edb95951;
+
     let bytes = standard_bytes();
     let file = GgufFile::parse(&bytes).expect("parses");
-    let fp1 = file.file_fp(&bytes, 1);
+    let fp1 = file.file_fp(&bytes, 1).unwrap();
+    assert_eq!(fp1, GOLDEN_STANDARD_FILE_FP);
     let file2 = GgufFile::parse(&bytes).expect("parses again");
-    assert_eq!(fp1, file2.file_fp(&bytes, 1));
+    assert_eq!(fp1, file2.file_fp(&bytes, 1).unwrap());
     // Shard count feeds the fingerprint.
-    assert_ne!(fp1, file.file_fp(&bytes, 2));
+    assert_ne!(fp1, file.file_fp(&bytes, 2).unwrap());
     // One flipped key byte (kept ASCII so the file still parses)
     // changes file_fp.
     let mut changed = bytes.clone();
     let kv_off = file.kv_range().0 as usize;
     changed[kv_off + 20] ^= 0x01;
     let file_changed = GgufFile::parse(&changed).expect("still parses");
-    assert_ne!(fp1, file_changed.file_fp(&changed, 1));
+    assert_ne!(fp1, file_changed.file_fp(&changed, 1).unwrap());
 
     let hashes: Vec<u64> = file
         .tensors()
@@ -802,14 +827,23 @@ fn file_fp_and_model_fp_are_stable_and_sensitive() {
         assert_eq!(*h, direct);
     }
     let model = model_fp(fp1, &hashes);
-    assert_eq!(model, model_fp(fp1, &hashes));
+    // Non-tautological golden verification: independently assemble slices and hash with xxh3_128
+    let mut manual_model_input = Vec::new();
+    manual_model_input.extend_from_slice(&fp1.to_le_bytes());
+    for h in &hashes {
+        manual_model_input.extend_from_slice(&h.to_le_bytes());
+    }
+    let expected_model_fp = r9v_common::xxh3_128(&manual_model_input);
+    assert_eq!(model, expected_model_fp);
+    assert_eq!(model, GOLDEN_STANDARD_MODEL_FP);
+
     // One flipped weight byte changes model_fp but not file_fp.
     let mut wchanged = bytes.clone();
     let w = file.tensor_bytes("w_q80", &bytes).expect("bytes");
     let start = w.as_ptr() as usize - bytes.as_ptr() as usize;
     wchanged[start] ^= 0x01;
     let wfile = GgufFile::parse(&wchanged).expect("parses");
-    assert_eq!(fp1, wfile.file_fp(&wchanged, 1));
+    assert_eq!(fp1, wfile.file_fp(&wchanged, 1).unwrap());
     let whashes: Vec<u64> = wfile
         .tensors()
         .iter()
@@ -830,19 +864,32 @@ fn format_version_acceptance_rule() {
         }
         other => panic!("expected FormatVersion, got {other:?}"),
     }
-    // The typed parser enforces the same rule on real keys.
-    let mut writer = GgufWriter::new();
+    // The writer gate refuses to emit a future format version.
+    let mut writer = GgufWriter::new().with_alignment(4096).expect("align");
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .expect("kv");
     writer
         .add_kv("r9v.format_version", KvValue::U32(9))
         .expect("kv");
     writer
         .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
         .expect("kv");
-    let bytes = writer.emit().expect("emit");
-    let file = GgufFile::parse(&bytes).expect("parses");
     assert!(matches!(
-        parse_r9v_meta(&file),
-        Err(FormatError::FormatVersion { .. })
+        writer.emit(),
+        Err(FormatError::FormatVersion { found: 9, max: 1 })
+    ));
+    // The parse gate enforces the same rule on foreign bytes.
+    let mut raw = Raw::new(0, 3);
+    raw.u32_kv("general.alignment", 4096);
+    raw.u32_kv("r9v.format_version", 9);
+    raw.str_kv("r9v.layout_id", "L1");
+    // Pad so the zero-tensor native data-section start sits inside
+    // the buffer: the rejection below must come from the version alone.
+    raw.pad_to(4096);
+    assert!(matches!(
+        GgufFile::parse(&raw.bytes),
+        Err(FormatError::FormatVersion { found: 9, max: 1 })
     ));
 }
 
@@ -924,6 +971,87 @@ impl Raw {
         self.bytes.extend_from_slice(&ty.to_le_bytes());
         self.bytes.extend_from_slice(&offset.to_le_bytes());
     }
+
+    fn u32_kv(&mut self, key: &str, v: u32) {
+        self.str_raw(key.as_bytes());
+        self.bytes.extend_from_slice(&4u32.to_le_bytes());
+        self.bytes.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn str_kv(&mut self, key: &str, v: &str) {
+        self.str_raw(key.as_bytes());
+        self.bytes.extend_from_slice(&8u32.to_le_bytes());
+        self.str_raw(v.as_bytes());
+    }
+
+    /// Pads with zeros to a multiple of `align` (the writer's data-section rule).
+    fn pad_to(&mut self, align: u64) {
+        let rem = self.bytes.len() as u64 % align;
+        if rem != 0 {
+            self.bytes
+                .extend_from_slice(&vec![0u8; (align - rem) as usize]);
+        }
+    }
+}
+
+/// Builds one single-tensor native file by hand, bypassing the
+/// writer gate so parse-time rejection stays testable (Spec 2 §6;
+/// card A2.5). `dims` are logical (outer-last, as in
+/// `GgufWriter::add_tensor`); `extra_kvs` are encoded after the
+/// required `general.alignment`, `r9v.format_version`, and
+/// `r9v.layout_id` keys.
+fn native_raw_bytes(
+    layout_id: &str,
+    extra_kvs: &[(&str, u32, Vec<u8>)],
+    tensor_name: &str,
+    dims: &[u64],
+    ty: u32,
+    payload_len: usize,
+) -> Vec<u8> {
+    let n_kv = 3 + extra_kvs.len() as u64;
+    let mut raw = Raw::new(1, n_kv);
+    raw.u32_kv("general.alignment", 4096);
+    raw.u32_kv("r9v.format_version", 1);
+    raw.str_kv("r9v.layout_id", layout_id);
+    for (key, ty, value) in extra_kvs {
+        raw.str_raw(key.as_bytes());
+        raw.bytes.extend_from_slice(&ty.to_le_bytes());
+        raw.bytes.extend_from_slice(value);
+    }
+    let mut wire: Vec<u64> = dims.to_vec();
+    wire.reverse();
+    raw.tensor(tensor_name, &wire, ty, 0);
+    raw.pad_to(4096);
+    raw.bytes.extend_from_slice(&vec![0u8; payload_len]);
+    raw.bytes
+}
+
+fn enc_str_value(s: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(s.len() as u64).to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
+    out
+}
+
+fn enc_str_array_value(items: &[&str]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&8u32.to_le_bytes());
+    out.extend_from_slice(&(items.len() as u64).to_le_bytes());
+    for item in items {
+        out.extend_from_slice(&(item.len() as u64).to_le_bytes());
+        out.extend_from_slice(item.as_bytes());
+    }
+    out
+}
+
+fn enc_u64_array_value(items: &[u64]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&10u32.to_le_bytes());
+    out.extend_from_slice(&(items.len() as u64).to_le_bytes());
+    for item in items {
+        out.extend_from_slice(&item.to_le_bytes());
+    }
+    out
 }
 
 #[test]
@@ -1081,23 +1209,32 @@ fn entry_regions_match_hand_computed_layouts() {
     );
     assert_eq!(sparse.entry_bytes % 4096, 0);
     // L0 vectors are values-only entries.
-    let l0 = entry_regions(SchemeId::I8B128, Layout::L0, 8, 64).expect("l0");
+    let l0 = entry_regions(SchemeId::I8B128, Layout::L0, 8, 128).expect("l0");
     assert_eq!(l0.values_offset, 0);
     assert_eq!(l0.scales_bytes, 0);
     assert_eq!(l0.indices_bytes, 0);
     assert_eq!(l0.scales_offset, l0.entry_bytes);
-    // Nibble packing is not an L0 layout.
+    // Invalid block divisibility for scheme fails closed.
     assert!(matches!(
-        entry_regions(SchemeId::I4K, Layout::L0, 8, 64),
-        Err(FormatError::UnsupportedLayout { .. })
+        entry_regions(SchemeId::I8B128, Layout::L0, 8, 64),
+        Err(FormatError::InvalidBlock { .. })
     ));
+    // L0 supports all schemes where block divides k, including I4K at k=256.
+    let l0_i4k = entry_regions(SchemeId::I4K, Layout::L0, 8, 256).expect("l0 i4k");
+    assert_eq!(l0_i4k.values_offset, 0);
+    assert_eq!(l0_i4k.scales_bytes, 0);
+    assert_eq!(l0_i4k.indices_bytes, 0);
+    assert_eq!(l0_i4k.entry_bytes % 4096, 0);
     // Zero dims are refused, not wrapped.
     assert!(entry_regions(SchemeId::I4K, Layout::L1, 0, 256).is_err());
 }
 
 #[test]
 fn r9v_meta_typing_collects_all_failures() {
-    let mut writer = GgufWriter::new();
+    let mut writer = GgufWriter::new().with_alignment(4096).expect("align");
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .expect("kv");
     writer
         .add_kv("r9v.format_version", KvValue::U32(1))
         .expect("kv");
@@ -1110,37 +1247,30 @@ fn r9v_meta_typing_collects_all_failures() {
     writer
         .add_kv("r9v.tensor.ghost.scheme", KvValue::Str("i4_k".to_owned()))
         .expect("kv");
+    // NOTE: the payload must be the exact derived L1 entry length
+    // (4096): the writer gate enforces exact native lengths at emit.
     writer
-        .add_tensor("real", &[2, 32], TensorType::Q4_0, vec![0u8; 2 * 18])
+        .add_tensor("real", &[2, 32], TensorType::F16, vec![0u8; 4096])
         .expect("tensor");
     writer
         .add_kv("r9v.tensor.real.act", KvValue::Str("bogus".to_owned()))
         .expect("kv");
-    writer
-        .add_kv(
-            "r9v.tensor.real.regions",
-            KvValue::Array {
-                elem: KvType::U64,
-                items: vec![KvValue::U64(0)],
-            },
-        )
-        .expect("kv");
+    // NOTE: a malformed `regions` arity never reaches `parse_r9v_meta`:
+    // both the writer gate and the container parse gate reject anything
+    // but exactly 3 region offsets first (Spec 2 §6). Region arity is
+    // covered by `test_adversarial_explicit_regions_arity` instead.
     let bytes = writer.emit().expect("emit");
     let file = GgufFile::parse(&bytes).expect("parses");
     match parse_r9v_meta(&file) {
         Err(FormatError::Multiple { problems }) => {
             let texts: Vec<String> = problems.iter().map(|e| e.to_string()).collect();
-            assert_eq!(problems.len(), 4, "{texts:?}");
+            assert_eq!(problems.len(), 3, "{texts:?}");
             assert!(
                 texts.iter().any(|t| t.contains("r9v.smoothing.folded")),
                 "{texts:?}"
             );
             assert!(texts.iter().any(|t| t.contains("ghost")), "{texts:?}");
             assert!(texts.iter().any(|t| t.contains("bogus")), "{texts:?}");
-            assert!(
-                texts.iter().any(|t| t.contains("3 region offsets")),
-                "{texts:?}"
-            );
         }
         other => panic!("expected Multiple, got {other:?}"),
     }
@@ -1152,6 +1282,11 @@ fn make_native_fixture_with_layout(
     tensors: &[(&str, &[u64], SchemeId, Vec<u8>)],
 ) -> Vec<u8> {
     let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    if !extra_kvs.iter().any(|(k, _)| *k == "general.alignment") {
+        writer
+            .add_kv("general.alignment", KvValue::U32(4096))
+            .unwrap();
+    }
     writer
         .add_kv("r9v.format_version", KvValue::U32(1))
         .unwrap();
@@ -1222,20 +1357,19 @@ fn native_tied_embed_lm_head_derives_l1_entry_length() {
 
     // Spec 2 §4 defines the closed set as exactly [embed, lm_head];
     // reversed [lm_head, embed] MUST be rejected instead of accepted.
-    let bytes_rev = make_single_native_fixture(
+    // Hand-encoded so the parse gate is tested (the writer gate refuses
+    // to emit it; see `test_adversarial_writer_rejects_invalid_metadata`).
+    let i4k_code = TensorType::R9v(R9vTensorType::new(SchemeId::I4K)).code();
+    let bytes_rev = native_raw_bytes(
+        "L1",
         &[(
             &format!("r9v.tensor.{name}.roles"),
-            KvValue::Array {
-                elem: KvType::Str,
-                items: vec![
-                    KvValue::Str("lm_head".to_owned()),
-                    KvValue::Str("embed".to_owned()),
-                ],
-            },
+            9,
+            enc_str_array_value(&["lm_head", "embed"]),
         )],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         expected_l1.entry_bytes as usize,
     );
     assert!(matches!(
@@ -1305,15 +1439,20 @@ fn native_1d_vectors_derive_l0_entry_length_even_with_l1_file_layout() {
         expected_l0.entry_bytes
     );
 
-    // 1D tensor cannot be sparse (Spec 2 §4, §5)
-    let bytes_sparse_1d = make_single_native_fixture(
+    // 1D tensor cannot be sparse (Spec 2 §4, §5). Hand-encoded: the
+    // writer gate refuses to emit this (see
+    // `test_adversarial_writer_rejects_invalid_metadata`).
+    let i8b128_code = TensorType::R9v(R9vTensorType::new(SchemeId::I8B128)).code();
+    let bytes_sparse_1d = native_raw_bytes(
+        "L1",
         &[(
             &format!("r9v.tensor.{vec_name}.sparse"),
-            KvValue::Str("s24".to_owned()),
+            8,
+            enc_str_value("s24"),
         )],
         vec_name,
         &[256],
-        SchemeId::I8B128,
+        i8b128_code,
         expected_l0.entry_bytes as usize,
     );
     assert!(matches!(
@@ -1322,17 +1461,16 @@ fn native_1d_vectors_derive_l0_entry_length_even_with_l1_file_layout() {
     ));
 
     // 1D tensor with non-vector role (e.g. matmul) is rejected
-    let bytes_bad_role = make_single_native_fixture(
+    let bytes_bad_role = native_raw_bytes(
+        "L1",
         &[(
             &format!("r9v.tensor.{vec_name}.roles"),
-            KvValue::Array {
-                elem: KvType::Str,
-                items: vec![KvValue::Str("matmul".to_owned())],
-            },
+            9,
+            enc_str_array_value(&["matmul"]),
         )],
         vec_name,
         &[256],
-        SchemeId::I8B128,
+        i8b128_code,
         expected_l0.entry_bytes as usize,
     );
     assert!(matches!(
@@ -1372,15 +1510,19 @@ fn native_l1s_sparse_entry_length_and_scheme_restrictions() {
         Err(FormatError::UnsupportedLayout { .. })
     ));
 
-    // A file with s24 on an unsupported scheme is rejected
-    let bytes_bad_scheme = make_single_native_fixture(
+    // A file with s24 on an unsupported scheme is rejected.
+    // Hand-encoded: the writer gate refuses to emit it.
+    let i8b32f_code = TensorType::R9v(R9vTensorType::new(SchemeId::I8B32F)).code();
+    let bytes_bad_scheme = native_raw_bytes(
+        "L1",
         &[(
             &format!("r9v.tensor.{name}.sparse"),
-            KvValue::Str("s24".to_owned()),
+            8,
+            enc_str_value("s24"),
         )],
         name,
         &[16, 256],
-        SchemeId::I8B32F,
+        i8b32f_code,
         4096,
     );
     assert!(matches!(
@@ -1392,16 +1534,24 @@ fn native_l1s_sparse_entry_length_and_scheme_restrictions() {
 #[test]
 fn native_metadata_closed_set_adversarial_validation() {
     let name = "test.weight";
+    let i4k_code = TensorType::R9v(R9vTensorType::new(SchemeId::I4K)).code();
+    // All cases are hand-encoded: the writer gate refuses to emit any
+    // of them (see `test_adversarial_writer_rejects_invalid_metadata`),
+    // so the writer cannot build parse-time fixtures for them.
+    let sparse_key = format!("r9v.tensor.{name}.sparse");
+    let roles_key = format!("r9v.tensor.{name}.roles");
+
+    // 0. Valid baseline: the hand encoder itself produces a clean file.
+    let baseline = native_raw_bytes("L1", &[], name, &[16, 256], i4k_code, 4096);
+    assert!(GgufFile::parse(&baseline).is_ok());
 
     // 1. Invalid per-tensor sparse string (Spec 2 §4: sparse is none | s24)
-    let bytes1 = make_single_native_fixture(
-        &[(
-            &format!("r9v.tensor.{name}.sparse"),
-            KvValue::Str("dense".to_owned()),
-        )],
+    let bytes1 = native_raw_bytes(
+        "L1",
+        &[(&sparse_key, 8, enc_str_value("dense"))],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1410,11 +1560,14 @@ fn native_metadata_closed_set_adversarial_validation() {
     ));
 
     // 2. Sparse flag wrong type (Spec 2 §4: sparse is none | s24 string)
-    let bytes2 = make_single_native_fixture(
-        &[(&format!("r9v.tensor.{name}.sparse"), KvValue::U32(1))],
+    let mut sparse_u32 = Vec::new();
+    sparse_u32.extend_from_slice(&1u32.to_le_bytes());
+    let bytes2 = native_raw_bytes(
+        "L1",
+        &[(&sparse_key, 4, sparse_u32)],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1423,17 +1576,12 @@ fn native_metadata_closed_set_adversarial_validation() {
     ));
 
     // 3. Roles array empty
-    let bytes3 = make_single_native_fixture(
-        &[(
-            &format!("r9v.tensor.{name}.roles"),
-            KvValue::Array {
-                elem: KvType::Str,
-                items: vec![],
-            },
-        )],
+    let bytes3 = native_raw_bytes(
+        "L1",
+        &[(&roles_key, 9, enc_str_array_value(&[]))],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1442,20 +1590,12 @@ fn native_metadata_closed_set_adversarial_validation() {
     ));
 
     // 4. Invalid roles combination [matmul, embed]
-    let bytes4 = make_single_native_fixture(
-        &[(
-            &format!("r9v.tensor.{name}.roles"),
-            KvValue::Array {
-                elem: KvType::Str,
-                items: vec![
-                    KvValue::Str("matmul".to_owned()),
-                    KvValue::Str("embed".to_owned()),
-                ],
-            },
-        )],
+    let bytes4 = native_raw_bytes(
+        "L1",
+        &[(&roles_key, 9, enc_str_array_value(&["matmul", "embed"]))],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1464,17 +1604,12 @@ fn native_metadata_closed_set_adversarial_validation() {
     ));
 
     // 5. Unknown role string
-    let bytes5 = make_single_native_fixture(
-        &[(
-            &format!("r9v.tensor.{name}.roles"),
-            KvValue::Array {
-                elem: KvType::Str,
-                items: vec![KvValue::Str("unknown_role".to_owned())],
-            },
-        )],
+    let bytes5 = native_raw_bytes(
+        "L1",
+        &[(&roles_key, 9, enc_str_array_value(&["unknown_role"]))],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1483,20 +1618,12 @@ fn native_metadata_closed_set_adversarial_validation() {
     ));
 
     // 6. Invalid tied role order [lm_head, embed] (Spec 2 §4 closed set requires exact [embed, lm_head])
-    let bytes6 = make_single_native_fixture(
-        &[(
-            &format!("r9v.tensor.{name}.roles"),
-            KvValue::Array {
-                elem: KvType::Str,
-                items: vec![
-                    KvValue::Str("lm_head".to_owned()),
-                    KvValue::Str("embed".to_owned()),
-                ],
-            },
-        )],
+    let bytes6 = native_raw_bytes(
+        "L1",
+        &[(&roles_key, 9, enc_str_array_value(&["lm_head", "embed"]))],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1504,16 +1631,22 @@ fn native_metadata_closed_set_adversarial_validation() {
         Err(FormatError::Malformed { .. })
     ));
 
-    // 7. Unknown file-level r9v.layout_id (Spec 2 §6; note: layout_id is file-level only, no per-tensor layout_id)
-    let bytes7 = make_native_fixture_with_layout(
-        Some("L99"),
-        &[],
-        &[(name, &[16, 256], SchemeId::I4K, vec![0u8; 4096])],
-    );
-    assert!(matches!(
-        GgufFile::parse(&bytes7),
-        Err(FormatError::UnknownLayout { .. })
-    ));
+    // 7. Unknown file-level r9v.layout_id (Spec 2 §6; note: layout_id is file-level only, no per-tensor layout_id).
+    // Both the file-level check and the per-tensor derivation report
+    // it, so the collected error is a Multiple of UnknownLayout.
+    let bytes7 = native_raw_bytes("L99", &[], name, &[16, 256], i4k_code, 4096);
+    match GgufFile::parse(&bytes7) {
+        Err(FormatError::Multiple { problems }) => {
+            assert!(!problems.is_empty());
+            assert!(
+                problems
+                    .iter()
+                    .all(|e| matches!(e, FormatError::UnknownLayout { .. })),
+                "got {problems:?}"
+            );
+        }
+        other => panic!("expected Multiple of UnknownLayout, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1522,18 +1655,17 @@ fn explicit_regions_metadata_adversarial_validation() {
     let expected_regions = entry_regions(SchemeId::I4K, Layout::L1, 16, 256).unwrap();
     assert_eq!(expected_regions.offsets(), [0, 2048, 4096]);
 
+    // Negative cases are hand-encoded: the writer gate refuses to emit
+    // forged regions, so the writer cannot build these fixtures.
+    let i4k_code = TensorType::R9v(R9vTensorType::new(SchemeId::I4K)).code();
+    let regions_key = format!("r9v.tensor.{name}.regions");
     // 1. Forged offsets disagreeing with geometry [0, 2048, 8192]
-    let bytes1 = make_single_native_fixture(
-        &[(
-            &format!("r9v.tensor.{name}.regions"),
-            KvValue::Array {
-                elem: KvType::U64,
-                items: vec![KvValue::U64(0), KvValue::U64(2048), KvValue::U64(8192)],
-            },
-        )],
+    let bytes1 = native_raw_bytes(
+        "L1",
+        &[(&regions_key, 9, enc_u64_array_value(&[0, 2048, 8192]))],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1542,17 +1674,12 @@ fn explicit_regions_metadata_adversarial_validation() {
     ));
 
     // 2. Non-zero values_offset [16, 2048, 4096]
-    let bytes2 = make_single_native_fixture(
-        &[(
-            &format!("r9v.tensor.{name}.regions"),
-            KvValue::Array {
-                elem: KvType::U64,
-                items: vec![KvValue::U64(16), KvValue::U64(2048), KvValue::U64(4096)],
-            },
-        )],
+    let bytes2 = native_raw_bytes(
+        "L1",
+        &[(&regions_key, 9, enc_u64_array_value(&[16, 2048, 4096]))],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1561,17 +1688,12 @@ fn explicit_regions_metadata_adversarial_validation() {
     ));
 
     // 3. Unaligned scale offset [0, 2000, 4096] (2000 % 256 != 0)
-    let bytes3 = make_single_native_fixture(
-        &[(
-            &format!("r9v.tensor.{name}.regions"),
-            KvValue::Array {
-                elem: KvType::U64,
-                items: vec![KvValue::U64(0), KvValue::U64(2000), KvValue::U64(4096)],
-            },
-        )],
+    let bytes3 = native_raw_bytes(
+        "L1",
+        &[(&regions_key, 9, enc_u64_array_value(&[0, 2000, 4096]))],
         name,
         &[16, 256],
-        SchemeId::I4K,
+        i4k_code,
         4096,
     );
     assert!(matches!(
@@ -1673,4 +1795,1713 @@ fn native_multi_tensor_table_order_and_offsets_validation() {
         file.entry_xxh3(t2, &bytes).unwrap(),
         r9v_common::xxh3_64(b2)
     );
+}
+
+#[test]
+fn test_gguf_wire_sizing_validates_nonempty_nonzero_and_dims0_block_divisibility() {
+    // 1. TensorType::data_nbytes validates dims
+    // Empty shape
+    assert_eq!(TensorType::Q4_0.data_nbytes(&[]), None);
+    assert_eq!(TensorType::F16.data_nbytes(&[]), None);
+    // Zero dimension anywhere in shape
+    assert_eq!(TensorType::Q4_0.data_nbytes(&[0, 32]), None);
+    assert_eq!(TensorType::Q4_0.data_nbytes(&[32, 0]), None);
+    assert_eq!(TensorType::F16.data_nbytes(&[0]), None);
+    assert_eq!(TensorType::F16.data_nbytes(&[16, 0]), None);
+    // dims[0] block divisibility for quantized wire types
+    // Q4_0 block_len is 32. dims[0] must be a multiple of 32.
+    assert_eq!(TensorType::Q4_0.data_nbytes(&[16, 2]), None);
+    assert_eq!(TensorType::Q4_0.data_nbytes(&[31, 1]), None);
+    assert_eq!(TensorType::Q4_0.data_nbytes(&[32, 1]), Some(18));
+    assert_eq!(TensorType::Q4_0.data_nbytes(&[64, 3]), Some(36 * 3));
+    // Q4_K block_len is 256.
+    assert_eq!(TensorType::Q4_K.data_nbytes(&[128, 1]), None);
+    assert_eq!(TensorType::Q4_K.data_nbytes(&[256, 1]), Some(144));
+    assert_eq!(TensorType::Q4_K.data_nbytes(&[512, 2]), Some(288 * 2));
+
+    // 2. GgufWriter rejects empty shape, zero dimensions, and indivisible dim[0]
+    let mut writer = GgufWriter::new();
+    assert!(matches!(
+        writer.add_tensor("bad_empty", &[], TensorType::Q4_0, vec![]),
+        Err(FormatError::Malformed { .. })
+    ));
+    assert!(matches!(
+        writer.add_tensor("bad_zero", &[0, 32], TensorType::Q4_0, vec![]),
+        Err(FormatError::Malformed { .. })
+    ));
+    assert!(matches!(
+        writer.add_tensor("bad_div", &[16, 1], TensorType::Q4_0, vec![0u8; 9]),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 3. Raw standard GGUF container parser rejects empty dims, zero dims, and indivisible dim[0]
+    // Raw empty dims
+    let mut raw = Raw::new(1, 0);
+    raw.tensor("empty_dims", &[], 2, 0); // 2 = Q4_0
+    raw.bytes.extend_from_slice(&[0u8; 64]);
+    assert!(matches!(
+        GgufFile::parse(&raw.bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // Raw zero dim
+    let mut raw = Raw::new(1, 0);
+    raw.tensor("zero_dim", &[0, 32], 2, 0);
+    raw.bytes.extend_from_slice(&[0u8; 64]);
+    assert!(matches!(
+        GgufFile::parse(&raw.bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // Raw indivisible dim[0]
+    let mut raw = Raw::new(1, 0);
+    raw.tensor("indivisible", &[16, 1], 2, 0);
+    raw.bytes.extend_from_slice(&[0u8; 64]);
+    assert!(matches!(
+        GgufFile::parse(&raw.bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn test_every_tensor_offset_alignment() {
+    // Default alignment is 32.
+    // If a tensor offset is not a multiple of alignment, validate() rejects it with BadTensorRange.
+    let mut raw = Raw::new(1, 0);
+    // offset 1 is not a multiple of 32
+    raw.tensor("misaligned", &[32, 1], 2, 1); // Q4_0, dims [32, 1], offset 1
+    raw.bytes.extend_from_slice(&[0u8; 128]);
+    match GgufFile::parse(&raw.bytes) {
+        Err(FormatError::BadTensorRange { name, reason, .. }) => {
+            assert_eq!(name, "misaligned");
+            assert!(
+                reason.contains("not a multiple of alignment 32"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected BadTensorRange, got {other:?}"),
+    }
+
+    // Custom alignment 64: offset 32 is aligned to 32 but NOT 64.
+    let mut raw = Raw::new(1, 1);
+    raw.kv("general.alignment", 4, &64u32.to_le_bytes());
+    raw.tensor("misaligned64", &[32, 1], 2, 32); // offset 32
+    raw.bytes.extend_from_slice(&[0u8; 256]);
+    match GgufFile::parse(&raw.bytes) {
+        Err(FormatError::BadTensorRange { name, reason, .. }) => {
+            assert_eq!(name, "misaligned64");
+            assert!(
+                reason.contains("not a multiple of alignment 64"),
+                "{reason}"
+            );
+        }
+        other => panic!("expected BadTensorRange, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_split_metadata_coherent_declarations_and_single_nonsplit_works() {
+    // 1. Single non-split file without any split.* keys parses cleanly and works with ShardSet
+    let mut writer = GgufWriter::new();
+    writer
+        .add_tensor("t0", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("nonsplit file parses");
+    let shards = ShardSet::open(vec![file]).expect("single nonsplit shard opens in ShardSet");
+    assert_eq!(shards.shards().len(), 1);
+
+    // 2. Single file declaring partial split keys fails closed
+    // Missing split.count and split.tensors.count
+    let mut writer = GgufWriter::new();
+    writer.add_kv("split.no", KvValue::U16(0)).unwrap();
+    writer
+        .add_tensor("t0", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    match GgufFile::parse(&bytes) {
+        Err(FormatError::Multiple { problems }) => {
+            assert!(problems
+                .iter()
+                .any(|p| matches!(p, FormatError::MissingKey { key } if key == "split.count")));
+            assert!(problems.iter().any(
+                |p| matches!(p, FormatError::MissingKey { key } if key == "split.tensors.count")
+            ));
+        }
+        other => panic!("expected Multiple MissingKey, got {other:?}"),
+    }
+
+    // Wrong type: split.no as U32
+    let mut writer = GgufWriter::new();
+    writer.add_kv("split.no", KvValue::U32(0)).unwrap();
+    writer.add_kv("split.count", KvValue::U16(1)).unwrap();
+    writer
+        .add_kv("split.tensors.count", KvValue::I32(1))
+        .unwrap();
+    writer
+        .add_tensor("t0", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes),
+        Err(FormatError::KvTypeMismatch { key, expected, .. }) if key == "split.no" && expected == "UINT16"
+    ));
+
+    // Incoherent values: split.count == 0
+    let mut writer = GgufWriter::new();
+    writer.add_kv("split.no", KvValue::U16(0)).unwrap();
+    writer.add_kv("split.count", KvValue::U16(0)).unwrap();
+    writer
+        .add_kv("split.tensors.count", KvValue::I32(1))
+        .unwrap();
+    writer
+        .add_tensor("t0", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // Incoherent values: split.no >= split.count
+    let mut writer = GgufWriter::new();
+    writer.add_kv("split.no", KvValue::U16(2)).unwrap();
+    writer.add_kv("split.count", KvValue::U16(2)).unwrap();
+    writer
+        .add_kv("split.tensors.count", KvValue::I32(1))
+        .unwrap();
+    writer
+        .add_tensor("t0", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // Single shard: split.count == 1 but split.tensors.count != self.tensors.len()
+    let mut writer = GgufWriter::new();
+    writer.add_kv("split.no", KvValue::U16(0)).unwrap();
+    writer.add_kv("split.count", KvValue::U16(1)).unwrap();
+    writer
+        .add_kv("split.tensors.count", KvValue::I32(5))
+        .unwrap(); // 5 != 1
+    writer
+        .add_tensor("t0", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // Complete coherent single-shard split parses cleanly
+    let mut writer = GgufWriter::new();
+    writer.add_kv("split.no", KvValue::U16(0)).unwrap();
+    writer.add_kv("split.count", KvValue::U16(1)).unwrap();
+    writer
+        .add_kv("split.tensors.count", KvValue::I32(1))
+        .unwrap();
+    writer
+        .add_tensor("t0", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("coherent single-shard split parses");
+    let shards = ShardSet::open(vec![file]).expect("coherent split ShardSet opens");
+    assert_eq!(shards.shards().len(), 1);
+
+    // 3. Multi-shard: ShardSet::open enforces complete coherent split keys across shards
+    let mut w0 = GgufWriter::new();
+    w0.add_kv("split.no", KvValue::U16(0)).unwrap();
+    w0.add_kv("split.count", KvValue::U16(2)).unwrap();
+    w0.add_kv("split.tensors.count", KvValue::I32(2)).unwrap();
+    w0.add_tensor("t0", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let b0 = w0.emit().unwrap();
+
+    let mut w1 = GgufWriter::new();
+    w1.add_kv("split.no", KvValue::U16(1)).unwrap();
+    w1.add_kv("split.count", KvValue::U16(2)).unwrap();
+    w1.add_kv("split.tensors.count", KvValue::I32(2)).unwrap();
+    w1.add_tensor("t1", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let b1 = w1.emit().unwrap();
+
+    let f0 = GgufFile::parse(&b0).unwrap();
+    let f1 = GgufFile::parse(&b1).unwrap();
+    let set = ShardSet::open(vec![f0.clone(), f1.clone()]).expect("coherent multi-shard opens");
+    assert_eq!(set.shards().len(), 2);
+    assert!(set.tensor("t0").is_some());
+    assert!(set.tensor("t1").is_some());
+
+    // Multi-shard with missing key on shard 1 fails closed
+    let mut w1_bad = GgufWriter::new();
+    w1_bad.add_kv("split.no", KvValue::U16(1)).unwrap();
+    w1_bad.add_kv("split.count", KvValue::U16(2)).unwrap();
+    // omit split.tensors.count
+    w1_bad
+        .add_tensor("t1", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let b1_bad = w1_bad.emit().unwrap();
+    let f1_bad = GgufFile::parse(&b1_bad);
+    assert!(f1_bad.is_err()); // fails validate during GgufFile::parse
+
+    // Multi-shard with count mismatch across shards fails closed in ShardSet::open
+    let mut w1_mismatch = GgufWriter::new();
+    w1_mismatch.add_kv("split.no", KvValue::U16(1)).unwrap();
+    w1_mismatch.add_kv("split.count", KvValue::U16(3)).unwrap(); // declares 3 instead of 2
+    w1_mismatch
+        .add_kv("split.tensors.count", KvValue::I32(2))
+        .unwrap();
+    w1_mismatch
+        .add_tensor("t1", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    let b1_mismatch = w1_mismatch.emit().unwrap();
+    let f1_mismatch = GgufFile::parse(&b1_mismatch).unwrap();
+    assert!(matches!(
+        ShardSet::open(vec![f0, f1_mismatch]),
+        Err(FormatError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn test_writer_arrays_reject_nested_and_mismatched_declared_element_types() {
+    let mut writer = GgufWriter::new();
+
+    // 1. Array with elem == KvType::Array is rejected
+    let res1 = writer.add_kv(
+        "nested_array",
+        KvValue::Array {
+            elem: KvType::Array,
+            items: vec![],
+        },
+    );
+    assert!(matches!(res1, Err(FormatError::Malformed { .. })));
+
+    // 2. Array containing a nested KvValue::Array item is rejected
+    let res2 = writer.add_kv(
+        "nested_item",
+        KvValue::Array {
+            elem: KvType::U32,
+            items: vec![KvValue::Array {
+                elem: KvType::U32,
+                items: vec![],
+            }],
+        },
+    );
+    assert!(matches!(res2, Err(FormatError::Malformed { .. })));
+
+    // 3. Array containing an item whose type does not match declared elem is rejected
+    let res3 = writer.add_kv(
+        "type_mismatch",
+        KvValue::Array {
+            elem: KvType::U32,
+            items: vec![KvValue::Str("not_a_u32".to_owned())],
+        },
+    );
+    assert!(matches!(
+        res3,
+        Err(FormatError::KvTypeMismatch { key, found, expected })
+            if key == "type_mismatch" && found == "STRING" && expected == "UINT32"
+    ));
+}
+
+#[test]
+fn test_native_typed_metadata_enforces_4096_alignment_and_native_scheme_agreement() {
+    // 1. Native file with alignment != 4096 is rejected at emit ...
+    let mut writer = GgufWriter::new();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    // Default alignment is 32 (not 4096)
+    assert!(matches!(
+        writer.emit(),
+        Err(FormatError::InvalidAlignment { value: 32 })
+    ));
+    // ... and foreign bytes with default alignment fail at parse.
+    let mut raw_align = Raw::new(0, 2);
+    raw_align.u32_kv("r9v.format_version", 1);
+    raw_align.str_kv("r9v.layout_id", "l1");
+    // Pad so the zero-tensor data-section start sits inside the
+    // buffer: the rejection below must come from alignment alone.
+    raw_align.pad_to(32);
+    assert!(matches!(
+        GgufFile::parse(&raw_align.bytes),
+        Err(FormatError::InvalidAlignment { value: 32 })
+    ));
+
+    // 2. Scheme agreement: meta.scheme does not match R9v tensor scheme.
+    // The writer gate refuses to emit the mismatch ...
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    let regions = entry_regions(SchemeId::I4K, Layout::L1, 16, 256).unwrap();
+    writer
+        .add_tensor(
+            "weight",
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; regions.entry_bytes as usize],
+        )
+        .unwrap();
+    // Intentionally declare mismatched scheme "i8_r" for i4_k tensor
+    writer
+        .add_kv("r9v.tensor.weight.scheme", KvValue::Str("i8_r".to_owned()))
+        .unwrap();
+    assert!(matches!(
+        writer.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("declared scheme")
+    ));
+    // ... while a foreign file with the same mismatch is rejected
+    // by the container parser itself, before the typed layer.
+    let i4k_code = TensorType::R9v(R9vTensorType::new(SchemeId::I4K)).code();
+    let scheme_key = "r9v.tensor.weight.scheme".to_owned();
+    let mismatch_bytes = native_raw_bytes(
+        "L1",
+        &[(&scheme_key, 8, enc_str_value("i8_r"))],
+        "weight",
+        &[16, 256],
+        i4k_code,
+        regions.entry_bytes as usize,
+    );
+    match GgufFile::parse(&mismatch_bytes) {
+        Err(FormatError::SchemeMismatch { expected, got, .. }) => {
+            assert_eq!(expected, "i4_k");
+            assert_eq!(got, "i8_r");
+        }
+        other => panic!("expected SchemeMismatch, got {other:?}"),
+    }
+
+    // 3. Unquantized F16/BF16/F32 cannot declare a quantization scheme.
+    // Rejected at emit ...
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer
+        .add_tensor("f16_weight", &[2, 32], TensorType::F16, vec![0u8; 128])
+        .unwrap();
+    writer
+        .add_kv(
+            "r9v.tensor.f16_weight.scheme",
+            KvValue::Str("i4_k".to_owned()),
+        )
+        .unwrap();
+    assert!(matches!(writer.emit(), Err(FormatError::Malformed { .. })));
+    // ... and at parse on foreign bytes.
+    let f16_scheme_key = "r9v.tensor.f16_weight.scheme".to_owned();
+    let f16_scheme_bytes = native_raw_bytes(
+        "L1",
+        &[(&f16_scheme_key, 8, enc_str_value("i4_k"))],
+        "f16_weight",
+        &[2, 32],
+        TensorType::F16.code(),
+        128,
+    );
+    assert!(matches!(
+        GgufFile::parse(&f16_scheme_bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 4. Native F32 must be a 1D vector (Spec 2 §3.3): a 2D F32 matrix
+    // is rejected at emit ...
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    // 2D F32 tensor with default file layout L1
+    writer
+        .add_tensor(
+            "f32_matrix",
+            &[16, 256],
+            TensorType::F32,
+            vec![0u8; 16 * 256 * 4],
+        )
+        .unwrap();
+    assert!(matches!(
+        writer.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("must be 1D")
+    ));
+    // ... and at parse on foreign bytes.
+    let f32_matrix_bytes = native_raw_bytes(
+        "L1",
+        &[],
+        "f32_matrix",
+        &[16, 256],
+        TensorType::F32.code(),
+        16 * 256 * 4,
+    );
+    assert!(matches!(
+        GgufFile::parse(&f32_matrix_bytes),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("must be 1D")
+    ));
+}
+
+#[test]
+fn test_l0_entry_geometry_exact_per_row_bits_for_every_scheme() {
+    const BLOCK_SCHEMES_ORACLE: [(SchemeId, u32, u64); 21] = [
+        (SchemeId::I8B128, 128, 1040),
+        (SchemeId::I4K, 256, 1152),
+        (SchemeId::E4M3B128, 128, 1040),
+        (SchemeId::I8B32F, 32, 272),
+        (SchemeId::I4B32F, 32, 144),
+        (SchemeId::I4B32FM, 32, 160),
+        (SchemeId::I5B32F, 32, 176),
+        (SchemeId::I5B32FM, 32, 192),
+        (SchemeId::I4Nl, 32, 144),
+        (SchemeId::I5K, 256, 1408),
+        (SchemeId::I6K, 256, 1680),
+        (SchemeId::I3K, 256, 880),
+        (SchemeId::I2K, 256, 672),
+        (SchemeId::I4Xs, 256, 1088),
+        (SchemeId::Iq3Xxs, 256, 784),
+        (SchemeId::Iq3S, 256, 880),
+        (SchemeId::Iq2Xxs, 256, 528),
+        (SchemeId::Iq2Xs, 256, 592),
+        (SchemeId::Iq2S, 256, 656),
+        (SchemeId::Iq1S, 256, 400),
+        (SchemeId::Iq1M, 256, 448),
+    ];
+
+    for (scheme, block_k, bits_per_block) in BLOCK_SCHEMES_ORACLE {
+        for num_blocks in [1, 2, 4] {
+            let k = block_k * num_blocks;
+            let n = 8;
+            let regions = entry_regions(scheme, Layout::L0, n, k).unwrap_or_else(|e| {
+                panic!("entry_regions failed for {scheme:?} L0 with k={k}: {e:?}")
+            });
+            let expected_bits_per_row = (num_blocks as u64) * bits_per_block;
+            assert_eq!(expected_bits_per_row % 8, 0);
+            let expected_row_bytes = expected_bits_per_row / 8;
+            let expected_values_bytes = l0_region_bytes(n, expected_row_bytes).unwrap();
+            assert_eq!(regions.values_offset, 0);
+            assert_eq!(regions.values_bytes, expected_values_bytes);
+            assert_eq!(regions.scales_bytes, 0);
+            assert_eq!(regions.indices_bytes, 0);
+            assert_eq!(regions.scales_offset, regions.entry_bytes);
+            assert_eq!(regions.indices_offset, regions.entry_bytes);
+            assert_eq!(regions.entry_bytes % 4096, 0);
+        }
+
+        let bad_k = block_k - 1;
+        assert!(
+            matches!(
+                entry_regions(scheme, Layout::L0, 8, bad_k),
+                Err(FormatError::InvalidBlock { .. })
+            ),
+            "expected InvalidBlock for {scheme:?} with k={bad_k}"
+        );
+    }
+
+    // Row-wise I8_R independent formula: 8*k + 16 bits per row (accounting for 16-bit f16 row scale)
+    for k in [16, 32, 64, 128, 256] {
+        let n = 8;
+        let regions = entry_regions(SchemeId::I8R, Layout::L0, n, k).unwrap();
+        let expected_bits_per_row = 8 * (k as u64) + 16;
+        assert_eq!(expected_bits_per_row % 8, 0);
+        let expected_row_bytes = expected_bits_per_row / 8;
+        let expected_values_bytes = l0_region_bytes(n, expected_row_bytes).unwrap();
+        assert_eq!(regions.values_offset, 0);
+        assert_eq!(regions.values_bytes, expected_values_bytes);
+        assert_eq!(regions.scales_bytes, 0);
+        assert_eq!(regions.indices_bytes, 0);
+        assert_eq!(regions.scales_offset, regions.entry_bytes);
+        assert_eq!(regions.indices_offset, regions.entry_bytes);
+        assert_eq!(regions.entry_bytes % 4096, 0);
+    }
+
+    // Specifically verify I4_K, bitplanes (I3Xs, I2Xs), and multiple B128 blocks
+    let i4k_l0 = entry_regions(SchemeId::I4K, Layout::L0, 8, 512).unwrap();
+    assert_eq!(i4k_l0.values_bytes, 8 * 288); // 2 blocks of 256 -> 2 * 144 B = 288 B/row
+    assert_eq!(i4k_l0.entry_bytes, 4096);
+
+    let i8b128_l0 = entry_regions(SchemeId::I8B128, Layout::L0, 8, 384).unwrap(); // 3 blocks of 128
+    assert_eq!(i8b128_l0.values_bytes, 8 * (3 * 130)); // 3 * (128 + 2) = 390 B/row -> 8 * 390 = 3120 B
+    assert_eq!(i8b128_l0.entry_bytes, 4096);
+}
+
+#[test]
+fn test_l1_grid_iq_packed_index_dims_proven_equal_to_actual_repack_regions() {
+    let cases = [
+        ("IQ4_NL", GgmlType::IQ4_NL, SchemeId::I4Nl),
+        ("IQ4_XS", GgmlType::IQ4_XS, SchemeId::I4Xs),
+        ("IQ3_XXS", GgmlType::IQ3_XXS, SchemeId::Iq3Xxs),
+        ("IQ3_S", GgmlType::IQ3_S, SchemeId::Iq3S),
+        ("IQ2_XXS", GgmlType::IQ2_XXS, SchemeId::Iq2Xxs),
+        ("IQ2_XS", GgmlType::IQ2_XS, SchemeId::Iq2Xs),
+        ("IQ2_S", GgmlType::IQ2_S, SchemeId::Iq2S),
+        ("IQ1_S", GgmlType::IQ1_S, SchemeId::Iq1S),
+        ("IQ1_M", GgmlType::IQ1_M, SchemeId::Iq1M),
+    ];
+
+    for (name, ggml, scheme) in cases {
+        let bl = ggml.block_len();
+        let bb = ggml.block_bytes() as usize;
+
+        // Test with unpadded N (n=1, n=17) and padded N (n=32), with single and multiple blocks of K
+        for (n, k) in [(1, 256), (17, 256), (32, 512)] {
+            let n_blocks = (n as usize) * (k as usize / bl as usize);
+            let mut wire = vec![0xFFu8; n_blocks * bb];
+
+            // For each block, ensure finite scales so repack succeeds
+            for block_idx in 0..n_blocks {
+                let block_slice = &mut wire[block_idx * bb..(block_idx + 1) * bb];
+                if name == "IQ1_M" {
+                    block_slice[49] = (block_slice[49] & 0x0F) | 0x30;
+                    block_slice[51] = (block_slice[51] & 0x0F) | 0xC0;
+                    block_slice[53] &= 0x0F;
+                    block_slice[55] &= 0x0F;
+                } else {
+                    block_slice[0] = 0x00;
+                    block_slice[1] = 0x3C; // f16 positive finite 1.0
+                }
+            }
+
+            let repacked = repack(ggml, &wire, n, k)
+                .unwrap_or_else(|e| panic!("repack failed for {name} ({n}, {k}): {e:?}"));
+            let regions = entry_regions(scheme, Layout::L1, n, k)
+                .unwrap_or_else(|e| panic!("entry_regions failed for {name} ({n}, {k}): {e:?}"));
+
+            // PROOF OF EQUALITY: packed index dims derived in entry_regions exactly match
+            // actual repack values length and scale length!
+            assert_eq!(
+                repacked.values.len() as u64,
+                regions.values_bytes,
+                "{name} values_bytes mismatch for shape ({n}, {k})"
+            );
+            assert_eq!(
+                repacked.scales.len() as u64,
+                regions.scales_bytes,
+                "{name} scales_bytes mismatch for shape ({n}, {k})"
+            );
+            assert_eq!(regions.indices_bytes, 0);
+            assert_eq!(regions.entry_bytes % 4096, 0);
+        }
+    }
+}
+
+#[test]
+fn test_native_retained_unquantized_types_and_unsupported_standard_fail_closed() {
+    // 1. Native file retains F16 in L1 padded to 4096
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    // [1, 64] L1 entry bytes = 4096
+    writer
+        .add_tensor("f16_small", &[1, 64], TensorType::F16, vec![0u8; 4096])
+        .unwrap();
+    // [16, 256] L1 entry bytes = 8192
+    writer
+        .add_tensor("f16_large", &[16, 256], TensorType::F16, vec![0u8; 8192])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("parses native f16");
+    assert_eq!(
+        file.tensor_nbytes(file.tensor("f16_small").unwrap())
+            .unwrap(),
+        4096
+    );
+    assert_eq!(
+        file.tensor_nbytes(file.tensor("f16_large").unwrap())
+            .unwrap(),
+        8192
+    );
+
+    // 2. Native file retains BF16 in L1 padded to 4096
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer
+        .add_tensor("bf16_small", &[1, 64], TensorType::BF16, vec![0u8; 4096])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("parses native bf16");
+    assert_eq!(
+        file.tensor_nbytes(file.tensor("bf16_small").unwrap())
+            .unwrap(),
+        4096
+    );
+
+    // 3. Native file retains F32 in L0 padded to 4096 (1D vector with role [vector])
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l0".to_owned()))
+        .unwrap();
+    writer
+        .add_kv(
+            "r9v.tensor.f32_vec.roles",
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![KvValue::Str("vector".to_owned())],
+            },
+        )
+        .unwrap();
+    writer
+        .add_tensor("f32_vec", &[64], TensorType::F32, vec![0u8; 4096])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("parses native f32 l0");
+    assert_eq!(
+        file.tensor_nbytes(file.tensor("f32_vec").unwrap()).unwrap(),
+        4096
+    );
+
+    // 4. Native file rejects unsupported standard types (e.g. Q4_0, Q8_0) at emit
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer
+        .add_tensor("q4_0_bad", &[1, 32], TensorType::Q4_0, vec![0u8; 18])
+        .unwrap();
+    assert!(matches!(
+        writer.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("unsupported tensor type \"Q4_0\"")
+    ));
+
+    // 5. Standard no-r9v GGUF retains wire semantics
+    let mut writer = GgufWriter::new(); // alignment 32, no r9v.* keys
+    writer
+        .add_tensor("q4_0_wire", &[10, 32], TensorType::Q4_0, vec![0u8; 180])
+        .unwrap();
+    writer
+        .add_tensor("f16_wire", &[1, 64], TensorType::F16, vec![0u8; 128])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("standard gguf parses");
+    assert!(file.is_standard_gguf());
+    assert_eq!(
+        file.tensor_nbytes(file.tensor("q4_0_wire").unwrap())
+            .unwrap(),
+        180
+    );
+    assert_eq!(
+        file.tensor_nbytes(file.tensor("f16_wire").unwrap())
+            .unwrap(),
+        128
+    );
+}
+
+#[test]
+fn test_sweep_overlap_enclosing_interval() {
+    // Deterministic sweep overlap check:
+    // Tensor A: range [0, 128)
+    // Tensor B: range [32, 64)
+    // Tensor C: range [64, 96)
+    // Adjacent-only checking compared B against A (32 < 128, overlap),
+    // but then C against B (64 == 64, no overlap!), missing that C is inside A.
+    // Deterministic sweep tracks max enclosing end (128) and catches both B and C!
+    let mut raw = Raw::new(3, 0);
+    raw.tensor("tensor_a", &[32, 1], 0, 0); // F32, dims [32, 1] -> 128 B, offset 0 -> [0, 128)
+    raw.tensor("tensor_b", &[16, 1], 1, 32); // F16, dims [16, 1] -> 32 B, offset 32 -> [32, 64)
+    raw.tensor("tensor_c", &[16, 1], 1, 64); // F16, dims [16, 1] -> 32 B, offset 64 -> [64, 96)
+    raw.bytes.extend_from_slice(&[0u8; 512]);
+
+    match GgufFile::parse(&raw.bytes) {
+        Err(FormatError::Multiple { problems }) => {
+            let overlaps: Vec<String> = problems
+                .iter()
+                .filter_map(|e| match e {
+                    FormatError::BadTensorRange { name, reason, .. }
+                        if reason.contains("overlaps") =>
+                    {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                overlaps.contains(&"tensor_b".to_owned()),
+                "tensor_b must be reported as overlapping tensor_a"
+            );
+            assert!(
+                overlaps.contains(&"tensor_c".to_owned()),
+                "tensor_c must be reported as overlapping tensor_a via sweep check"
+            );
+        }
+        other => panic!("expected FormatError::Multiple, got {other:?}"),
+    }
+
+    // Verify sweep overlap check also runs under parse_metadata_only on truncated buffer
+    let header_and_ti_len = raw.bytes.len() - 512;
+    let truncated = &raw.bytes[..header_and_ti_len];
+    match GgufFile::parse_metadata_only(truncated, raw.bytes.len() as u64) {
+        Err(FormatError::Multiple { problems }) => {
+            let overlaps: Vec<String> = problems
+                .iter()
+                .filter_map(|e| match e {
+                    FormatError::BadTensorRange { name, reason, .. }
+                        if reason.contains("overlaps") =>
+                    {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(overlaps.contains(&"tensor_b".to_owned()));
+            assert!(overlaps.contains(&"tensor_c".to_owned()));
+        }
+        other => panic!("expected FormatError::Multiple from parse_metadata_only, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_retained_f16_bf16_l1_tile_geometry_irregular_boundary() {
+    // Irregular boundary test: N=17, K=256
+    // Independent tile math:
+    // N padded to 16: 32 (2 tiles)
+    // K padded to 16: 256 (16 tiles)
+    // Total tiles: 2 * 16 = 32 tiles
+    // Packing Half16: 512 bytes per tile
+    // Expected value region: 32 * 512 = 16384 bytes
+    // Entry bytes: align_up(16384, 4096) = 16384 bytes
+    // (In contrast, naive unpadded elements: 17 * 256 * 2 = 8704 bytes, align_up = 12288 bytes)
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer
+        .add_tensor("w_f16", &[17, 256], TensorType::F16, vec![0u8; 16384])
+        .unwrap();
+    writer
+        .add_tensor("w_bf16", &[17, 256], TensorType::BF16, vec![0u8; 16384])
+        .unwrap();
+    // Also test an L0 tensor (e.g. role embed) with N=17, K=256:
+    // L0 row-major: 17 * 256 * 2 = 8704 bytes, align_up(8704, 4096) = 12288 bytes
+    writer
+        .add_kv(
+            "r9v.tensor.w_embed.roles",
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![KvValue::Str("embed".to_owned())],
+            },
+        )
+        .unwrap();
+    writer
+        .add_tensor("w_embed", &[17, 256], TensorType::F16, vec![0u8; 12288])
+        .unwrap();
+
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("parses cleanly");
+
+    let info_f16 = file.tensor("w_f16").unwrap();
+    assert_eq!(file.tensor_nbytes(info_f16).unwrap(), 16384);
+
+    let info_bf16 = file.tensor("w_bf16").unwrap();
+    assert_eq!(file.tensor_nbytes(info_bf16).unwrap(), 16384);
+
+    let info_embed = file.tensor("w_embed").unwrap();
+    assert_eq!(file.tensor_nbytes(info_embed).unwrap(), 12288);
+}
+
+#[test]
+fn test_retained_explicit_regions_validation() {
+    // Retained unquantized types have only values: explicit regions must be [0, entry_bytes, entry_bytes]
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer
+        .add_kv(
+            "r9v.tensor.w_f16.regions",
+            KvValue::Array {
+                elem: KvType::U64,
+                items: vec![KvValue::U64(0), KvValue::U64(16384), KvValue::U64(16384)],
+            },
+        )
+        .unwrap();
+    writer
+        .add_tensor("w_f16", &[17, 256], TensorType::F16, vec![0u8; 16384])
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("valid explicit regions parse cleanly");
+    assert_eq!(
+        file.tensor_nbytes(file.tensor("w_f16").unwrap()).unwrap(),
+        16384
+    );
+
+    // Corrupted explicit regions: scales_offset not equal to entry_bytes.
+    // Hand-encoded (the writer gate refuses to emit forged regions);
+    // the writer-gate half is covered by
+    // `test_adversarial_writer_rejects_invalid_metadata`.
+    let regions_key = "r9v.tensor.w_f16.regions".to_owned();
+    let bytes_bad = native_raw_bytes(
+        "L1",
+        &[(&regions_key, 9, enc_u64_array_value(&[0, 8192, 16384]))],
+        "w_f16",
+        &[17, 256],
+        TensorType::F16.code(),
+        16384,
+    );
+    assert!(matches!(
+        GgufFile::parse(&bytes_bad),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("do not match derived regions")
+    ));
+
+    // F32 1D vector explicit regions: entry_bytes = 4096.
+    // Native F32 requires the explicit role [vector] (Spec 2 §3.3, §4).
+    let mut writer_f32 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer_f32
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer_f32
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer_f32
+        .add_kv("r9v.layout_id", KvValue::Str("l0".to_owned()))
+        .unwrap();
+    writer_f32
+        .add_kv(
+            "r9v.tensor.v_f32.roles",
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![KvValue::Str("vector".to_owned())],
+            },
+        )
+        .unwrap();
+    writer_f32
+        .add_kv(
+            "r9v.tensor.v_f32.regions",
+            KvValue::Array {
+                elem: KvType::U64,
+                items: vec![KvValue::U64(0), KvValue::U64(4096), KvValue::U64(4096)],
+            },
+        )
+        .unwrap();
+    writer_f32
+        .add_tensor("v_f32", &[256], TensorType::F32, vec![0u8; 4096])
+        .unwrap();
+    let bytes_f32 = writer_f32.emit().unwrap();
+    assert!(GgufFile::parse(&bytes_f32).is_ok());
+}
+
+#[test]
+fn test_gguf_writer_order_independent_native_lengths_and_strict_standard() {
+    // 1. Adding tensor BEFORE metadata KVs works identically to adding KVs before tensor
+    let mut w_tensor_first = GgufWriter::new().with_alignment(4096).unwrap();
+    w_tensor_first
+        .add_tensor("w", &[17, 256], TensorType::F16, vec![0u8; 16384])
+        .unwrap();
+    w_tensor_first
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_tensor_first
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_tensor_first
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    let bytes_tensor_first = w_tensor_first.emit().unwrap();
+
+    let mut w_kv_first = GgufWriter::new().with_alignment(4096).unwrap();
+    w_kv_first
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_kv_first
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_kv_first
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    w_kv_first
+        .add_tensor("w", &[17, 256], TensorType::F16, vec![0u8; 16384])
+        .unwrap();
+    let bytes_kv_first = w_kv_first.emit().unwrap();
+    assert_eq!(bytes_tensor_first, bytes_kv_first);
+
+    // 2. Standard GGUF file rejects native-padded payload at emit
+    let mut w_standard = GgufWriter::new();
+    w_standard
+        .add_tensor("w", &[17, 256], TensorType::F16, vec![0u8; 16384])
+        .unwrap();
+    assert!(matches!(
+        w_standard.emit(),
+        Err(FormatError::LengthMismatch { what, expected, got })
+            if what == "tensor data" && expected == 8704 && got == 16384
+    ));
+
+    // 3. Invalid arbitrary payload length fails closed at add_tensor
+    let mut w_bad_len = GgufWriter::new();
+    assert!(matches!(
+        w_bad_len.add_tensor("w", &[17, 256], TensorType::F16, vec![0u8; 5000]),
+        Err(FormatError::LengthMismatch { .. })
+    ));
+}
+
+#[test]
+fn test_native_classification_and_agreement() {
+    // 1. Standard GGUF with unknown upstream type code (e.g. 9999) fails with UnknownTensorType, NOT InvalidAlignment
+    let mut raw_unknown = Raw::new(1, 0);
+    raw_unknown.tensor("unk_tensor", &[32, 1], 9999, 0);
+    raw_unknown.bytes.extend_from_slice(&[0u8; 256]);
+    match GgufFile::parse(&raw_unknown.bytes) {
+        Err(FormatError::UnknownTensorType { code, tensor }) => {
+            assert_eq!(code, 9999);
+            assert_eq!(tensor, "unk_tensor");
+        }
+        other => panic!("expected UnknownTensorType, got {other:?}"),
+    }
+
+    // Standard GGUF file with standard types is identified as standard GGUF
+    let mut raw_std = Raw::new(1, 0);
+    raw_std.tensor("tensor_std", &[32, 1], 0, 0); // F32
+    raw_std.bytes.extend_from_slice(&[0u8; 256]);
+    let file_std = GgufFile::parse_metadata_only(&raw_std.bytes, raw_std.bytes.len() as u64)
+        .expect("parses standard metadata");
+    assert!(file_std.is_standard_gguf());
+    assert!(!file_std.is_native());
+
+    // 2. R9v tensor type on file with no r9v.* metadata is classified as native, and both parse and parse_metadata_only fail with MissingKey
+    let mut raw_r9v_no_meta = Raw::new(1, 1);
+    raw_r9v_no_meta.kv(
+        "general.alignment",
+        KvType::U32.code(),
+        &4096u32.to_le_bytes(),
+    );
+    raw_r9v_no_meta.tensor("r9v_tensor", &[256, 16], 1003, 0); // 1003 = I4K
+    raw_r9v_no_meta.bytes.extend_from_slice(&[0u8; 4096]);
+    assert!(matches!(
+        GgufFile::parse_metadata_only(&raw_r9v_no_meta.bytes, raw_r9v_no_meta.bytes.len() as u64),
+        Err(FormatError::Multiple { problems: ref errs }) if errs.iter().any(|e| matches!(e, FormatError::MissingKey { key } if key == "r9v.format_version"))
+    ));
+    assert!(matches!(
+        GgufFile::parse(&raw_r9v_no_meta.bytes),
+        Err(FormatError::Multiple { problems: ref errs }) if errs.iter().any(|e| matches!(e, FormatError::MissingKey { key } if key == "r9v.format_version"))
+    ));
+
+    // 3. Type/scheme agreement: if meta.scheme is absent, parse_r9v_meta populates it from r9v_type.scheme()
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer
+        .add_tensor(
+            "weight",
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).unwrap();
+    let meta = parse_r9v_meta(&file).unwrap().unwrap();
+    assert_eq!(meta.tensor("weight").unwrap().scheme, Some(SchemeId::I4K));
+
+    // 4. Mismatched scheme declaration: the writer gate refuses to emit
+    // it, and a foreign file with the same mismatch is rejected by
+    // `GgufFile::parse` itself with SchemeMismatch.
+    let mut writer_mismatch = GgufWriter::new().with_alignment(4096).unwrap();
+    writer_mismatch
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer_mismatch
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer_mismatch
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer_mismatch
+        .add_kv("r9v.tensor.weight.scheme", KvValue::Str("i8_r".to_owned()))
+        .unwrap();
+    writer_mismatch
+        .add_tensor(
+            "weight",
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    assert!(matches!(
+        writer_mismatch.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("declared scheme")
+    ));
+    let i4k_code = TensorType::R9v(R9vTensorType::new(SchemeId::I4K)).code();
+    let scheme_key = "r9v.tensor.weight.scheme".to_owned();
+    let raw_mismatch = native_raw_bytes(
+        "L1",
+        &[(&scheme_key, 8, enc_str_value("i8_r"))],
+        "weight",
+        &[16, 256],
+        i4k_code,
+        4096,
+    );
+    assert!(matches!(
+        GgufFile::parse(&raw_mismatch),
+        Err(FormatError::SchemeMismatch { .. })
+    ));
+}
+
+#[test]
+fn test_f32_native_enforcement() {
+    // 1. Native F32 2D matrix is rejected at emit (must be 1D)
+    let mut w_2d = GgufWriter::new().with_alignment(4096).unwrap();
+    w_2d.add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_2d.add_kv("r9v.format_version", KvValue::U32(1)).unwrap();
+    w_2d.add_kv("r9v.layout_id", KvValue::Str("l0".to_owned()))
+        .unwrap();
+    assert!(matches!(
+        w_2d.add_tensor(
+            "f32_2d",
+            &[16, 256],
+            TensorType::F32,
+            vec![0u8; 16 * 256 * 4]
+        ),
+        Ok(())
+    ));
+    assert!(matches!(
+        w_2d.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("must be 1D")
+    ));
+
+    // 2. Native F32 with non-vector role (e.g. matmul) is rejected at emit
+    let mut w_role = GgufWriter::new().with_alignment(4096).unwrap();
+    w_role
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_role
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_role
+        .add_kv("r9v.layout_id", KvValue::Str("l0".to_owned()))
+        .unwrap();
+    w_role
+        .add_kv(
+            "r9v.tensor.v.roles",
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![KvValue::Str("matmul".to_owned())],
+            },
+        )
+        .unwrap();
+    w_role
+        .add_tensor("v", &[256], TensorType::F32, vec![0u8; 4096])
+        .unwrap();
+    assert!(matches!(
+        w_role.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("expected explicitly [vector]")
+    ));
+
+    // 2b. Native F32 with missing role is rejected at emit regardless of layout_id = "l0"
+    let mut w_no_role = GgufWriter::new().with_alignment(4096).unwrap();
+    w_no_role
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_no_role
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_no_role
+        .add_kv("r9v.layout_id", KvValue::Str("l0".to_owned()))
+        .unwrap();
+    w_no_role
+        .add_tensor("v", &[256], TensorType::F32, vec![0u8; 4096])
+        .unwrap();
+    assert!(matches!(
+        w_no_role.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("missing required explicit role [vector]")
+    ));
+
+    // 3. Native F32 1D vector with role [vector] is accepted with L0 layout
+    let mut w_ok = GgufWriter::new().with_alignment(4096).unwrap();
+    w_ok.add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_ok.add_kv("r9v.format_version", KvValue::U32(1)).unwrap();
+    w_ok.add_kv("r9v.layout_id", KvValue::Str("l0".to_owned()))
+        .unwrap();
+    w_ok.add_kv(
+        "r9v.tensor.v.roles",
+        KvValue::Array {
+            elem: KvType::Str,
+            items: vec![KvValue::Str("vector".to_owned())],
+        },
+    )
+    .unwrap();
+    w_ok.add_tensor("v", &[256], TensorType::F32, vec![0u8; 4096])
+        .unwrap();
+    let bytes = w_ok.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("parses cleanly");
+    assert_eq!(file.tensor_nbytes(file.tensor("v").unwrap()).unwrap(), 4096);
+}
+
+#[test]
+fn test_parse_metadata_only() {
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer
+        .add_tensor("w", &[17, 256], TensorType::F16, vec![0u8; 16384])
+        .unwrap();
+    let full_bytes = writer.emit().unwrap();
+
+    let full_file = GgufFile::parse(&full_bytes).unwrap();
+    let ti_end = full_file.ti_range().1 as usize;
+
+    // Buffer truncated before data section (no payload bytes present)
+    let truncated = &full_bytes[..ti_end];
+
+    // Strict parse rejects truncated buffer because tensor range end exceeds file size
+    assert!(matches!(
+        GgufFile::parse(truncated),
+        Err(FormatError::BadTensorRange { reason, .. }) if reason.contains("beyond file size")
+    ));
+
+    let full_size = full_bytes.len() as u64;
+
+    // parse_metadata_only succeeds and never attempts to read data payload
+    let meta_file =
+        GgufFile::parse_metadata_only(truncated, full_size).expect("parse_metadata_only succeeds");
+    assert_eq!(meta_file.tensors().len(), 1);
+    assert_eq!(meta_file.tensor("w").unwrap().name, "w");
+    assert_eq!(meta_file.file_size(), full_size);
+
+    // parse_table_only alias works identically
+    let table_file =
+        GgufFile::parse_table_only(truncated, full_size).expect("parse_table_only succeeds");
+    assert_eq!(table_file.tensors().len(), 1);
+    assert_eq!(table_file.file_size(), full_size);
+
+    // Full and metadata-only parse with same logical size produce identical file_fp
+    let fp_full = full_file.file_fp(&full_bytes, 1).unwrap();
+    let fp_meta = meta_file.file_fp(truncated, 1).unwrap();
+    assert_eq!(fp_full, fp_meta);
+
+    // Verify rejection of impossible sizes:
+    // 1. File size smaller than data section start
+    assert!(matches!(
+        GgufFile::parse_metadata_only(truncated, 0),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("smaller than data section start")
+    ));
+    assert!(matches!(
+        GgufFile::parse_metadata_only(truncated, meta_file.data_start() - 1),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("smaller than data section start")
+    ));
+    // 2. File size smaller than tensor data end
+    assert!(matches!(
+        GgufFile::parse_metadata_only(truncated, full_size - 1),
+        Err(FormatError::BadTensorRange { reason, .. }) if reason.contains("beyond file size")
+    ));
+    // 3. Native file size larger than tensor data end (dead gap)
+    assert!(matches!(
+        GgufFile::parse_metadata_only(truncated, full_size + 4096),
+        Err(FormatError::BadTensorRange { reason, .. }) if reason.contains("dead gap")
+    ));
+
+    // Reading payload from truncated buffer fails closed safely
+    assert!(matches!(
+        meta_file.tensor_bytes("w", truncated),
+        Err(FormatError::BadTensorRange { .. })
+    ));
+}
+
+#[test]
+fn test_parse_rejects_forged_tensor_scheme_strings() {
+    // A valid native file whose only flaw is a forged
+    // `r9v.tensor.weight.scheme` value must be rejected by
+    // `GgufFile::parse` itself, not just by the writer gate or
+    // `parse_r9v_meta`. The forgeries patch the valid fixture's
+    // bytes in place with same-length strings, so all offsets stay
+    // intact and the scheme value is the only suspect.
+    let scheme_key = "r9v.tensor.weight.scheme".to_owned();
+    let valid = native_raw_bytes(
+        "L1",
+        &[(&scheme_key, 8, enc_str_value("i4_k"))],
+        "weight",
+        &[16, 256],
+        TensorType::R9v(R9vTensorType::new(SchemeId::I4K)).code(),
+        4096,
+    );
+    GgufFile::parse(&valid).expect("valid agreed scheme parses");
+    assert_eq!(valid.windows(4).filter(|w| *w == b"i4_k").count(), 1);
+
+    // Unknown same-length scheme string: closed-set rejection.
+    let mut unknown = valid.clone();
+    let pos = unknown
+        .windows(4)
+        .position(|w| w == b"i4_k")
+        .expect("scheme value present");
+    unknown[pos..pos + 4].copy_from_slice(b"zz_z");
+    assert!(matches!(
+        GgufFile::parse(&unknown),
+        Err(FormatError::UnknownScheme { value }) if value == "zz_z"
+    ));
+
+    // Valid-but-disagreeing same-length scheme string: the type id
+    // says `i4_k` while the metadata declares `i8_r`.
+    let mut disagree = valid.clone();
+    let pos = disagree
+        .windows(4)
+        .position(|w| w == b"i4_k")
+        .expect("scheme value present");
+    disagree[pos..pos + 4].copy_from_slice(b"i8_r");
+    match GgufFile::parse(&disagree) {
+        Err(FormatError::SchemeMismatch { expected, got, .. }) => {
+            assert_eq!(expected, "i4_k");
+            assert_eq!(got, "i8_r");
+        }
+        other => panic!("expected SchemeMismatch, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_parse_rejects_impossible_zero_tensor_file() {
+    // Native zero-tensor buffer with no data section: the 4096
+    // alignment pushes the data-section start to 4096 while the
+    // buffer ends after the tensor-info table. A full parse must
+    // reject it even though no per-tensor range exists to blame.
+    // (Standard zero-tensor files stay accepted: real vocab-only
+    // GGUF ends the same way with no padding to align.)
+    let mut raw = Raw::new(0, 3);
+    raw.u32_kv("general.alignment", 4096);
+    raw.u32_kv("r9v.format_version", 1);
+    raw.str_kv("r9v.layout_id", "l1");
+    let len = raw.bytes.len() as u64;
+    assert!(len < 4096);
+    match GgufFile::parse(&raw.bytes) {
+        Err(FormatError::BadTensorRange {
+            start, end, reason, ..
+        }) => {
+            assert_eq!(start, len);
+            assert_eq!(end, 4096);
+            assert!(reason.contains("beyond file size"), "{reason:?}");
+        }
+        other => panic!("expected BadTensorRange, got {other:?}"),
+    }
+
+    // The same bytes with an explicit logical size keep the
+    // metadata-only `Malformed` semantics.
+    assert!(matches!(
+        GgufFile::parse_metadata_only(&raw.bytes, len),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("smaller than data section start")
+    ));
+
+    // Control: padding the data section into existence parses cleanly.
+    raw.pad_to(4096);
+    GgufFile::parse(&raw.bytes).expect("padded zero-tensor native file parses");
+}
+
+#[test]
+fn test_file_fp_truncated() {
+    let (bytes, _) = native_test_bytes();
+    let file = GgufFile::parse(&bytes).unwrap();
+
+    // Passing a buffer shorter than needed metadata bytes fails with FormatError::Truncated
+    let cut = (file.ti_range().1 - 1) as usize;
+    let truncated = &bytes[..cut];
+    match file.file_fp(truncated, 1) {
+        Err(FormatError::Truncated { what, need, .. }) => {
+            assert_eq!(what, "file_fp metadata bytes");
+            assert!(need >= 1);
+        }
+        other => panic!("expected FormatError::Truncated, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_adversarial_explicit_regions_arity() {
+    // 1. Explicit regions with 2 elements on retained F16 tensor fails at emit
+    let mut w_f16_2 = GgufWriter::new().with_alignment(4096).unwrap();
+    w_f16_2
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_f16_2
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_f16_2
+        .add_kv("r9v.layout_id", KvValue::Str("l0".to_owned()))
+        .unwrap();
+    w_f16_2
+        .add_kv(
+            "r9v.tensor.w.regions",
+            KvValue::Array {
+                elem: KvType::U64,
+                items: vec![KvValue::U64(0), KvValue::U64(4096)],
+            },
+        )
+        .unwrap();
+    w_f16_2
+        .add_tensor("w", &[16, 1], TensorType::F16, vec![0u8; 4096])
+        .unwrap();
+    assert!(matches!(
+        w_f16_2.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("has 2 item(s), expected 3")
+    ));
+
+    // 2. Explicit regions with 4 elements on retained F16 tensor fails at emit
+    let mut w_f16_4 = GgufWriter::new().with_alignment(4096).unwrap();
+    w_f16_4
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_f16_4
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_f16_4
+        .add_kv("r9v.layout_id", KvValue::Str("l0".to_owned()))
+        .unwrap();
+    w_f16_4
+        .add_kv(
+            "r9v.tensor.w.regions",
+            KvValue::Array {
+                elem: KvType::U64,
+                items: vec![
+                    KvValue::U64(0),
+                    KvValue::U64(4096),
+                    KvValue::U64(4096),
+                    KvValue::U64(4096),
+                ],
+            },
+        )
+        .unwrap();
+    w_f16_4
+        .add_tensor("w", &[16, 1], TensorType::F16, vec![0u8; 4096])
+        .unwrap();
+    assert!(matches!(
+        w_f16_4.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("has 4 item(s), expected 3")
+    ));
+
+    // 3. Explicit regions with 2 elements on R9V tensor fails at emit
+    let mut w_r9v_2 = GgufWriter::new().with_alignment(4096).unwrap();
+    w_r9v_2
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_r9v_2
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_r9v_2
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    w_r9v_2
+        .add_kv(
+            "r9v.tensor.weight.regions",
+            KvValue::Array {
+                elem: KvType::U64,
+                items: vec![KvValue::U64(0), KvValue::U64(4096)],
+            },
+        )
+        .unwrap();
+    w_r9v_2
+        .add_tensor(
+            "weight",
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    assert!(matches!(
+        w_r9v_2.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("has 2 item(s), expected 3")
+    ));
+}
+
+#[test]
+fn test_adversarial_writer_emit_validation() {
+    // 1. F16 candidate-layout mismatch: role forces L0, but L1 payload length provided
+    let mut writer_l0_mismatch = GgufWriter::new().with_alignment(4096).unwrap();
+    writer_l0_mismatch
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer_l0_mismatch
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer_l0_mismatch
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer_l0_mismatch
+        .add_kv(
+            "r9v.tensor.w.roles",
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![KvValue::Str("embed".to_owned())],
+            },
+        )
+        .unwrap();
+    // [17, 256] with role "embed" resolves to L0 (value bytes = 17 * 256 * 2 = 8704, aligned to 4096 = 12288)
+    // Passing 16384 (which is valid for L1 tile math: 2*16 tiles * 512 = 16384) must fail closed at emit
+    writer_l0_mismatch
+        .add_tensor("w", &[17, 256], TensorType::F16, vec![0u8; 16384])
+        .unwrap();
+    assert!(matches!(
+        writer_l0_mismatch.emit(),
+        Err(FormatError::LengthMismatch {
+            what,
+            expected: 12288,
+            got: 16384,
+        }) if what == "native tensor data"
+    ));
+
+    // 2. Oversized R9v payload fails closed at emit
+    let mut w_over = GgufWriter::new().with_alignment(4096).unwrap();
+    w_over
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_over
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_over
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    // [16, 256] I4K in L1 requires 4096 bytes. Passing 8192 bytes.
+    w_over
+        .add_tensor(
+            "weight",
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 8192],
+        )
+        .unwrap();
+    assert!(matches!(
+        w_over.emit(),
+        Err(FormatError::LengthMismatch {
+            what,
+            expected: 4096,
+            got: 8192,
+        }) if what == "native tensor data"
+    ));
+
+    // 3. Undersized R9v payload fails closed at emit
+    let mut w_under = GgufWriter::new().with_alignment(4096).unwrap();
+    w_under
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    w_under
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    w_under
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    // [32, 256] I4K in L1 requires 8192 bytes. Passing 4096 bytes.
+    w_under
+        .add_tensor(
+            "weight",
+            &[32, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    assert!(matches!(
+        w_under.emit(),
+        Err(FormatError::LengthMismatch {
+            what,
+            expected: 8192,
+            got: 4096,
+        }) if what == "native tensor data"
+    ));
+}
+
+#[test]
+fn test_adversarial_writer_rejects_invalid_metadata() {
+    // The writer resolves final metadata at emit: fixtures the parse
+    // gate rejects must also fail here, so no invalid native file can
+    // be produced (Spec 2 §4, §6; card A2.5).
+    fn native_writer() -> GgufWriter {
+        let mut w = GgufWriter::new().with_alignment(4096).unwrap();
+        w.add_kv("general.alignment", KvValue::U32(4096)).unwrap();
+        w.add_kv("r9v.format_version", KvValue::U32(1)).unwrap();
+        w.add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+            .unwrap();
+        w
+    }
+    fn i4k_tensor(w: &mut GgufWriter, name: &str) {
+        w.add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    }
+
+    // 1. Invalid sparse string.
+    let mut w = native_writer();
+    i4k_tensor(&mut w, "weight");
+    w.add_kv("r9v.tensor.weight.sparse", KvValue::Str("dense".to_owned()))
+        .unwrap();
+    assert!(matches!(
+        w.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("sparse value")
+    ));
+
+    // 2. Invalid roles combination [matmul, embed].
+    let mut w = native_writer();
+    i4k_tensor(&mut w, "weight");
+    w.add_kv(
+        "r9v.tensor.weight.roles",
+        KvValue::Array {
+            elem: KvType::Str,
+            items: vec![
+                KvValue::Str("matmul".to_owned()),
+                KvValue::Str("embed".to_owned()),
+            ],
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        w.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("invalid roles combination")
+    ));
+
+    // 3. Forged explicit regions disagreeing with geometry.
+    let mut w = native_writer();
+    i4k_tensor(&mut w, "weight");
+    w.add_kv(
+        "r9v.tensor.weight.regions",
+        KvValue::Array {
+            elem: KvType::U64,
+            items: vec![KvValue::U64(0), KvValue::U64(2048), KvValue::U64(8192)],
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        w.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("do not match derived regions")
+    ));
+
+    // 4. Mismatched scheme declaration.
+    let mut w = native_writer();
+    i4k_tensor(&mut w, "weight");
+    w.add_kv("r9v.tensor.weight.scheme", KvValue::Str("i8_r".to_owned()))
+        .unwrap();
+    assert!(matches!(
+        w.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("declared scheme")
+    ));
+
+    // 5. Sparse flag on a 1D vector.
+    let mut w = native_writer();
+    w.add_tensor(
+        "vec",
+        &[256],
+        TensorType::R9v(R9vTensorType::new(SchemeId::I8B128)),
+        vec![0u8; 4096],
+    )
+    .unwrap();
+    w.add_kv("r9v.tensor.vec.sparse", KvValue::Str("s24".to_owned()))
+        .unwrap();
+    assert!(matches!(
+        w.emit(),
+        Err(FormatError::Malformed { detail, .. }) if detail.contains("cannot be sparse")
+    ));
+}
+
+#[test]
+fn test_adversarial_native_sequencing_and_dead_gaps() {
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("l1".to_owned()))
+        .unwrap();
+    writer
+        .add_tensor("t0", &[1, 64], TensorType::F16, vec![0u8; 4096])
+        .unwrap();
+    writer
+        .add_tensor("t1", &[1, 64], TensorType::F16, vec![0u8; 4096])
+        .unwrap();
+    let valid_bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&valid_bytes).expect("valid native file parses");
+    assert_eq!(file.tensors().len(), 2);
+
+    // 1. Trailing dead 4KiB gap at EOF
+    let mut with_trailing_gap = valid_bytes.clone();
+    with_trailing_gap.extend_from_slice(&[0u8; 4096]);
+    assert!(matches!(
+        GgufFile::parse(&with_trailing_gap),
+        Err(FormatError::BadTensorRange { reason, .. }) if reason.contains("dead gap of 4096 bytes")
+    ));
+
+    // 2. Dead 4KiB gap between tensors (corrupt offset of tensor 1)
+    let t1_pos = valid_bytes.windows(2).position(|w| w == b"t1").unwrap();
+    let offset_pos = t1_pos + 2 + 4 + 16 + 4;
+    let mut with_gap_between = valid_bytes.clone();
+    let current_off = u64::from_le_bytes(
+        with_gap_between[offset_pos..offset_pos + 8]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(current_off, 4096);
+    // Shift t1 offset forward by 4096 (leaving a 4096 dead gap between t0 and t1)
+    with_gap_between[offset_pos..offset_pos + 8]
+        .copy_from_slice(&(current_off + 4096).to_le_bytes());
+    with_gap_between.extend_from_slice(&[0u8; 4096]);
+    assert!(matches!(
+        GgufFile::parse(&with_gap_between),
+        Err(FormatError::BadTensorRange { reason, .. }) if reason.contains("dead gap of 4096 bytes")
+    ));
 }
