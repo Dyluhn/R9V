@@ -68,7 +68,14 @@ pub fn decode_greedy(
             }));
         }
     }
-    let total = prompt.len() as u64 + config.max_new_tokens as u64;
+    let total = (prompt.len() as u64)
+        .checked_add(config.max_new_tokens as u64)
+        .ok_or_else(|| {
+            ExecError::T0(T0Error::ArithmeticOverflow {
+                op: "decode",
+                detail: "prompt.len() + max_new_tokens overflows u64".to_string(),
+            })
+        })?;
     if total > spec.max_ctx as u64 {
         return Err(ExecError::T0(T0Error::ArithmeticOverflow {
             op: "decode",
@@ -88,7 +95,12 @@ pub fn decode_greedy(
     let mut generated = Vec::new();
     let mut step_logits = Vec::new();
     let mut next = argmax_last_row(&prompt_logits, prompt.len(), vocab);
-    let mut pos = prompt.len() as u32;
+    let mut pos = u32::try_from(prompt.len()).map_err(|_| {
+        ExecError::T0(T0Error::ArithmeticOverflow {
+            op: "decode",
+            detail: "prompt length exceeds u32::MAX".to_string(),
+        })
+    })?;
     while generated.len() < config.max_new_tokens as usize {
         if config.eos == Some(next) {
             break;
@@ -97,7 +109,12 @@ pub fn decode_greedy(
         let logits = run_step(exec, model, &[next], pos, max_blocks, &mut rng_states)?;
         step_logits.push(logits.clone());
         next = argmax_last_row(&logits, 1, vocab);
-        pos += 1;
+        pos = pos.checked_add(1).ok_or_else(|| {
+            ExecError::T0(T0Error::ArithmeticOverflow {
+                op: "decode",
+                detail: "decode step position overflows u32".to_string(),
+            })
+        })?;
     }
     Ok(DecodeResult {
         prompt_logits,
@@ -146,8 +163,19 @@ pub fn run_step(
     max_blocks: u32,
     rng_states: &mut Vec<crate::philox::RngState>,
 ) -> Result<Vec<f32>, ExecError> {
-    let t = tokens.len() as u32;
-    let positions: Vec<u32> = (ctx_pos..ctx_pos + t).collect();
+    let t = u32::try_from(tokens.len()).map_err(|_| {
+        ExecError::T0(T0Error::ArithmeticOverflow {
+            op: "run_step",
+            detail: "tokens count exceeds u32::MAX".to_string(),
+        })
+    })?;
+    let end_pos = ctx_pos.checked_add(t).ok_or_else(|| {
+        ExecError::T0(T0Error::ArithmeticOverflow {
+            op: "run_step",
+            detail: format!("ctx_pos ({ctx_pos}) + tokens ({t}) overflows u32"),
+        })
+    })?;
+    let positions: Vec<u32> = (ctx_pos..end_pos).collect();
     exec.bind(
         model.token_edge,
         TypedBuffer::from_u32(&[tokens.len()], tokens),
@@ -185,7 +213,13 @@ pub fn run_step(
 
 /// Lowest-index argmax of the last row of row-major `[rows, vocab]` logits.
 fn argmax_last_row(logits: &[f32], rows: usize, vocab: usize) -> u32 {
-    let start = (rows - 1) * vocab;
+    if rows == 0 || vocab == 0 {
+        return 0;
+    }
+    let start = match (rows - 1).checked_mul(vocab) {
+        Some(s) if s.checked_add(vocab).is_some_and(|end| end <= logits.len()) => s,
+        _ => return 0,
+    };
     let mut best = 0u32;
     let mut best_value = logits[start];
     for (i, &value) in logits[start..start + vocab].iter().enumerate().skip(1) {

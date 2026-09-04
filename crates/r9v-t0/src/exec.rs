@@ -543,12 +543,24 @@ fn run_node(
     for &edge in &node.outputs {
         let descriptor = &graph.edges()[edge.0].tensor;
         let shape = resolve_shape(node_idx, edge.0, descriptor, batch)?;
-        let buffer = TypedBuffer::zeros(&shape, descriptor.dtype())
+        let expected: usize = shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| {
+                ExecError::T0(T0Error::ArithmeticOverflow {
+                    op: "executor",
+                    detail: format!(
+                        "node {node_idx}: output edge {} shape {shape:?} element product overflows usize",
+                        edge.0
+                    ),
+                })
+            })?;
+        let buffer = TypedBuffer::try_zeros(&shape, descriptor.dtype())
+            .map_err(ExecError::T0)?
             .with_quant(descriptor.quant())
             .with_layout(descriptor.layout());
         // Fail closed when the descriptor's own element count disagrees
         // with the resolved shape (catches I4 half-byte miscounts early).
-        let expected: usize = shape.iter().product();
         if buffer.num_elements() != expected {
             return Err(ExecError::T0(T0Error::BufferLengthMismatch {
                 tensor: "executor_output",
@@ -946,19 +958,29 @@ fn ensure_scan_slots(
     dtype: r9v_ir::DType,
     state: &mut State<'_>,
 ) -> Result<(), ExecError> {
+    let expected: usize = shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| {
+            ExecError::T0(T0Error::ArithmeticOverflow {
+                op: "scan_state",
+                detail: format!("state shape {shape:?} element product overflows usize"),
+            })
+        })?;
     for (name, map) in [("A", &mut state.scan_a), ("B", &mut state.scan_b)] {
         if let Some(slot) = map.get(&key) {
             if slot.shape() != shape {
                 return Err(ExecError::T0(T0Error::DimensionMismatch {
                     dim_name: "scan_state",
                     expected_from: name,
-                    expected: shape.iter().product(),
+                    expected,
                     tensor: "scan_state",
                     got: slot.num_elements(),
                 }));
             }
         } else {
-            map.insert(key, TypedBuffer::zeros(shape, dtype));
+            let buffer = TypedBuffer::try_zeros(shape, dtype).map_err(ExecError::T0)?;
+            map.insert(key, buffer);
         }
     }
     Ok(())

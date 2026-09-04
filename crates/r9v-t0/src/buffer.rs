@@ -702,7 +702,44 @@ pub struct TypedBuffer {
 impl TypedBuffer {
     /// Creates a zero-initialized typed buffer for the given shape and dtype (Spec 1 §2.3, Spec 4 §2).
     pub fn zeros(shape: &[usize], dtype: DType) -> Self {
-        let total_elements: usize = shape.iter().product();
+        Self::try_zeros(shape, dtype).expect("buffer allocation within bounds")
+    }
+
+    /// Safely creates a zero-initialized typed buffer checking for element and byte-size overflow (Spec 1 §2.3, Spec 4 §2).
+    pub fn try_zeros(shape: &[usize], dtype: DType) -> Result<Self, T0Error> {
+        let total_elements: usize = shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| T0Error::ArithmeticOverflow {
+                op: "buffer",
+                detail: format!("shape {shape:?} element product overflows usize"),
+            })?;
+        let byte_len = match dtype {
+            DType::F32 | DType::U32 | DType::I32 => {
+                total_elements
+                    .checked_mul(4)
+                    .ok_or_else(|| T0Error::ArithmeticOverflow {
+                        op: "buffer",
+                        detail: format!("shape {shape:?} byte size (elements * 4) overflows usize"),
+                    })?
+            }
+            DType::F16 | DType::Bf16 => {
+                total_elements
+                    .checked_mul(2)
+                    .ok_or_else(|| T0Error::ArithmeticOverflow {
+                        op: "buffer",
+                        detail: format!("shape {shape:?} byte size (elements * 2) overflows usize"),
+                    })?
+            }
+            DType::I4 => total_elements
+                .checked_add(1)
+                .map(|v| v / 2)
+                .ok_or_else(|| T0Error::ArithmeticOverflow {
+                    op: "buffer",
+                    detail: format!("shape {shape:?} byte size (I4 packed) overflows usize"),
+                })?,
+            DType::I8 | DType::E4m3 | DType::E5m2 | DType::Bool => total_elements,
+        };
         let mut buf = Self {
             shape: shape.to_vec(),
             dtype,
@@ -722,17 +759,10 @@ impl TypedBuffer {
             DType::I8 => buf.i8_data = vec![0i8; total_elements],
             DType::U32 => buf.u32_data = vec![0u32; total_elements],
             DType::E4m3 | DType::E5m2 | DType::Bool | DType::I4 | DType::I32 => {
-                let bytes = if dtype == DType::I4 {
-                    total_elements.div_ceil(2)
-                } else if dtype == DType::I32 {
-                    total_elements * 4
-                } else {
-                    total_elements
-                };
-                buf.byte_data = vec![0u8; bytes];
+                buf.byte_data = vec![0u8; byte_len];
             }
         }
-        buf
+        Ok(buf)
     }
 
     /// Creates a buffer from `f32` slice (Spec 1 §2.3, Spec 4 §2).
@@ -849,11 +879,16 @@ impl TypedBuffer {
 
     /// Creates a typed buffer from raw byte data with shape and dtype (Spec 1 §2.3, Spec 4 §2).
     pub fn from_bytes(shape: &[usize], dtype: DType, bytes: &[u8]) -> Self {
-        let total_elements: usize = shape.iter().product();
+        let total_elements = shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .expect("shape element product within usize");
         let expected_bytes = if dtype == DType::I4 {
             total_elements.div_ceil(2)
         } else {
-            total_elements * dtype_element_size(dtype)
+            total_elements
+                .checked_mul(dtype_element_size(dtype))
+                .expect("expected byte count within usize")
         };
         assert!(bytes.len() >= expected_bytes);
         Self {

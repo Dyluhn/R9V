@@ -111,6 +111,129 @@ impl SyntheticSpec {
                 ),
             }));
         }
+
+        // Audited arithmetic: heads*head_dim and kv_heads*head_dim bounds checks.
+        let hd = match self.heads.checked_mul(self.head_dim) {
+            Some(v) => Some(v),
+            None => {
+                problems.push(ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                    op: "synthetic",
+                    detail: format!(
+                        "heads ({}) * head_dim ({}) overflows u32",
+                        self.heads, self.head_dim
+                    ),
+                }));
+                None
+            }
+        };
+        let hkv_d = match self.kv_heads.checked_mul(self.head_dim) {
+            Some(v) => Some(v),
+            None => {
+                problems.push(ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                    op: "synthetic",
+                    detail: format!(
+                        "kv_heads ({}) * head_dim ({}) overflows u32",
+                        self.kv_heads, self.head_dim
+                    ),
+                }));
+                None
+            }
+        };
+
+        // Audited arithmetic: shape products and byte-size products for untrusted parameters.
+        let mut check_tensor_bounds = |name: &'static str, shape: &[usize], elem_bytes: usize| {
+            let mut prod = 1usize;
+            for &d in shape {
+                match prod.checked_mul(d) {
+                    Some(next) => prod = next,
+                    None => {
+                        problems.push(ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                            op: "synthetic",
+                            detail: format!(
+                                "tensor `{name}` shape {shape:?} element product overflows usize"
+                            ),
+                        }));
+                        return;
+                    }
+                }
+            }
+            if prod.checked_mul(elem_bytes).is_none() {
+                problems.push(ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                    op: "synthetic",
+                    detail: format!(
+                        "tensor `{name}` shape {shape:?} byte size (elements * {elem_bytes}) overflows usize"
+                    ),
+                }));
+            }
+        };
+
+        let v = self.vocab as usize;
+        let d = self.dim as usize;
+        let ff = self.ff as usize;
+
+        check_tensor_bounds("embed", &[v, d], std::mem::size_of::<u16>());
+        check_tensor_bounds("final_norm", &[d], std::mem::size_of::<f32>());
+        check_tensor_bounds("lm_head", &[v, d], std::mem::size_of::<u16>());
+        check_tensor_bounds("attn_norm", &[d], std::mem::size_of::<f32>());
+        check_tensor_bounds("ffn_norm", &[d], std::mem::size_of::<f32>());
+        check_tensor_bounds("wg", &[ff, d], std::mem::size_of::<u16>());
+        check_tensor_bounds("wu", &[ff, d], std::mem::size_of::<u16>());
+        check_tensor_bounds("wd", &[d, ff], std::mem::size_of::<u16>());
+
+        if let Some(hd_val) = hd {
+            let hd_usize = hd_val as usize;
+            check_tensor_bounds("wq", &[hd_usize, d], std::mem::size_of::<u16>());
+            check_tensor_bounds("wo", &[d, hd_usize], std::mem::size_of::<u16>());
+        }
+        if let Some(hkv_val) = hkv_d {
+            let hkv_usize = hkv_val as usize;
+            check_tensor_bounds("wk", &[hkv_usize, d], std::mem::size_of::<u16>());
+            check_tensor_bounds("wv", &[hkv_usize, d], std::mem::size_of::<u16>());
+        }
+
+        // Cache sizing bounds checks for max_ctx.
+        let max_blocks = self.max_ctx.div_ceil(CACHE_BLOCK_TOKENS);
+        match (max_blocks as usize).checked_mul(CACHE_BLOCK_TOKENS as usize) {
+            Some(slots) => {
+                let k_elems = slots
+                    .checked_mul(self.kv_heads as usize)
+                    .and_then(|val| val.checked_mul(self.head_dim as usize));
+                match k_elems {
+                    Some(elems) => {
+                        if elems.checked_mul(std::mem::size_of::<u16>()).is_none() {
+                            problems.push(ExecError::T0(
+                                crate::error::T0Error::ArithmeticOverflow {
+                                    op: "synthetic",
+                                    detail: format!(
+                                        "KV cache byte size for max_ctx {} overflows usize",
+                                        self.max_ctx
+                                    ),
+                                },
+                            ));
+                        }
+                    }
+                    None => {
+                        problems.push(ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                            op: "synthetic",
+                            detail: format!(
+                                "KV cache element count for max_ctx {} overflows usize",
+                                self.max_ctx
+                            ),
+                        }));
+                    }
+                }
+            }
+            None => {
+                problems.push(ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                    op: "synthetic",
+                    detail: format!(
+                        "max_blocks * CACHE_BLOCK_TOKENS for max_ctx {} overflows usize",
+                        self.max_ctx
+                    ),
+                }));
+            }
+        }
+
         ExecError::from_problems(problems)
     }
 }
@@ -146,7 +269,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
 
     let token_edge = graph.add_external_input(
         ExternalInputKind::TokenIds,
-        act_tensor(vec![Dim::Symbolic(ShapeSymbol::T)], DType::U32),
+        act_tensor(vec![Dim::Symbolic(ShapeSymbol::T)], DType::U32)?,
     )?;
     graph.add_batch_meta_input()?;
     let positions_edge = graph.bind_positions(PositionsKind::Scalar)?;
@@ -168,7 +291,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
         vec![act_tensor(
             vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(spec.dim)],
             DType::F16,
-        )],
+        )?],
     )?
     .first()
     .copied();
@@ -206,7 +329,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
         vec![act_tensor(
             vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(spec.dim)],
             DType::F16,
-        )],
+        )?],
     )?;
 
     let head_w = add_weight(
@@ -227,7 +350,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
         vec![act_tensor(
             vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(spec.vocab)],
             DType::F16,
-        )],
+        )?],
     )?;
     // The logits edge is read directly from the executor store; it is not
     // registered as an external output because that contract is rank-3 F32
@@ -255,8 +378,24 @@ fn build_layer(
     x: EdgeId,
 ) -> Result<EdgeId, ExecError> {
     let t = Dim::Symbolic(ShapeSymbol::T);
-    let hd = spec.heads * spec.head_dim;
-    let hkv_d = spec.kv_heads * spec.head_dim;
+    let hd = spec.heads.checked_mul(spec.head_dim).ok_or_else(|| {
+        ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+            op: "synthetic",
+            detail: format!(
+                "heads ({}) * head_dim ({}) overflows u32",
+                spec.heads, spec.head_dim
+            ),
+        })
+    })?;
+    let hkv_d = spec.kv_heads.checked_mul(spec.head_dim).ok_or_else(|| {
+        ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+            op: "synthetic",
+            detail: format!(
+                "kv_heads ({}) * head_dim ({}) overflows u32",
+                spec.kv_heads, spec.head_dim
+            ),
+        })
+    })?;
     let tag = format!("l{layer}");
 
     let norm_w = add_param(
@@ -270,7 +409,7 @@ fn build_layer(
         graph,
         Op::Norm(norm_rms()),
         &[x, norm_w],
-        vec![act_tensor(vec![t, Dim::Concrete(spec.dim)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(spec.dim)], DType::F16)?],
     )?;
 
     // Q/K/V projections ([T, H*D] flat, reshaped to rank 3 for rope/attention).
@@ -299,19 +438,19 @@ fn build_layer(
         graph,
         Op::Matmul(matmul_none()),
         &[xn, wq],
-        vec![act_tensor(vec![t, Dim::Concrete(hd)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(hd)], DType::F16)?],
     )?;
     let k_flat = sole_output(
         graph,
         Op::Matmul(matmul_none()),
         &[xn, wk],
-        vec![act_tensor(vec![t, Dim::Concrete(hkv_d)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(hkv_d)], DType::F16)?],
     )?;
     let v_flat = sole_output(
         graph,
         Op::Matmul(matmul_none()),
         &[xn, wv],
-        vec![act_tensor(vec![t, Dim::Concrete(hkv_d)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(hkv_d)], DType::F16)?],
     )?;
     let pos = graph
         .positions_binding()
@@ -353,7 +492,7 @@ fn build_layer(
         vec![act_tensor(
             vec![t, Dim::Concrete(spec.heads), Dim::Concrete(spec.head_dim)],
             DType::F16,
-        )],
+        )?],
     )?;
     let kr = sole_output(
         graph,
@@ -366,7 +505,7 @@ fn build_layer(
                 Dim::Concrete(spec.head_dim),
             ],
             DType::F16,
-        )],
+        )?],
     )?;
 
     let handle = StateHandle::new(layer, StateKind::KvPaged);
@@ -396,7 +535,7 @@ fn build_layer(
         vec![act_tensor(
             vec![t, Dim::Concrete(spec.heads), Dim::Concrete(spec.head_dim)],
             DType::F16,
-        )],
+        )?],
     )?;
     let o_flat = reshape(graph, o, vec![t, Dim::Concrete(hd)])?;
     let wo = add_weight(
@@ -410,7 +549,7 @@ fn build_layer(
         graph,
         Op::Matmul(matmul_none()),
         &[o_flat, wo],
-        vec![act_tensor(vec![t, Dim::Concrete(spec.dim)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(spec.dim)], DType::F16)?],
     )?;
     let x = sole_output(
         graph,
@@ -419,7 +558,7 @@ fn build_layer(
             scale: 1.0,
         }),
         &[x, proj],
-        vec![act_tensor(vec![t, Dim::Concrete(spec.dim)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(spec.dim)], DType::F16)?],
     )?;
 
     let ffn_norm_w = add_param(
@@ -433,7 +572,7 @@ fn build_layer(
         graph,
         Op::Norm(norm_rms()),
         &[x, ffn_norm_w],
-        vec![act_tensor(vec![t, Dim::Concrete(spec.dim)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(spec.dim)], DType::F16)?],
     )?;
     let wg = add_weight(
         graph,
@@ -453,13 +592,13 @@ fn build_layer(
         graph,
         Op::Matmul(matmul_none()),
         &[xn2, wg],
-        vec![act_tensor(vec![t, Dim::Concrete(spec.ff)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(spec.ff)], DType::F16)?],
     )?;
     let u = sole_output(
         graph,
         Op::Matmul(matmul_none()),
         &[xn2, wu],
-        vec![act_tensor(vec![t, Dim::Concrete(spec.ff)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(spec.ff)], DType::F16)?],
     )?;
     let h = sole_output(
         graph,
@@ -468,7 +607,7 @@ fn build_layer(
             clamp: None,
         }),
         &[g, u],
-        vec![act_tensor(vec![t, Dim::Concrete(spec.ff)], DType::F16)],
+        vec![act_tensor(vec![t, Dim::Concrete(spec.ff)], DType::F16)?],
     )?;
     let wd = add_weight(
         graph,
@@ -484,7 +623,7 @@ fn build_layer(
         vec![act_tensor(
             vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(spec.dim)],
             DType::F16,
-        )],
+        )?],
     )?;
     sole_output(
         graph,
@@ -496,7 +635,7 @@ fn build_layer(
         vec![act_tensor(
             vec![Dim::Symbolic(ShapeSymbol::T), Dim::Concrete(spec.dim)],
             DType::F16,
-        )],
+        )?],
     )
 }
 
@@ -533,8 +672,8 @@ fn rope(spec: &SyntheticSpec) -> RopeOp {
 }
 
 /// Activation tensor descriptor (device rank 0, replicated, contiguous).
-fn act_tensor(shape: Vec<Dim>, dtype: DType) -> r9v_ir::Tensor {
-    r9v_ir::Tensor::new(
+fn act_tensor(shape: Vec<Dim>, dtype: DType) -> Result<r9v_ir::Tensor, ExecError> {
+    Ok(r9v_ir::Tensor::new(
         shape,
         dtype,
         QuantScheme::None,
@@ -542,8 +681,7 @@ fn act_tensor(shape: Vec<Dim>, dtype: DType) -> r9v_ir::Tensor {
         Placement::Device { rank: 0 },
         ShardLayout::Replicated,
         Class::Activation,
-    )
-    .expect("synthetic activation descriptor is well-formed")
+    )?)
 }
 
 /// Adds one op node, returning its output edges in order.
@@ -590,14 +728,28 @@ fn add_weight(
     seed: u64,
     shape: Vec<usize>,
 ) -> Result<EdgeId, ExecError> {
-    let len: usize = shape.iter().product();
+    let len: usize = shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| {
+            ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                op: "synthetic",
+                detail: format!("weight `{name}` shape {shape:?} element count overflows usize"),
+            })
+        })?;
+    let byte_len = len.checked_mul(std::mem::size_of::<u16>()).ok_or_else(|| {
+        ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+            op: "synthetic",
+            detail: format!("weight `{name}` shape {shape:?} byte size overflows usize"),
+        })
+    })?;
     let mut rng = rng_for("a1.12-synthetic", weight_counter(weights.len(), name), seed);
     let values = uniform_f32(&mut rng, len, -1.0, 1.0);
-    let mut bytes = Vec::with_capacity(len * 2);
+    let mut bytes = Vec::with_capacity(byte_len);
     for value in values {
         bytes.extend_from_slice(&f32_to_f16(value).to_le_bytes());
     }
-    let edge = graph.add_tensor(weight_tensor(&shape))?;
+    let edge = graph.add_tensor(weight_tensor(&shape)?)?;
     weights.push((edge, TypedBuffer::from_bytes(&shape, DType::F16, &bytes)));
     Ok(edge)
 }
@@ -610,10 +762,24 @@ fn add_param(
     seed: u64,
     shape: Vec<usize>,
 ) -> Result<EdgeId, ExecError> {
-    let len: usize = shape.iter().product();
+    let len: usize = shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| {
+            ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                op: "synthetic",
+                detail: format!("param `{name}` shape {shape:?} element count overflows usize"),
+            })
+        })?;
+    let _byte_len = len.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
+        ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+            op: "synthetic",
+            detail: format!("param `{name}` shape {shape:?} byte size overflows usize"),
+        })
+    })?;
     let mut rng = rng_for("a1.12-synthetic", weight_counter(weights.len(), name), seed);
     let values = uniform_f32(&mut rng, len, 0.5, 1.5);
-    let edge = graph.add_tensor(param_tensor(&shape))?;
+    let edge = graph.add_tensor(param_tensor(&shape)?)?;
     weights.push((edge, TypedBuffer::from_f32(&shape, &values)));
     Ok(edge)
 }
@@ -631,29 +797,47 @@ fn weight_counter(ordinal: usize, name: &str) -> u64 {
 }
 
 /// F16 weight descriptor (device rank 0, replicated, contiguous).
-fn weight_tensor(shape: &[usize]) -> r9v_ir::Tensor {
-    r9v_ir::Tensor::new(
-        shape.iter().map(|&d| Dim::Concrete(d as u32)).collect(),
+fn weight_tensor(shape: &[usize]) -> Result<r9v_ir::Tensor, ExecError> {
+    let mut dims = Vec::with_capacity(shape.len());
+    for &d in shape {
+        let u = u32::try_from(d).map_err(|_| {
+            ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                op: "synthetic",
+                detail: format!("shape dimension {d} exceeds u32::MAX"),
+            })
+        })?;
+        dims.push(Dim::Concrete(u));
+    }
+    Ok(r9v_ir::Tensor::new(
+        dims,
         DType::F16,
         QuantScheme::None,
         LayoutId::CONTIGUOUS,
         Placement::Device { rank: 0 },
         ShardLayout::Replicated,
         Class::Weight,
-    )
-    .expect("synthetic weight descriptor is well-formed")
+    )?)
 }
 
 /// F32 parameter descriptor (norm weights).
-fn param_tensor(shape: &[usize]) -> r9v_ir::Tensor {
-    r9v_ir::Tensor::new(
-        shape.iter().map(|&d| Dim::Concrete(d as u32)).collect(),
+fn param_tensor(shape: &[usize]) -> Result<r9v_ir::Tensor, ExecError> {
+    let mut dims = Vec::with_capacity(shape.len());
+    for &d in shape {
+        let u = u32::try_from(d).map_err(|_| {
+            ExecError::T0(crate::error::T0Error::ArithmeticOverflow {
+                op: "synthetic",
+                detail: format!("shape dimension {d} exceeds u32::MAX"),
+            })
+        })?;
+        dims.push(Dim::Concrete(u));
+    }
+    Ok(r9v_ir::Tensor::new(
+        dims,
         DType::F32,
         QuantScheme::None,
         LayoutId::CONTIGUOUS,
         Placement::Device { rank: 0 },
         ShardLayout::Replicated,
         Class::Param,
-    )
-    .expect("synthetic param descriptor is well-formed")
+    )?)
 }

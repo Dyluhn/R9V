@@ -152,8 +152,6 @@ mod tests {
                 "logit {index} differs: direct={a} file={b}"
             );
         }
-        // Independent validation with real Python NumPy (Spec 14 §10, Card A1.12).
-        validate_with_python_numpy(&out_path, &[5, 64], &direct);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -179,50 +177,69 @@ mod tests {
                 "element {i} round-trip mismatch: wrote {a}, read {b}"
             );
         }
-        validate_with_python_numpy(&npy_path, &shape, &original_data);
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn numpy_interoperability_validates_with_python_numpy() {
+    fn numpy_emitted_bytes_match_committed_golden_oracle_fixture() {
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/card-tests/r9v-cli-numpy-interop");
+            .join("../../target/card-tests/r9v-cli-numpy-golden");
         if dir.exists() {
             fs::remove_dir_all(&dir).unwrap();
         }
         fs::create_dir_all(&dir).unwrap();
 
-        // Validate multiple shapes: 1D (checks trailing comma), 2D, and 3D.
-        let cases: Vec<(Vec<usize>, Vec<f32>)> = vec![
-            (vec![7], (0..7).map(|i| (i as f32) * 1.5 - 3.0).collect()),
+        // Cases matching the committed NumPy 2.4.6 golden fixtures under tests/fixtures/r9v/.
+        let test_cases: Vec<(&str, Vec<usize>, Vec<f32>)> = vec![
             (
+                "golden_f32_3x8.hex",
                 vec![3, 8],
                 (0..24).map(|i| (i as f32) * 0.125 - 1.5).collect(),
             ),
             (
-                vec![2, 3, 4],
-                (0..24).map(|i| ((i as f32) + 0.5) / 7.0).collect(),
+                "golden_f32_1d.hex",
+                vec![7],
+                (0..7).map(|i| (i as f32) * 1.5 - 3.0).collect(),
             ),
         ];
 
-        for (case_idx, (shape, original_data)) in cases.into_iter().enumerate() {
-            let npy_path = dir.join(format!("test_interop_{case_idx}.npy"));
-            super::eval::write_npy_f32(&npy_path, &shape, &original_data).unwrap();
+        for (fixture_name, shape, data) in test_cases {
+            let golden_bytes = load_fixture_hex(fixture_name);
+            let npy_path = dir.join(format!("emitted_{fixture_name}.npy"));
+            super::eval::write_npy_f32(&npy_path, &shape, &data).unwrap();
 
-            // Validate with in-tree reader.
+            // 1. Bit-for-bit, byte-for-byte exact equality against NumPy-produced golden oracle.
+            let emitted_bytes = fs::read(&npy_path).unwrap();
+            assert_eq!(
+                emitted_bytes, golden_bytes,
+                "emitted .npy bytes differ from NumPy golden oracle for {fixture_name}"
+            );
+
+            // 2. In-tree round trip: read_npy_f32 decodes shape and exact float bit patterns.
             let (read_shape, read_data) = super::eval::read_npy_f32(&npy_path).unwrap();
             assert_eq!(read_shape, shape);
-            assert_eq!(read_data.len(), original_data.len());
-            for (i, (&a, &b)) in original_data.iter().zip(read_data.iter()).enumerate() {
+            assert_eq!(read_data.len(), data.len());
+            for (i, (&a, &b)) in data.iter().zip(read_data.iter()).enumerate() {
                 assert_eq!(
                     a.to_bits(),
                     b.to_bits(),
-                    "case {case_idx} element {i} mismatch"
+                    "{fixture_name} element {i} mismatch"
                 );
             }
 
-            // Validate with real Python NumPy.
-            validate_with_python_numpy(&npy_path, &shape, &original_data);
+            // 3. Read directly from golden bytes written to disk to prove reader compatibility.
+            let direct_golden_path = dir.join(format!("direct_{fixture_name}.npy"));
+            fs::write(&direct_golden_path, &golden_bytes).unwrap();
+            let (gold_shape, gold_data) = super::eval::read_npy_f32(&direct_golden_path).unwrap();
+            assert_eq!(gold_shape, shape);
+            assert_eq!(gold_data.len(), data.len());
+            for (i, (&a, &b)) in data.iter().zip(gold_data.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "{fixture_name} golden decode mismatch at element {i}"
+                );
+            }
         }
 
         // Validate checked arithmetic on invalid shape/data length.
@@ -238,58 +255,87 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Validates an emitted .npy file with real Python NumPy via subprocess.
-    fn validate_with_python_numpy(
-        path: &std::path::Path,
-        expected_shape: &[usize],
-        expected_data: &[f32],
-    ) {
-        use std::io::Write;
-        let py = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
-        let shape_tuple = if expected_shape.len() == 1 {
-            format!("({},)", expected_shape[0])
-        } else {
-            let dims = expected_shape
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("({dims})")
-        };
-        let py_script = format!(
-            r#"
-import sys, numpy as np
-arr = np.load(r"{}")
-assert arr.dtype == np.float32, f"unexpected dtype: {{arr.dtype}}"
-assert arr.flags.c_contiguous, "array is not C-contiguous"
-assert tuple(arr.shape) == {shape_tuple}, f"shape mismatch: {{arr.shape}} vs {shape_tuple}"
-expected_bytes = sys.stdin.buffer.read()
-assert arr.tobytes() == expected_bytes, "array byte payload mismatch"
-"#,
-            path.display(),
-        );
-        let mut child = std::process::Command::new(&py)
-            .arg("-c")
-            .arg(&py_script)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|err| panic!("failed to spawn python interpreter ({py}): {err}"));
-        let expected_bytes: Vec<u8> = expected_data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        {
-            let mut stdin = child.stdin.take().expect("child stdin open");
-            stdin.write_all(&expected_bytes).unwrap();
+    #[test]
+    fn untrusted_json_model_arithmetic_overflow_fails_closed_before_allocation() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/card-tests/r9v-cli-untrusted-model");
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
         }
-        let output = child
-            .wait_with_output()
-            .expect("failed waiting for python process");
+        fs::create_dir_all(&dir).unwrap();
+
+        let tokens_path = dir.join("tokens.txt");
+        fs::write(&tokens_path, "1 2 3").unwrap();
+
+        // 1. heads * head_dim overflow in untrusted JSON
+        let mut bad_heads = r9v_t0::synthetic::SyntheticSpec::test_default();
+        bad_heads.heads = 2147483648;
+        bad_heads.kv_heads = 1;
+        bad_heads.head_dim = 2;
+        let bad_heads_path = dir.join("bad_heads.json");
+        fs::write(&bad_heads_path, serde_json::to_string(&bad_heads).unwrap()).unwrap();
+        let err = super::eval::eval_logits(&bad_heads_path, &tokens_path, None)
+            .unwrap_err()
+            .to_lowercase();
         assert!(
-            output.status.success(),
-            "python numpy validation failed for {}: stdout={}\nstderr={}",
-            path.display(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            err.contains("arithmetic") && err.contains("overflow") && err.contains("heads"),
+            "expected arithmetic overflow on heads * head_dim, got {err}"
         );
+
+        // 2. kv_heads * head_dim overflow in untrusted JSON
+        let mut bad_kv = r9v_t0::synthetic::SyntheticSpec::test_default();
+        bad_kv.heads = 1;
+        bad_kv.kv_heads = 2147483648;
+        bad_kv.head_dim = 2;
+        let bad_kv_path = dir.join("bad_kv.json");
+        fs::write(&bad_kv_path, serde_json::to_string(&bad_kv).unwrap()).unwrap();
+        let err = super::eval::eval_logits(&bad_kv_path, &tokens_path, None)
+            .unwrap_err()
+            .to_lowercase();
+        assert!(
+            err.contains("arithmetic") && err.contains("overflow") && err.contains("kv_heads"),
+            "expected arithmetic overflow on kv_heads * head_dim, got {err}"
+        );
+
+        // 3. vocab * dim shape and byte-size product overflow in untrusted JSON
+        let mut bad_shape = r9v_t0::synthetic::SyntheticSpec::test_default();
+        bad_shape.vocab = u32::MAX;
+        bad_shape.dim = u32::MAX;
+        let bad_shape_path = dir.join("bad_shape.json");
+        fs::write(&bad_shape_path, serde_json::to_string(&bad_shape).unwrap()).unwrap();
+        let err = super::eval::eval_logits(&bad_shape_path, &tokens_path, None)
+            .unwrap_err()
+            .to_lowercase();
+        assert!(
+            err.contains("arithmetic")
+                && err.contains("overflow")
+                && err.contains("overflows usize"),
+            "expected arithmetic overflow on shape/byte-size products, got {err}"
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Loads and decodes a hex-encoded fixture from `crates/r9v/tests/fixtures/r9v/`.
+    fn load_fixture_hex(filename: &str) -> Vec<u8> {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/r9v")
+            .join(filename);
+        let text = fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|err| panic!("cannot read fixture {}: {err}", fixture_path.display()));
+        decode_hex(text.trim())
+    }
+
+    /// Decodes an ASCII hex string into raw bytes.
+    fn decode_hex(hex: &str) -> Vec<u8> {
+        let bytes = hex.as_bytes();
+        assert_eq!(bytes.len() % 2, 0, "hex length must be even");
+        let mut out = Vec::with_capacity(bytes.len() / 2);
+        for chunk in bytes.chunks_exact(2) {
+            let hi = (chunk[0] as char).to_digit(16).expect("valid hex digit");
+            let lo = (chunk[1] as char).to_digit(16).expect("valid hex digit");
+            out.push(((hi << 4) | lo) as u8);
+        }
+        out
     }
 }

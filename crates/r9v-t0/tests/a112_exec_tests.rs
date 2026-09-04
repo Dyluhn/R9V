@@ -1954,3 +1954,127 @@ fn executor_refuses_sampling_context_mismatch_and_missing_ngram_hash() {
     );
     assert!(matches!(err_hash, Err(ExecError::MissingNgramHash { .. })));
 }
+
+#[test]
+fn synthetic_spec_and_build_refuse_arithmetic_overflow() {
+    use r9v_t0::synthetic::{build as build_synthetic, SyntheticSpec};
+
+    // 1. heads * head_dim overflow
+    let mut spec = SyntheticSpec::test_default();
+    spec.heads = 0x8000_0000;
+    spec.kv_heads = 1;
+    spec.head_dim = 2;
+    let err_hd = spec.validate();
+    assert!(
+        matches!(
+            err_hd,
+            Err(ExecError::T0(r9v_t0::error::T0Error::ArithmeticOverflow { ref detail, .. }))
+            if detail.contains("heads")
+        ),
+        "expected ArithmeticOverflow on heads * head_dim, got {err_hd:?}"
+    );
+    let build_err_hd = build_synthetic(&spec);
+    assert!(matches!(
+        build_err_hd,
+        Err(ExecError::T0(
+            r9v_t0::error::T0Error::ArithmeticOverflow { .. }
+        ))
+    ));
+
+    // 2. kv_heads * head_dim overflow
+    let mut spec_kv = SyntheticSpec::test_default();
+    spec_kv.heads = 0x8000_0000;
+    spec_kv.kv_heads = 0x8000_0000;
+    spec_kv.head_dim = 2;
+    let err_kv = spec_kv.validate();
+    let err_kv_str = format!("{err_kv:?}");
+    assert!(
+        err_kv_str.contains("kv_heads") && err_kv_str.contains("overflows u32"),
+        "expected ArithmeticOverflow on kv_heads * head_dim, got {err_kv:?}"
+    );
+
+    // 3. Shape product and byte size product overflow
+    let mut spec_shape = SyntheticSpec::test_default();
+    spec_shape.vocab = u32::MAX;
+    spec_shape.dim = u32::MAX;
+    let err_shape = spec_shape.validate();
+    let err_shape_str = format!("{err_shape:?}");
+    assert!(
+        err_shape_str.contains("ArithmeticOverflow") && err_shape_str.contains("overflows usize"),
+        "expected ArithmeticOverflow on shape product, got {err_shape:?}"
+    );
+
+    // 4. Over-sized values reject in build before allocation
+    let mut bad_spec = SyntheticSpec::test_default();
+    bad_spec.vocab = u32::MAX;
+    bad_spec.dim = u32::MAX;
+    let err_build = build_synthetic(&bad_spec).err().expect("build must fail");
+    let err_build_str = format!("{err_build:?}");
+    assert!(
+        err_build_str.contains("ArithmeticOverflow") && err_build_str.contains("overflows usize"),
+        "expected ArithmeticOverflow on build, got {err_build_str}"
+    );
+}
+
+#[test]
+fn typed_buffer_try_zeros_refuses_overflow() {
+    use r9v_t0::buffer::TypedBuffer;
+    use r9v_t0::error::T0Error;
+
+    // Shape product overflow
+    let err_shape = TypedBuffer::try_zeros(&[usize::MAX, 2], DType::F32);
+    assert!(matches!(err_shape, Err(T0Error::ArithmeticOverflow { .. })));
+
+    // Byte size overflow (elements fits in usize, but elements * 4 overflows)
+    let err_bytes = TypedBuffer::try_zeros(&[usize::MAX / 2, 2], DType::F32);
+    assert!(matches!(err_bytes, Err(T0Error::ArithmeticOverflow { .. })));
+}
+
+#[test]
+fn executor_output_allocation_refuses_overflow_before_allocating() {
+    let mut graph = Graph::new(key(1, 1));
+    let x = ext(
+        &mut graph,
+        ExternalInputKind::EmbedOverride,
+        act_d(vec![Dim::Concrete(1), Dim::Concrete(1)], DType::F32),
+    );
+    // An op node declaring an output shape whose product overflows usize
+    let huge_dim = (u32::MAX / 2) + 1;
+    let _ = add_node(
+        &mut graph,
+        Op::ResidualAdd(r9v_ir::ResidualAddOp {
+            out_dtype: DType::F32,
+            scale: 1.0,
+        }),
+        &[x, x],
+        vec![act_d(
+            vec![
+                Dim::Concrete(huge_dim),
+                Dim::Concrete(huge_dim),
+                Dim::Concrete(huge_dim),
+            ],
+            DType::F32,
+        )],
+    );
+
+    let mut exec = CpuExecutor::new();
+    exec.bind(x, TypedBuffer::from_f32(&[1, 1], &[1.0]));
+    let batch = step_batch(1, 0);
+    let err = exec.run(
+        &graph,
+        RunArgs {
+            batch: &batch,
+            params: &[],
+            rng: &mut [],
+            ngram_hash: None,
+        },
+    );
+    assert!(
+        matches!(
+            err,
+            Err(ExecError::T0(r9v_t0::error::T0Error::ArithmeticOverflow { ref detail, .. }))
+            if detail.contains("overflows usize")
+        ),
+        "expected ArithmeticOverflow on executor output allocation, got {err:?}"
+    );
+}
