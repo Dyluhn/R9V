@@ -17,7 +17,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     python3 \
     python3-pip \
+    shellcheck \
     && rm -rf /var/lib/apt/lists/*
+
+# Keep the image self-contained: source is deliberately mounted only at run
+# time, so its pinned Python gate tools are mirrored here explicitly.
+RUN python3 -m pip install --break-system-packages --no-cache-dir \
+    pytest==9.1.1 \
+    ruff==0.16.5
 
 # Install pinned Rust toolchain (Spec 14 §3, rust-toolchain.toml)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
@@ -31,3 +38,4 @@ RUN curl -sL "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20
     | tar -xz -C /usr/local/cargo/bin --strip-components=1 "cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny"
 
 WORKDIR /workspace
+ENV R9V_CI_REQUIRE_SHELLCHECK=1

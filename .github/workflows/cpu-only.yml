@@ -83,60 +83,14 @@ jobs:
           curl -sL "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz" \
             | tar -xz -C ~/.cargo/bin --strip-components=1 "cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny"
 
-      - name: Check formatting (cargo fmt)
-        run: cargo fmt --check
-
-      - name: Clippy (cargo clippy)
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Check licenses and dependencies (cargo deny)
-        run: cargo deny check
-
-      - name: Run workspace tests (cargo test)
-        run: cargo test --workspace --locked
+      - name: Run Rust CPU gates
+        run: ./scripts/ci-gates.sh rust
 
       - name: Verify xtask docs
-        run: cargo xtask docs
+        run: ./scripts/ci-gates.sh docs
 
       - name: Verify xtask gen
-        run: |
-          cargo xtask gen
-          if [ -d "kernels/gen" ]; then
-            git diff --exit-code kernels/gen/
-          fi
+        run: ./scripts/ci-gates.sh gen
 
-      - name: Inline assembly check (Spec 4 §8, Spec 14 §5.1)
-        run: |
-          echo "Checking that inline asm appears only in crates/r9v-kgen/src/leaf/..."
-          ILLEGAL_ASM=$(git grep -En "asm!\s*\(|__asm__|\basm\s+volatile" -- \
-            '*.rs' '*.hip' '*.cpp' '*.h' '*.cu' '*.py' \
-            ':!crates/r9v-kgen/src/leaf/*' \
-            ':!scripts/check_card.py' \
-            ':!skills/r9v-card-work/scripts/check_card.py' \
-            ':!.agents/skills/r9v-card-work/scripts/check_card.py' \
-            ':!tests/test_check_card.py' 2>/dev/null || true)
-          if [ -n "$ILLEGAL_ASM" ]; then
-            echo "Found illegal inline assembly outside crates/r9v-kgen/src/leaf/:"
-            echo "$ILLEGAL_ASM"
-            exit 1
-          fi
-          echo "Inline assembly check passed."
-
-      - name: Unsafe code check (Spec 14 §2, r9v-card-work §2)
-        run: |
-          echo "Checking that unsafe appears only in crates/r9v-hip and crates/r9v-t0 SIMD modules..."
-          ILLEGAL_UNSAFE=$(git grep -En "\bunsafe\b" -- \
-            '*.rs' '*.hip' '*.cpp' '*.h' '*.cu' '*.py' \
-            ':!crates/r9v-hip/*' \
-            ':!crates/r9v-t0/src/simd/*' \
-            ':!tests/*' \
-            ':!benches/*' \
-            ':!scripts/check_card.py' \
-            ':!skills/r9v-card-work/scripts/check_card.py' \
-            ':!.agents/skills/r9v-card-work/scripts/check_card.py' 2>/dev/null || true)
-          if [ -n "$ILLEGAL_UNSAFE" ]; then
-            echo "Found illegal unsafe code:"
-            echo "$ILLEGAL_UNSAFE"
-            exit 1
-          fi
-          echo "Unsafe code check passed."
+      - name: Source policy checks (Spec 4 §8, Spec 14 §2/§5.1)
+        run: ./scripts/ci-gates.sh policy

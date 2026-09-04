@@ -111,6 +111,32 @@ Triggers: every push to `main`; PRs from branches in the main repository automat
 
 Status check name: `gpu/gfx1201`. Required for merge to `main`.
 
+### 5.2a Development VM vs bare-metal hardware lane
+
+The hardware-blind development VM (`vm/r9v-vm.sh`) and the bare-metal
+hardware container (`vm/r9v-hw-container.sh`) are distinct lanes with
+distinct claims:
+
+- The dev VM uses a generic named CPU, fixed vCPU/RAM/disk topology, no
+  host shares, and no GPU nodes; sources reach it only as a standalone shallow
+  Git snapshot copied to guest disk (including pinned submodule metadata and
+  intentional working-tree edits, never the host worktree's `.git` pointer).
+  The guest snapshot mounts read-only at `/source` and is copied into the
+  container's writable `/workspace`, so generator/diff gates work without
+  mutating the snapshot. It runs the consolidated CPU gates (`scripts/ci-gates.sh all`)
+  inside the pinned `ci/Dockerfile` environment for development iteration.
+  Its topology and any numbers produced inside it are non-authoritative and
+  unable to qualify performance.
+- The hardware container runs on bare metal with explicitly selected
+  `/dev/kfd` and `/dev/dri/renderD*` nodes (via the required
+  `R9V_RENDER_NODES`), read-only PCI sysfs, and a read-only source mount
+  with container-local writable target/cache paths. It runs the full gates
+  plus the `r9v-hip` GPU smoke test.
+
+Only bare-metal runs can produce qualification evidence. The immutable
+performance floors remain gated on the reference receipt protocol (§5.2);
+no VM measurement weakens, replaces, or pre-qualifies them.
+
 ### 5.3 Runner isolation
 
 - GPU jobs run in the pinned OCI image under the ordinary Linux container runtime. The container receives only `/dev/kfd` and the required `/dev/dri/renderD*` nodes; it does not receive a privileged container or the host filesystem.

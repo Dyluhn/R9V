@@ -14,3 +14,10 @@ dist/
 *.safetensors
 per_layer_token_embd.*.bin
 target/
+# R9V dev VM: private keys, base images, overlays, seed ISOs, and XDG-state
+# checkouts stay outside the repo; ignore them defensively if copied in.
+*.qcow2
+vm/.state/
+vm/*-seed.iso
+vm/seed/
+vm/id_ed25519*

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Pinned base image for the hardware-blind R9V development VM.
+# Official released Ubuntu 24.04 (noble) server cloud image, from the dated
+# immutable release directory (never the `current` symlink). Verified against
+# https://cloud-images.ubuntu.com/releases/noble/release-20260826/SHA256SUMS.
+# `fetch` downloads and verifies this file; `up` refuses to boot an image
+# whose SHA256 does not match.
+R9V_VM_IMAGE_URL=https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64.img
+R9V_VM_IMAGE_SHA256=d0fe84bb5f80853425fa6be28e2c106f30104c3cfe8611933f2e65c9b63f0e30
+R9V_VM_IMAGE_DATE=20260826
