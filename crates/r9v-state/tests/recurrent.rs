@@ -107,7 +107,7 @@ fn mixed_accept_history_flips_active_buffer_exactly() {
 
     // The rejected tail stays allocated and is overwritten in place.
     let slots = m.reserve(a, 1).unwrap();
-    assert_eq!(slots.start, 4);
+    assert_eq!(slots.start(), 4);
     m.commit(a, 1).unwrap();
     assert_eq!(m.ctx_len(a).unwrap(), 5);
     assert_eq!(m.recurrent_active(a, 1).unwrap(), 1);

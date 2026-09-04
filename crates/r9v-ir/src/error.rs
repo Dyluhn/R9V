@@ -218,6 +218,30 @@ pub enum IrError {
         token: usize,
     },
 
+    /// Caller-owned cycle-check state is shorter than the token count, so
+    /// [`validate_tree_slices`](crate::validate_tree_slices) cannot run
+    /// (Spec 1 §4.D.1). A caller bug (cold sizing), never input data: size
+    /// the scratch cold to cover `T`.
+    #[error("tree cycle state length {actual} < required {required} (Spec 1 §4.D.1)")]
+    TreeCycleStateTooSmall {
+        /// Token count `T` (`parents.len()`).
+        required: usize,
+        /// `cycle_state.len()` supplied by the caller.
+        actual: usize,
+    },
+
+    /// Caller-owned cycle-check path capacity is smaller than the token
+    /// count, so [`validate_tree_slices`](crate::validate_tree_slices)
+    /// cannot run (Spec 1 §4.D.1). A caller bug (cold sizing), never input
+    /// data: size the scratch cold to cover `T`.
+    #[error("tree cycle path capacity {actual} < required {required} (Spec 1 §4.D.1)")]
+    TreeCyclePathTooSmall {
+        /// Token count `T` (`parents.len()`).
+        required: usize,
+        /// `cycle_path.capacity()` supplied by the caller.
+        actual: usize,
+    },
+
     /// A parent pointer crosses between two sequences in a flattened batch
     /// (Spec 1 §4.D.1: −1 is the root of its sequence).
     #[error(

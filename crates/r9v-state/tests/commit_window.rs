@@ -44,7 +44,7 @@ fn over_reserved_positions_are_overwritten_by_next_reserve() {
 
     // Next step overwrites the rejected tail in place.
     let slots = m.reserve(a, 4).unwrap();
-    assert_eq!(slots.start, 3);
+    assert_eq!(slots.start(), 3);
     m.write_tokens(a, 3, &[30, 31, 32, 33]).unwrap();
     m.commit(a, 4).unwrap();
 
@@ -102,10 +102,10 @@ fn windowed_reserve_covers_full_range_when_n_exceeds_window() {
     let (a, _) = m.new_seq(&[]).unwrap();
 
     let slots = m.reserve(a, 64).unwrap();
-    assert_eq!(slots.start, 0);
-    assert_eq!(slots.len, 64);
-    assert_eq!(slots.slots.len(), 1);
-    let row = &slots.slots[0];
+    assert_eq!(slots.start(), 0);
+    assert_eq!(slots.len(), 64);
+    let mut row = vec![0u32; 64];
+    m.fill_slots(&slots, 0, &mut row).unwrap();
     assert_eq!(row.len(), 64);
     // 64 unique flattened slots: two blocks times 32 lanes.
     let unique: BTreeSet<u32> = row.iter().copied().collect();
@@ -194,9 +194,9 @@ fn compact_gathers_accepted_path_then_commit_verifies() {
     m.reserve(a, 4).unwrap();
     m.write_tokens(a, 0, &[50, 51, 52, 53]).unwrap();
     let op = m.compact(a, &[2, 0]).unwrap();
-    assert_eq!(op.dst_start, 0);
-    assert_eq!(op.len, 2);
-    assert_eq!(op.src_positions, vec![2, 0]);
+    assert_eq!(op.dst_start(), 0);
+    assert_eq!(op.len(), 2);
+    assert_eq!(op.src_positions(), &[2, 0]);
     m.commit(a, 2).unwrap();
 
     step_all(&mut m, b, &[52, 50]);

@@ -67,35 +67,15 @@ impl TreeMask {
     // constant because bucket sizes vary (Spec 1 §3.5). The IR carries the
     // mask the scheduler built; it does not derive ancestor sets itself.
     pub fn new(parents: Vec<i32>, t_max: u32, ancestors: Vec<bool>) -> Result<Self, IrError> {
-        let t = parents.len();
         let mut problems = Vec::new();
-        if t > 0 && t_max == 0 {
-            problems.push(IrError::ZeroTreeMax { t });
-        }
-        match t.checked_mul(t_max as usize) {
-            Some(expected) if ancestors.len() != expected => {
-                problems.push(IrError::AncestorLength {
-                    t,
-                    t_max,
-                    expected,
-                    actual: ancestors.len(),
-                });
-            }
-            Some(_) => {}
-            None => problems.push(IrError::AncestorShapeOverflow { t, t_max }),
-        }
-        for (token, parent) in parents.iter().enumerate() {
-            if *parent < -1 || *parent >= t as i32 {
-                problems.push(IrError::BadParent {
-                    token,
-                    parent: *parent,
-                    t,
-                });
-            } else if *parent == token as i32 {
-                problems.push(IrError::SelfParent { token });
-            }
-        }
-        collect_parent_cycles(&parents, &mut problems);
+        push_tree_shape_problems(parents.len(), t_max, ancestors.len(), &mut problems);
+        push_tree_parent_problems(&parents, &mut problems);
+        // Cold convenience: scratch may allocate per call. The scheduler hot
+        // path validates borrowed slices with `validate_tree_slices` and
+        // preallocated scratch instead (Spec 1 §4.D.1).
+        let mut state = vec![0u8; parents.len()];
+        let mut path = Vec::with_capacity(parents.len());
+        check_tree_cycles(&parents, &mut state, &mut path, &mut problems);
         if problems.is_empty() {
             Ok(Self {
                 parents,
@@ -576,35 +556,138 @@ fn checked_product(
     product
 }
 
-fn collect_parent_cycles(parents: &[i32], problems: &mut Vec<IrError>) {
-    let mut state = vec![0u8; parents.len()];
+/// Validates borrowed tree slices with caller-owned scratch (Spec 1 §4.D.1).
+///
+/// The scheduler hot path: `parents [T]`, column count `t_max`, and the
+/// flattened `[T, t_max]` ancestor mask are checked for shape, parent
+/// bounds/self-parent, and cycles with the same rules and the same errors as
+/// [`TreeMask::new`], in the same order. Undersized scratch is a typed
+/// [`IrError::TreeCycleStateTooSmall`]/[`IrError::TreeCyclePathTooSmall`]
+/// naming the requirement and the supplied length/capacity — never a panic,
+/// since short buffers are reachable from caller sizing. Success allocates
+/// nothing: the scratch checks run before any push buffer exists, `problems`
+/// stays empty on success, and every cycle push lands in scratch the caller
+/// sized cold (`cycle_state.len() >= T`, `cycle_path.capacity() >= T`).
+/// Failure may allocate while reporting, which is off the hot success path.
+pub fn validate_tree_slices(
+    parents: &[i32],
+    t_max: u32,
+    ancestors: &[bool],
+    cycle_state: &mut [u8],
+    cycle_path: &mut Vec<u32>,
+) -> Result<(), IrError> {
+    let t = parents.len();
+    if cycle_state.len() < t {
+        return Err(IrError::TreeCycleStateTooSmall {
+            required: t,
+            actual: cycle_state.len(),
+        });
+    }
+    if cycle_path.capacity() < t {
+        return Err(IrError::TreeCyclePathTooSmall {
+            required: t,
+            actual: cycle_path.capacity(),
+        });
+    }
+    cycle_state[..t].fill(0);
+    cycle_path.clear();
+    let mut problems = Vec::new();
+    push_tree_shape_problems(t, t_max, ancestors.len(), &mut problems);
+    push_tree_parent_problems(parents, &mut problems);
+    check_tree_cycles(parents, &mut cycle_state[..t], cycle_path, &mut problems);
+    IrError::from_problems(problems)
+}
+
+/// Shape rules shared by [`TreeMask::new`] and [`validate_tree_slices`]:
+/// a non-empty tree needs columns, and the mask is exactly `T * t_max`
+/// (Spec 1 §4.D.1). Pure: pushes into the caller's problems only on failure.
+fn push_tree_shape_problems(
+    t: usize,
+    t_max: u32,
+    ancestors_len: usize,
+    problems: &mut Vec<IrError>,
+) {
+    if t > 0 && t_max == 0 {
+        problems.push(IrError::ZeroTreeMax { t });
+    }
+    match t.checked_mul(t_max as usize) {
+        Some(expected) if ancestors_len != expected => {
+            problems.push(IrError::AncestorLength {
+                t,
+                t_max,
+                expected,
+                actual: ancestors_len,
+            });
+        }
+        Some(_) => {}
+        None => problems.push(IrError::AncestorShapeOverflow { t, t_max }),
+    }
+}
+
+/// Parent-id rules shared by [`TreeMask::new`] and [`validate_tree_slices`]:
+/// every id is −1 (root) or `< T`, never self (Spec 1 §4.D.1). Pure: pushes
+/// into the caller's problems only on failure.
+fn push_tree_parent_problems(parents: &[i32], problems: &mut Vec<IrError>) {
+    let t = parents.len();
+    for (token, parent) in parents.iter().enumerate() {
+        if *parent < -1 || *parent >= t as i32 {
+            problems.push(IrError::BadParent {
+                token,
+                parent: *parent,
+                t,
+            });
+        } else if *parent == token as i32 {
+            problems.push(IrError::SelfParent { token });
+        }
+    }
+}
+
+/// Cycle rule shared by [`TreeMask::new`] and [`validate_tree_slices`]
+/// (Spec 1 §4.D.1).
+///
+/// Deterministic three-mark walk from each lowest unvisited token: `state`
+/// marks `0 = unvisited, 1 = on this walk, 2 = done`, and `path` stages the
+/// current walk for the lowest-token report. Both buffers are caller-owned;
+/// pushes land within the cold-sized capacity, so success allocates nothing.
+/// A walk stops at roots, out-of-range ids, and self-parents (already
+/// reported by [`push_tree_parent_problems`]) instead of indexing them.
+fn check_tree_cycles(
+    parents: &[i32],
+    state: &mut [u8],
+    path: &mut Vec<u32>,
+    problems: &mut Vec<IrError>,
+) {
     for start in 0..parents.len() {
         if state[start] == 2 {
             continue;
         }
-        let mut path = Vec::new();
+        path.clear();
         let mut token = start;
         loop {
             match state[token] {
                 2 => break,
                 1 => {
-                    let first = path.iter().position(|&seen| seen == token).unwrap_or(0);
-                    let cycle_token = path[first..].iter().copied().min().unwrap_or(token);
+                    let first = path
+                        .iter()
+                        .position(|&seen| seen == token as u32)
+                        .unwrap_or(0);
+                    let cycle_token =
+                        path[first..].iter().copied().min().unwrap_or(token as u32) as usize;
                     problems.push(IrError::TreeCycle { token: cycle_token });
                     break;
                 }
                 _ => {}
             }
             state[token] = 1;
-            path.push(token);
+            path.push(token as u32);
             let parent = parents[token];
             if parent < 0 || parent as usize >= parents.len() || parent as usize == token {
                 break;
             }
             token = parent as usize;
         }
-        for token in path {
-            state[token] = 2;
+        for token in path.iter() {
+            state[*token as usize] = 2;
         }
     }
 }

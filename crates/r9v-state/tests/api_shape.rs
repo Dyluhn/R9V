@@ -10,6 +10,8 @@ use r9v_state::{CacheDtype, Retain, StateError, StateManager, StateSpec};
 
 fn assert_send_sync<T: Send + Sync>() {}
 
+fn assert_send_sync_copy<T: Send + Sync + Copy>() {}
+
 #[test]
 fn public_types_are_send_sync_and_errors_are_std_errors() {
     assert_send_sync::<StateManager>();
@@ -17,6 +19,9 @@ fn public_types_are_send_sync_and_errors_are_std_errors() {
     assert_send_sync::<r9v_state::CompactOp>();
     assert_send_sync::<r9v_state::Budget>();
     assert_send_sync::<r9v_state::SlotRange>();
+    assert_send_sync::<r9v_state::BatchWorkspace>();
+    assert_send_sync_copy::<r9v_state::TreeInput<'static>>();
+    assert_send_sync_copy::<r9v_state::TreeView<'static>>();
     fn is_std_error<T: std::error::Error>() {}
     is_std_error::<StateError>();
 }

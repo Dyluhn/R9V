@@ -142,7 +142,7 @@ fn compact_validation_is_typed() {
     assert!(matches!(err, StateError::InvalidCompact { .. }), "{err:?}");
     // Failed compacts mutate nothing: a valid compact still works.
     let op = m.compact(a, &[3, 1]).unwrap();
-    assert_eq!(op.len, 2);
+    assert_eq!(op.len(), 2);
     // Commit must match the compacted length.
     let err = m.commit(a, 4).unwrap_err();
     assert!(matches!(err, StateError::InvalidCompact { .. }), "{err:?}");

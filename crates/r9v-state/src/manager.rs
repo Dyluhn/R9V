@@ -17,12 +17,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use r9v_common::SeqId;
-use r9v_ir::{BatchMeta, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
+use r9v_ir::{validate_tree_slices, BatchMeta, IrError, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
 
 use crate::error::{InvalidItem, StateError, StateResult};
 use crate::spec::{
     group_layer_specs, group_layers, LayerGroup, StateDecl, StateSpec, BLOCK_TOKENS,
-    MAX_BATCH_TOKENS_HARD, MAX_CTX_HARD, MAX_RESERVE_HARD, MAX_SEQS_HARD,
+    MAX_BATCH_TOKENS_HARD, MAX_CTX_HARD, MAX_GROUPS_HARD, MAX_RESERVE_HARD, MAX_SEQS_HARD,
 };
 
 /// Slot value for layer-groups with no per-token slots (recurrent/conv).
@@ -140,17 +140,106 @@ pub fn block_offset(base: u64, block_id: u32, block_bytes: u64) -> StateResult<u
         })
 }
 
+// DECISION(A1.16): `reserve` returns a compact descriptor, never materialized
+// slot rows. Slot values are a deterministic function of the block tables,
+// so every group/token slot is resolved on demand through
+// [`StateManager::slot`] / [`StateManager::fill_slots`] with checked,
+// typed errors. Rejected: allocating `Vec<Vec<u32>>` rows per call (a heap
+// allocation on every decode step, and the shape that forced a row-cap
+// constant); a bounded thread-local row recycle pool (ties reservations to
+// thread identity, caps live ranges and widths by magic constants, and pairs
+// a public movable field with a `Drop` impl so `let s = r.slots;` fails to
+// compile); borrowed rows tied to the manager borrow (would forbid holding
+// two sequences' reservations across a `batch_meta` call); and a
+// lock-guarded global pool (spec 6 §3.3 keeps the scheduler single-threaded
+// with no locks on the hot path). Outputs stay a deterministic function of
+// the request history alone (Spec 3 §5, §8).
+// DECISION(A1.16): a `SlotRange` is scoped to its open reservation,
+// not "valid until freed". `slot`/`fill_slots` validate `start`/`len`
+// against the live `ctx_len`/`tail_len` and reject stale (post-commit, freed,
+// or superseded by a later reserve) and foreign descriptors typed; an
+// identical re-reservation after `accepted == 0` compares equal and remains
+// usable, which is documented, not a scope hole. Rejected: trusting
+// `start`/`len` without the live tail check (lets a stale descriptor read a
+// later step's overwritten tail). Spec 3 §3.6, §5.
 /// Slots reserved for one step (Spec 3 §5 `reserve`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Compact descriptor: the owning sequence, the first reserved position (the
+/// sequence's `ctx_len` at reserve time), and the reserved token count.
+/// `Copy` with private fields and no `Drop`, so ranges move across threads
+/// and any number of ranges stay live at once. Resolve values with
+/// [`StateManager::slot`] or [`SlotRange::slot`], or fill a caller-owned row
+/// with [`StateManager::fill_slots`].
+///
+/// Scope: valid only while its reservation is open (`ctx_len == start` and
+/// `tail_len == len` on the owning sequence). `commit`/`free_seq`/a later
+/// `reserve` invalidate it; use after that is a typed error, never a read of
+/// another step's tail. An identical re-reservation after `accepted == 0`
+/// (`ctx` unchanged, same `n`) compares equal and resolves identically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlotRange {
-    /// First reserved position (the sequence's `ctx_len` at reserve time).
-    pub start: u32,
-    /// Reserved token count.
-    pub len: u32,
-    /// Flattened slots per group (`slots[g][i]`), `SLOT_NONE` for
-    /// recurrent/conv groups.
-    pub slots: Vec<Vec<u32>>,
+    seq: SeqId,
+    start: u32,
+    len: u32,
 }
+
+impl SlotRange {
+    /// Owning sequence (Spec 3 §5).
+    pub const fn seq(self) -> SeqId {
+        self.seq
+    }
+
+    /// First reserved position (the sequence's `ctx_len` at reserve time).
+    pub const fn start(self) -> u32 {
+        self.start
+    }
+
+    /// Reserved token count.
+    pub const fn len(self) -> u32 {
+        self.len
+    }
+
+    /// One past the last reserved position (`start + len`, Spec 3 §3.6).
+    ///
+    /// Cannot overflow: `reserve` admits a range only when `start + len` fits
+    /// in `max_ctx`.
+    pub const fn end(self) -> u32 {
+        self.start + self.len
+    }
+
+    /// Whether the reservation holds no tokens (never produced by `reserve`,
+    /// which refuses `n == 0`; provided for caller-side emptiness checks).
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Flattened slot for token `k` of this reservation in group `group`
+    /// (Spec 1 §2.5, Spec 3 §3.3): `SLOT_NONE` for recurrent/conv groups.
+    ///
+    /// Checked: out-of-range group or token index, an unknown/freed
+    /// sequence, a stale/foreign reservation (`start`/`len` must match the
+    /// live `ctx_len`/`tail_len`), and an unmapped position are typed
+    /// errors, never a clamp.
+    pub fn slot(self, manager: &StateManager, group: usize, k: u32) -> StateResult<u32> {
+        manager.slot(&self, group, k)
+    }
+}
+
+// DECISION(A1.16): tree/query paths are bounded by spec and config
+// (spec 1 §4: `query_len <= 16` for spec verify; spec 7 §5: tree size engine
+// cap 16; spec 12 §3: `k_max <= 15` so `k + 1 <= 16`, `tree_max <= 16`), so
+// `CompactOp` is an exact fixed-capacity descriptor: 16 inline source slots,
+// no heap, `Copy`, with slice access. Duplicate detection is an O(n^2) scan
+// over the stack array and overlap staging is per-group stack copies —
+// bounded by 16, never a `BTreeSet`/`Vec`/`Vec<Vec>>`. Lengths above 16 are
+// refused typed before any mutation. Rejected: heap `src`/`dsts`/`staged`
+// vecs (allocate on the cold first verify step); warmup/TLS/pool sizing to
+// hide them (ties zero-alloc to history, thread, or magic constants). Spec 3
+// §3.6; spec 1 §4.D.1; spec 7 §5; spec 12 §3.
+/// Maximum accepted tokens in one tree-verify compaction (Spec 1 §4,
+/// Spec 7 §5, Spec 12 §3: `query_len <= 16`, tree engine cap 16,
+/// `k_max <= 15`, `tree_max <= 16`).
+pub const MAX_COMPACT_TOKENS: usize = 16;
 
 /// Tree-verify compaction descriptor (Spec 3 §3.6).
 ///
@@ -158,16 +247,46 @@ pub struct SlotRange {
 /// K/V (and scales) into `dst_start .. dst_start + len` within the same
 /// blocks, then commits. The manager applies the same copy to its in-memory
 /// mirror eagerly so `commit` observes compacted positions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Exact fixed-capacity: at most [`MAX_COMPACT_TOKENS`] sources in
+/// accepted-path order, stored inline with no heap. `Copy` with private
+/// fields and no `Drop`. Read sources with [`Self::src_positions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompactOp {
-    /// Sequence being compacted.
-    pub seq: SeqId,
-    /// Absolute source positions, in accepted-path order.
-    pub src_positions: Vec<u32>,
-    /// Destination start (the sequence's `ctx_len`).
-    pub dst_start: u32,
-    /// Accepted token count.
-    pub len: u32,
+    seq: SeqId,
+    src: [u32; MAX_COMPACT_TOKENS],
+    dst_start: u32,
+    len: u32,
+}
+
+impl CompactOp {
+    /// Sequence being compacted (Spec 3 §5).
+    pub const fn seq(self) -> SeqId {
+        self.seq
+    }
+
+    /// Destination start (the sequence's `ctx_len` at compact time).
+    pub const fn dst_start(self) -> u32 {
+        self.dst_start
+    }
+
+    /// Accepted token count (`src_positions().len()`).
+    pub const fn len(self) -> u32 {
+        self.len
+    }
+
+    /// Whether no token was accepted (only produced by compacting an empty
+    /// path; the scheduler always compacts a nonempty accepted path).
+    pub const fn is_empty(self) -> bool {
+        self.len == 0
+    }
+
+    /// Absolute source positions, in accepted-path order (Spec 3 §3.6).
+    ///
+    /// Exact bytes in exact order: `len` entries, no padding, no reorder.
+    pub const fn src_positions(&self) -> &[u32] {
+        self.src.as_slice().split_at(self.len as usize).0
+    }
 }
 
 /// Free/total pool state per group (Spec 3 §5 `budget`).
@@ -240,20 +359,52 @@ pub struct Stats {
 #[derive(Debug)]
 struct BlockPool {
     total: u32,
-    free: BTreeSet<u32>,
+    // DECISION(A1.16): free ids live in a `Vec` sorted descending so `alloc`
+    // pops the smallest id in O(1) and `release` inserts at its sorted
+    // position, both without heap allocation after construction (capacity is
+    // fixed at `total`, and occupancy never exceeds it: an id is released
+    // only after being drained from exactly one sequence table). Rejected: a
+    // `BTreeSet` free list (node splits allocate on the commit release path
+    // of windowed groups, breaking steady-state zero-allocation). Spec 3
+    // §3.1, §5; spec 6 §3.3 (no locks on the hot path).
+    free: Vec<u32>,
     base_offset: u64,
     block_bytes: u64,
 }
 
 impl BlockPool {
     fn alloc(&mut self) -> Option<u32> {
-        let id = *self.free.iter().next()?;
-        self.free.remove(&id);
-        Some(id)
+        self.free.pop()
     }
 
-    fn release(&mut self, id: u32) {
-        self.free.insert(id);
+    // DECISION(A1.16): `release` validates in release builds and reports
+    // corruption as a typed error the caller propagates transactionally.
+    // Rejected: `debug_assert`-only double-release detection (correctness
+    // that vanishes in release) and a panicking release (destroys the
+    // atomicity the reserve/commit/free paths guarantee). Spec 3 §3.1, §5.
+    fn release(&mut self, id: u32) -> StateResult<()> {
+        if id >= self.total {
+            return Err(StateError::InvalidBatch {
+                detail: format!(
+                    "release block {id} out of range: pool holds {total}",
+                    total = self.total
+                ),
+            });
+        }
+        if self.contains(id) {
+            return Err(StateError::InvalidBatch {
+                detail: format!("double release of block {id}"),
+            });
+        }
+        let at = self.free.partition_point(|&x| x > id);
+        self.free.insert(at, id);
+        Ok(())
+    }
+
+    fn contains(&self, id: u32) -> bool {
+        self.free
+            .binary_search_by(|&x| x.cmp(&id).reverse())
+            .is_ok()
     }
 }
 
@@ -283,6 +434,590 @@ impl FixedPool {
                 what: "fixed buffer offset".to_owned(),
             })
     }
+}
+
+// DECISION(A1.16): the scheduler hot path fills caller-owned batch buffers
+// instead of building an owned `BatchMeta` per step. `BatchWorkspace` holds
+// reusable flat buffers sized once (cold) for the largest batch the
+// scheduler admits; `fill_batch_meta` validates and fills them with no heap
+// allocation on success and fails closed with a typed error when a buffer is
+// undersized — never silently growing on the hot path. Rejected: keeping the
+// owned `batch_meta` builder as the only metadata path (it allocates seven
+// `Vec`s plus validation sets per call), and auto-growing workspace buffers
+// (hides a hot allocation behind a sizing mistake). Spec 1 §2.5, Spec 3 §5.
+// DECISION(A1.16): the hot workspace carries exact explicit positions
+// for both scalar `[T]` and MRoPE `[T,3]` (Spec 1 §2.5) in caller-owned
+// buffers with no hot allocation. `position_width()` (0 = empty, 1 = scalar,
+// 3 = MRoPE) disambiguates `positions()` from `positions_mrope()`; there is
+// no overloaded accessor that means different shapes on different fills.
+// `try_with_capacity` is the checked constructor: dimension overflow and
+// capacity refusal are typed errors. `with_capacity` is kept only as the
+// truthful cold panicking wrapper (panics on overflow/OOM, never silent
+// saturation). Rejected: a scalar-only workspace (forces MRoPE through the
+// owned builder on the hot path) and `saturating_mul` sizing (silently
+// undersizes huge dims). Spec 1 §2.5.
+// DECISION(A1.16): tree-verify metadata lives in the same caller-owned
+// `BatchWorkspace` as the batch tensors, not in a second preallocated
+// object. The scheduler already threads one workspace through every step;
+// a parallel tree workspace would double the cold-sizing surface and let
+// the two drift apart. The hot tree buffers (`tree_parents`,
+// `tree_ancestors`) plus the cycle-check scratch (`tree_cycle_state`,
+// `tree_cycle_path`) are sized once with `try_reserve_tree` and never grow
+// on the hot path; `TreeView` borrows them for kernels without fabricating
+// an owned `TreeMask`. Rejected: a standalone tree workspace type and
+// keeping the owned `TreeMask` builder as the only verify path (it owns two
+// `Vec`s per step, forcing a heap allocation per verify). Spec 1 §4.D.1,
+// Spec 3 §5.
+/// Borrowed tree inputs for one verify step (Spec 1 §4.D.1).
+///
+/// `Copy` bundle of the scheduler's tree slices: `parents [T]`, columns per
+/// row `t_max`, and the flattened `[T, t_max]` ancestor mask. Storage stays
+/// caller-owned until a fill copies it into the workspace's preallocated
+/// buffers; pass to
+/// [`StateManager::fill_batch_meta_with_tree_input`] or
+/// [`StateManager::fill_batch_meta_with_options_and_tree_input`], or store
+/// alone with [`BatchWorkspace::fill_tree`].
+#[derive(Debug, Clone, Copy)]
+pub struct TreeInput<'a> {
+    parents: &'a [i32],
+    t_max: u32,
+    ancestors: &'a [bool],
+}
+
+impl<'a> TreeInput<'a> {
+    /// Bundles the scheduler's tree slices (Spec 1 §4.D.1).
+    pub const fn new(parents: &'a [i32], t_max: u32, ancestors: &'a [bool]) -> Self {
+        Self {
+            parents,
+            t_max,
+            ancestors,
+        }
+    }
+
+    /// Parent ids, −1 for roots (Spec 1 §4.D.1).
+    pub const fn parents(&self) -> &[i32] {
+        self.parents
+    }
+
+    /// Columns per row (`T_max`, Spec 1 §4.D.1).
+    pub const fn t_max(&self) -> u32 {
+        self.t_max
+    }
+
+    /// Flattened `[T, T_max]` row-major ancestor mask (Spec 1 §4.D.1).
+    pub const fn ancestors(&self) -> &[bool] {
+        self.ancestors
+    }
+
+    /// Token count `T` (`parents.len()`).
+    pub const fn t(&self) -> usize {
+        self.parents.len()
+    }
+}
+
+/// Stable borrowed tree view for one verify step (Spec 1 §4.D.1).
+///
+/// Returned by [`BatchWorkspace::tree_view`]: the tree stored by the last
+/// fill, whether it arrived through the allocation-free slices path or the
+/// owned compat path. This borrows workspace (or owned-compat) storage the
+/// scheduler and kernels read directly; no owned `TreeMask` is fabricated.
+#[derive(Debug, Clone, Copy)]
+pub struct TreeView<'a> {
+    parents: &'a [i32],
+    t_max: u32,
+    ancestors: &'a [bool],
+}
+
+impl<'a> TreeView<'a> {
+    /// Token count `T` (`parents.len()`).
+    pub const fn t(&self) -> usize {
+        self.parents.len()
+    }
+
+    /// Columns per row (`T_max`).
+    pub const fn t_max(&self) -> u32 {
+        self.t_max
+    }
+
+    /// Parent ids, −1 for roots (Spec 1 §4.D.1).
+    pub const fn parents(&self) -> &[i32] {
+        self.parents
+    }
+
+    /// Flattened `[T, T_max]` row-major ancestor mask (Spec 1 §4.D.1).
+    pub const fn ancestors(&self) -> &[bool] {
+        self.ancestors
+    }
+
+    /// Ancestor bit for token `tok` at column `pos`.
+    ///
+    /// Panics on out-of-bounds indices like [`TreeMask::is_ancestor`]:
+    /// dims are fixed at fill time, so a bad index is a caller bug, not
+    /// input data.
+    pub fn is_ancestor(&self, tok: usize, pos: usize) -> bool {
+        assert!(
+            tok < self.parents.len(),
+            "TreeView::is_ancestor token {tok} out of bounds for T={}",
+            self.parents.len(),
+        );
+        assert!(
+            (pos as u32) < self.t_max,
+            "TreeView::is_ancestor pos {pos} out of bounds for t_max={}",
+            self.t_max,
+        );
+        self.ancestors[tok * self.t_max as usize + pos]
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct BatchWorkspace {
+    last_g: u32,
+    last_s: u32,
+    last_t: u32,
+    last_max_blocks: u32,
+    last_position_width: u32,
+    seq_ids: Vec<u32>,
+    query_lens: Vec<u32>,
+    ctx_lens: Vec<u32>,
+    positions: Vec<u32>,
+    positions_mrope: Vec<[u32; 3]>,
+    slot_map: Vec<u32>,
+    block_table: Vec<u32>,
+    window_start: Vec<u32>,
+    id_scratch: Vec<u64>,
+    tree: Option<TreeMask>,
+    tree_parents: Vec<i32>,
+    tree_ancestors: Vec<bool>,
+    tree_t_max: u32,
+    tree_len: usize,
+    tree_anc_len: usize,
+    tree_present: bool,
+    tree_cycle_state: Vec<u8>,
+    tree_cycle_path: Vec<u32>,
+}
+
+impl BatchWorkspace {
+    /// Empty workspace: every buffer grows on first use (cold sizing).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Checked workspace sizing (Spec 1 §2.5 shapes).
+    ///
+    /// Cold sizing for the largest batch admitted: `groups` layer groups,
+    /// `max_seqs` sequences, `max_tokens` total tokens, `max_blocks` blocks
+    /// per sequence per group. Sizes scalar `[T]`, MRoPE `[T,3]`, `[G,T]`,
+    /// `[G,S,max_blocks]`, and `[G,S]` buffers. Overflow or a refused
+    /// capacity reservation is a typed error; nothing is partially sized.
+    pub fn try_with_capacity(
+        groups: usize,
+        max_seqs: usize,
+        max_tokens: usize,
+        max_blocks: u32,
+    ) -> StateResult<Self> {
+        let overflow = |what: &str| StateError::Overflow {
+            what: what.to_owned(),
+        };
+        let max_b = usize::try_from(max_blocks).map_err(|_| overflow("workspace max blocks"))?;
+        let need_slot = groups
+            .checked_mul(max_tokens)
+            .ok_or_else(|| overflow("workspace slot map size"))?;
+        let need_block = groups
+            .checked_mul(max_seqs)
+            .and_then(|v| v.checked_mul(max_b))
+            .ok_or_else(|| overflow("workspace block table size"))?;
+        let need_window = groups
+            .checked_mul(max_seqs)
+            .ok_or_else(|| overflow("workspace window start size"))?;
+        let mut ws = Self {
+            last_g: 0,
+            last_s: 0,
+            last_t: 0,
+            last_max_blocks: 0,
+            last_position_width: 0,
+            seq_ids: Vec::new(),
+            query_lens: Vec::new(),
+            ctx_lens: Vec::new(),
+            positions: Vec::new(),
+            positions_mrope: Vec::new(),
+            slot_map: Vec::new(),
+            block_table: Vec::new(),
+            window_start: Vec::new(),
+            id_scratch: Vec::new(),
+            tree: None,
+            tree_parents: Vec::new(),
+            tree_ancestors: Vec::new(),
+            tree_t_max: 0,
+            tree_len: 0,
+            tree_anc_len: 0,
+            tree_present: false,
+            tree_cycle_state: Vec::new(),
+            tree_cycle_path: Vec::new(),
+        };
+        let reserve = |v: &mut Vec<u32>, cap: usize| {
+            v.try_reserve_exact(cap)
+                .map_err(|_| overflow("workspace capacity"))?;
+            Ok::<(), StateError>(())
+        };
+        reserve(&mut ws.seq_ids, max_seqs)?;
+        reserve(&mut ws.query_lens, max_seqs)?;
+        reserve(&mut ws.ctx_lens, max_seqs)?;
+        reserve(&mut ws.positions, max_tokens)?;
+        ws.positions_mrope
+            .try_reserve_exact(max_tokens)
+            .map_err(|_| overflow("workspace capacity"))?;
+        reserve(&mut ws.slot_map, need_slot)?;
+        reserve(&mut ws.block_table, need_block)?;
+        reserve(&mut ws.window_start, need_window)?;
+        ws.id_scratch
+            .try_reserve_exact(max_seqs)
+            .map_err(|_| overflow("workspace capacity"))?;
+        Ok(ws)
+    }
+
+    /// Workspace with every buffer pre-sized (Spec 1 §2.5 shapes).
+    ///
+    /// Cold sizing for the largest batch admitted: `groups` layer groups,
+    /// `max_seqs` sequences, `max_tokens` total tokens, `max_blocks` blocks
+    /// per sequence per group. A later [`StateManager::fill_batch_meta`]
+    /// whose dims fit these caps allocates nothing; one that exceeds them
+    /// fails closed with a typed error instead of growing.
+    ///
+    /// Panics on dimension overflow or refused capacity: use
+    /// [`Self::try_with_capacity`] when dims come from untrusted input.
+    pub fn with_capacity(
+        groups: usize,
+        max_seqs: usize,
+        max_tokens: usize,
+        max_blocks: u32,
+    ) -> Self {
+        Self::try_with_capacity(groups, max_seqs, max_tokens, max_blocks)
+            .expect("workspace dims overflowed or capacity refused: use try_with_capacity")
+    }
+
+    /// Checked workspace sizing with tree-verify storage (Spec 1 §2.5, §4.D.1).
+    ///
+    /// Sizes the batch buffers like [`Self::try_with_capacity`] and reserves
+    /// the hot tree buffers for at most `max_tree_tokens` tokens with at
+    /// most `max_tree_t_max` ancestor columns per row, plus the cycle-check
+    /// scratch for that width. A later tree fill whose `T` and `T * t_max`
+    /// fit these caps allocates nothing; one that exceeds them fails closed
+    /// typed instead of growing. Overflow or a refused capacity reservation
+    /// is a typed error; nothing is partially sized.
+    pub fn try_with_capacity_and_tree(
+        groups: usize,
+        max_seqs: usize,
+        max_tokens: usize,
+        max_blocks: u32,
+        max_tree_tokens: usize,
+        max_tree_t_max: u32,
+    ) -> StateResult<Self> {
+        let mut ws = Self::try_with_capacity(groups, max_seqs, max_tokens, max_blocks)?;
+        ws.try_reserve_tree(max_tree_tokens, max_tree_t_max)?;
+        Ok(ws)
+    }
+
+    /// Checked tree-verify storage sizing (Spec 1 §4.D.1).
+    ///
+    /// Cold: reserves room for at most `max_tokens` parent ids, a
+    /// `max_tokens * max_tree_t_max` ancestor mask, and the cycle-check
+    /// scratch for that width. Only grows — calling again with smaller caps
+    /// keeps the existing capacity. Overflow or a refused reservation is a
+    /// typed error; partial growth is still reported as an error and the
+    /// caller must re-size cold (caps never shrink, so retrying with fitting
+    /// caps is exact).
+    pub fn try_reserve_tree(&mut self, max_tokens: usize, max_tree_t_max: u32) -> StateResult<()> {
+        let overflow = |what: &str| StateError::Overflow {
+            what: what.to_owned(),
+        };
+        let max_t = usize::try_from(max_tree_t_max).map_err(|_| overflow("tree t_max"))?;
+        let need_anc = max_tokens
+            .checked_mul(max_t)
+            .ok_or_else(|| overflow("tree ancestor mask size"))?;
+        reserve_at_least(&mut self.tree_parents, max_tokens, "tree parents capacity")?;
+        reserve_at_least(
+            &mut self.tree_ancestors,
+            need_anc,
+            "tree ancestors capacity",
+        )?;
+        reserve_at_least(
+            &mut self.tree_cycle_state,
+            max_tokens,
+            "tree cycle state capacity",
+        )?;
+        reserve_at_least(
+            &mut self.tree_cycle_path,
+            max_tokens,
+            "tree cycle path capacity",
+        )?;
+        Ok(())
+    }
+
+    /// Layer-group count `G` of the last fill (Spec 1 §2.5).
+    pub const fn groups(&self) -> u32 {
+        self.last_g
+    }
+
+    /// Sequence count `S` of the last fill (Spec 1 §2.5).
+    pub const fn seqs(&self) -> u32 {
+        self.last_s
+    }
+
+    /// Token count `T` of the last fill (Spec 1 §2.5).
+    pub const fn tokens(&self) -> u32 {
+        self.last_t
+    }
+
+    /// Blocks per sequence per group of the last fill (Spec 3 §3.3).
+    pub const fn max_blocks(&self) -> u32 {
+        self.last_max_blocks
+    }
+
+    /// Device sequence ids `[S]` (Spec 1 §2.5, §4.F).
+    pub fn seq_ids(&self) -> &[u32] {
+        &self.seq_ids
+    }
+
+    /// Query lengths `[S]` (Spec 1 §2.5).
+    pub fn query_lens(&self) -> &[u32] {
+        &self.query_lens
+    }
+
+    /// Context lengths `[S]` (Spec 1 §2.5).
+    pub fn ctx_lens(&self) -> &[u32] {
+        &self.ctx_lens
+    }
+
+    /// Position width of the last fill: 0 (empty), 1 (scalar `[T]`), or 3
+    /// (MRoPE `[T,3]`) (Spec 1 §2.5).
+    ///
+    /// Check this before reading positions: `positions()` is meaningful only
+    /// when it is 1, `positions_mrope()` only when it is 3.
+    pub const fn position_width(&self) -> u32 {
+        self.last_position_width
+    }
+
+    /// Scalar token positions `[T]` (`ctx + k` per token, or the exact
+    /// explicit values; Spec 1 §2.5).
+    ///
+    /// Valid only when [`Self::position_width`] is 1 (or the workspace is
+    /// empty); empty otherwise. MRoPE fills leave this empty — read
+    /// [`Self::positions_mrope`] when the width is 3.
+    pub fn positions(&self) -> &[u32] {
+        &self.positions
+    }
+
+    /// MRoPE token positions `[T,3]` (Spec 1 §2.5).
+    ///
+    /// Valid only when [`Self::position_width`] is 3; empty otherwise.
+    /// Scalar fills leave this empty — read [`Self::positions`] when the
+    /// width is 1.
+    pub fn positions_mrope(&self) -> &[[u32; 3]] {
+        &self.positions_mrope
+    }
+
+    /// Flat MRoPE length row-major (`3 * T` u32s, Spec 1 §2.5 `[T,3]`).
+    ///
+    /// Unambiguous flat size of [`Self::positions_mrope`]: triplet `i`
+    /// occupies flat indices `3*i .. 3*i + 3`. Zero unless the width is 3.
+    /// Read values with [`Self::positions_mrope_flat_value`]; the triplet
+    /// slice itself stays typed so no raw-pointer reinterpretation is
+    /// needed (raw-pointer blocks live only in the HIP/T0 SIMD modules).
+    pub fn positions_mrope_flat_len(&self) -> usize {
+        self.positions_mrope.len() * 3
+    }
+
+    /// One flat MRoPE value row-major (Spec 1 §2.5 `[T,3]` flattened).
+    ///
+    /// `None` when out of bounds (including whenever the width is not 3).
+    /// Triplet `i` is `[flat(3*i), flat(3*i+1), flat(3*i+2)]`.
+    pub fn positions_mrope_flat_value(&self, flat_idx: usize) -> Option<u32> {
+        let t = flat_idx / 3;
+        let lane = flat_idx % 3;
+        self.positions_mrope.get(t).map(|trip| trip[lane])
+    }
+
+    /// Flattened slots `[G, T]` row-major (Spec 1 §2.5, Spec 3 §3.3).
+    pub fn slot_map(&self) -> &[u32] {
+        &self.slot_map
+    }
+
+    /// Block tables `[G, S, max_blocks]` row-major with sentinel holes
+    /// (Spec 1 §2.5, Spec 3 §3.3).
+    pub fn block_table(&self) -> &[u32] {
+        &self.block_table
+    }
+
+    /// First retained positions `[G, S]` row-major (Spec 1 §2.5, Spec 3 §3.5).
+    pub fn window_start(&self) -> &[u32] {
+        &self.window_start
+    }
+
+    /// Speculative tree mask of the last fill, if the step verifies drafts
+    /// (Spec 1 §4.D.1).
+    ///
+    /// Cold compat only: `Some` exactly when the last fill arrived through
+    /// an owned-`TreeMask` entry point (`batch_meta*`, `fill_batch_meta*`).
+    /// Slices-path fills never fabricate an owned mask, so this is `None`
+    /// after them — read [`Self::tree_view`] on the hot path instead.
+    pub fn tree(&self) -> Option<&TreeMask> {
+        self.tree.as_ref()
+    }
+
+    /// Stable borrowed tree view of the last fill, if the step verifies
+    /// drafts (Spec 1 §4.D.1).
+    ///
+    /// The scheduler/kernel view: `Some` whenever a tree was stored, whether
+    /// it arrived through the allocation-free slices path or the owned
+    /// compat path. A slices fill clears the owned mask and an owned fill
+    /// clears the slices staging, so exactly one source is live; when both
+    /// are somehow present the slices win. Borrows workspace storage;
+    /// nothing is fabricated or allocated.
+    pub fn tree_view(&self) -> Option<TreeView<'_>> {
+        if self.tree_present {
+            Some(TreeView {
+                parents: &self.tree_parents[..self.tree_len],
+                t_max: self.tree_t_max,
+                ancestors: &self.tree_ancestors[..self.tree_anc_len],
+            })
+        } else {
+            self.tree.as_ref().map(|t| TreeView {
+                parents: t.parents(),
+                t_max: t.t_max(),
+                ancestors: t.ancestors(),
+            })
+        }
+    }
+
+    /// Stores and validates a tree without touching batch tensors
+    /// (Spec 1 §4.D.1).
+    ///
+    /// Copies `tree` into the preallocated buffers and runs the complete
+    /// intrinsic validation — shape, parent bounds/self-parent, cycles — via
+    /// [`validate_tree_slices`](r9v_ir::validate_tree_slices) with the
+    /// workspace's cold-sized cycle scratch. Success allocates nothing;
+    /// undersized buffers are a typed error naming the capacity and the
+    /// requirement (buffers never grow here — size them cold with
+    /// [`Self::try_reserve_tree`]); invalid trees are the same typed
+    /// [`IrError`](r9v_ir::IrError) variants the owned [`TreeMask`] builder
+    /// reports. On failure nothing is stored (`tree_view()` is `None` for
+    /// the hot path). Stores clear the owned compat mask so the hot slices
+    /// are the single live source.
+    pub fn fill_tree(&mut self, tree: TreeInput<'_>) -> StateResult<()> {
+        let overflow = |what: &str| StateError::Overflow {
+            what: what.to_owned(),
+        };
+        let t = tree.t();
+        let t_max = tree.t_max();
+        let need_anc = t
+            .checked_mul(usize::try_from(t_max).map_err(|_| overflow("tree t_max"))?)
+            .ok_or_else(|| overflow("tree ancestor mask size"))?;
+        if self.tree_parents.capacity() < t {
+            return Err(StateError::InvalidBatch {
+                detail: format!(
+                    "batch workspace tree parents capacity {} < required {t}",
+                    self.tree_parents.capacity()
+                ),
+            });
+        }
+        if self.tree_ancestors.capacity() < need_anc {
+            return Err(StateError::InvalidBatch {
+                detail: format!(
+                    "batch workspace tree ancestors capacity {} < required {need_anc}",
+                    self.tree_ancestors.capacity()
+                ),
+            });
+        }
+        if self.tree_cycle_state.capacity() < t || self.tree_cycle_path.capacity() < t {
+            return Err(StateError::InvalidBatch {
+                detail: format!("batch workspace tree cycle scratch capacity < required {t}"),
+            });
+        }
+        // Capacities fit, so nothing below allocates: clears keep capacity,
+        // extends and the scratch `resize` land within it.
+        self.tree_parents.clear();
+        self.tree_parents.extend(tree.parents().iter().copied());
+        self.tree_ancestors.clear();
+        self.tree_ancestors.extend(tree.ancestors().iter().copied());
+        self.tree_cycle_state.clear();
+        self.tree_cycle_state.resize(t, 0);
+        self.tree_cycle_path.clear();
+        let validated = validate_tree_slices(
+            &self.tree_parents,
+            t_max,
+            &self.tree_ancestors,
+            &mut self.tree_cycle_state,
+            &mut self.tree_cycle_path,
+        );
+        match validated {
+            Ok(()) => {
+                self.tree = None;
+                self.tree_t_max = t_max;
+                self.tree_len = t;
+                self.tree_anc_len = need_anc;
+                self.tree_present = true;
+                Ok(())
+            }
+            Err(e) => {
+                self.tree_parents.clear();
+                self.tree_ancestors.clear();
+                self.tree_t_max = 0;
+                self.tree_len = 0;
+                self.tree_anc_len = 0;
+                self.tree_present = false;
+                Err(StateError::Ir(e))
+            }
+        }
+    }
+
+    /// Drops the stored hot slices-path tree, if any (Spec 1 §4.D.1).
+    ///
+    /// Lengths go to zero; capacities stay for the next fill. The owned
+    /// compat mask is untouched.
+    pub fn clear_tree(&mut self) {
+        self.tree_parents.clear();
+        self.tree_ancestors.clear();
+        self.tree_t_max = 0;
+        self.tree_len = 0;
+        self.tree_anc_len = 0;
+        self.tree_present = false;
+    }
+
+    /// Slot for new token `tok` in group `group` (row-major `[G, T]`).
+    ///
+    /// Bounds-checked: out-of-range indices are `None` (the scheduler sizes
+    /// uploads from [`Self::groups`]/[`Self::tokens`], so this is a guard,
+    /// not input validation).
+    pub fn slot(&self, group: usize, tok: usize) -> Option<u32> {
+        let t = self.last_t as usize;
+        self.slot_map
+            .get(group.checked_mul(t)?.checked_add(tok)?)
+            .copied()
+    }
+
+    /// Block id for sequence `seq`, block entry `b`, in group `group`
+    /// (row-major `[G, S, max_blocks]`). Bounds-checked like [`Self::slot`].
+    pub fn block(&self, group: usize, seq: usize, b: usize) -> Option<u32> {
+        let s = self.last_s as usize;
+        let m = self.last_max_blocks as usize;
+        self.block_table
+            .get(
+                group
+                    .checked_mul(s)?
+                    .checked_add(seq)?
+                    .checked_mul(m)?
+                    .checked_add(b)?,
+            )
+            .copied()
+    }
+}
+
+/// Validated batch dims shared by the owned and fill metadata paths
+/// (Spec 1 §2.5, Spec 3 §5).
+#[derive(Debug, Clone, Copy)]
+struct BatchPlan {
+    total_tokens: usize,
+    total_u64: u64,
 }
 
 /// Per-sequence state (Spec 3 §3.3).
@@ -327,6 +1062,17 @@ pub struct StateManager {
     live_count: u32,
     swaps: u64,
     commits: u64,
+    // DECISION(A1.16): reusable owned scratch for `reserve`'s missing-block
+    // records (`(group, block index)` in ascending group/index order),
+    // capacity fixed at construction to the mathematical maximum
+    // (`paged groups × max_blocks`: every missing index lies in
+    // `[0, max_ctx / 32)`), cleared per call. Pushes never reallocate, so
+    // the first `reserve` after admission allocates exactly as little as
+    // steady state: nothing. Rejected: a per-call `Vec` plus `BTreeSet`
+    // membership probe (a heap allocation on every step), and
+    // warmup-grown capacity (makes the first steps allocate while claiming
+    // the hot path is allocation-free). Spec 3 §3.6, §5.
+    reserve_scratch: Vec<(u32, u32)>,
 }
 
 impl StateManager {
@@ -518,7 +1264,9 @@ impl StateManager {
                     .ok_or_else(|| overflow("arena base"))?;
                 pools.push(Some(BlockPool {
                     total: blocks_per_group,
-                    free: (0..blocks_per_group).collect(),
+                    // Descending so `alloc` pops the smallest id; capacity is
+                    // exactly `total`, so later releases never reallocate.
+                    free: (0..blocks_per_group).rev().collect(),
                     base_offset: group_base,
                     block_bytes,
                 }));
@@ -547,6 +1295,21 @@ impl StateManager {
             }
         }
 
+        // `reserve` scratch fits every legal reservation: each group's
+        // missing block indices lie in `[0, max_blocks)`, so `paged groups ×
+        // max_blocks` entries cover the worst case (`n = max_ctx` on every
+        // paged group at once). Sized once here, on the cold path.
+        let paged_count = groups.iter().filter(|g| g.spec.is_paged()).count();
+        let scratch_cap = paged_count
+            .checked_mul(max_blocks as usize)
+            .ok_or_else(|| overflow("reserve scratch capacity"))?;
+        let mut reserve_scratch = Vec::new();
+        reserve_scratch
+            .try_reserve_exact(scratch_cap)
+            .map_err(|_| StateError::Overflow {
+                what: "reserve scratch capacity".to_owned(),
+            })?;
+
         Ok(Self {
             config,
             groups,
@@ -561,6 +1324,7 @@ impl StateManager {
             live_count: 0,
             swaps: 0,
             commits: 0,
+            reserve_scratch,
         })
     }
 
@@ -685,18 +1449,35 @@ impl StateManager {
             fixed_slots[gi] = Some(id);
         }
         let id = self.next_seq;
-        let g = self.groups.len();
+        // DECISION(A1.16): per-sequence paged tables are presized to
+        // `max_blocks` at admission so steady-state `reserve` pushes never
+        // reallocate, including new-block boundary transitions; rejected:
+        // growing them geometrically per call (a heap allocation mid-run).
+        // Admission-time sizing only; `max_ctx`/`max_seqs` semantics are
+        // unchanged. Spec 3 §3.3, §6.3.
+        let max_blocks = self.max_blocks as usize;
+        let mut tables: Vec<Vec<u32>> = Vec::with_capacity(self.groups.len());
+        let mut indices: Vec<Vec<u32>> = Vec::with_capacity(self.groups.len());
+        for g in &self.groups {
+            if g.spec.is_paged() {
+                tables.push(Vec::with_capacity(max_blocks));
+                indices.push(Vec::with_capacity(max_blocks));
+            } else {
+                tables.push(Vec::new());
+                indices.push(Vec::new());
+            }
+        }
         self.seqs.insert(
             id,
             SeqState {
                 ctx_len: 0,
                 tail_len: 0,
-                tables: vec![Vec::new(); g],
-                indices: vec![Vec::new(); g],
+                tables,
+                indices,
                 mirror: BTreeMap::new(),
                 compacted: None,
                 fixed_slots,
-                parity: vec![0; g],
+                parity: vec![0; self.groups.len()],
             },
         );
         self.next_seq = next_id;
@@ -912,175 +1693,240 @@ impl StateManager {
         // `commit` releases the aged one afterwards.
         let first_block = ctx / BLOCK_TOKENS;
         let last_block = end.div_ceil(BLOCK_TOKENS);
-        // Check every group first (atomicity): needed new block indices.
-        // Each entry carries its checked block count so later error reports
-        // need no further conversion.
-        let mut need: Vec<(Vec<u32>, u32)> = Vec::with_capacity(self.groups.len());
-        for (gi, g) in self.groups.iter().enumerate() {
-            if !g.spec.is_paged() {
-                need.push((Vec::new(), 0));
-                continue;
-            }
-            let held: BTreeSet<u32> = self.seq(seq)?.indices[gi].iter().copied().collect();
-            let mut missing: Vec<u32> = Vec::new();
-            for idx in first_block..last_block {
-                if !held.contains(&idx) {
-                    missing.push(idx);
-                }
-            }
-            let free = u64::try_from(self.pools[gi].as_ref().map_or(0, |p| p.free.len())).map_err(
-                |_| StateError::Overflow {
-                    what: "free block count".to_owned(),
-                },
-            )?;
-            let want = u64::try_from(missing.len()).map_err(|_| StateError::Overflow {
-                what: "missing block count".to_owned(),
-            })?;
-            if want > free {
-                let available = u32::try_from(free).map_err(|_| StateError::Overflow {
-                    what: "free block count".to_owned(),
-                })?;
-                let required = u32::try_from(want).map_err(|_| StateError::Overflow {
-                    what: "missing block count".to_owned(),
-                })?;
-                return Err(StateError::PoolExhausted {
-                    group: gi,
-                    required,
-                    available,
-                    shortfall: required.checked_sub(available).ok_or_else(|| {
-                        StateError::Overflow {
-                            what: "pool shortfall".to_owned(),
-                        }
-                    })?,
-                    end,
-                    max_ctx: self.config.max_ctx,
-                });
-            }
-            let count = u32::try_from(missing.len()).map_err(|_| StateError::Overflow {
-                what: "missing block count".to_owned(),
-            })?;
-            need.push((missing, count));
-        }
-
-        // All checks passed: allocate (disjoint field borrows: pools, seqs).
-        // Every insert is recorded; any failure below rolls the recorded
-        // inserts back instead of leaving half-built tables.
-        let mut inserted: Vec<(usize, u32, u32)> = Vec::new();
-        let mut alloc_err: Option<StateError> = None;
+        // Pass 1 (shared borrows only): check every group before allocating
+        // anything, recording missing `(group, index)` pairs into reusable
+        // owned scratch. Membership is an allocation-free binary search over
+        // the sorted per-group tables (Spec 3 §3.3: ascending block order).
         {
-            let pools = &mut self.pools;
-            let seqs = &mut self.seqs;
-            'alloc: for (gi, (missing, count)) in need.iter().enumerate() {
-                if missing.is_empty() {
+            let Self {
+                groups,
+                pools,
+                seqs,
+                reserve_scratch,
+                ..
+            } = &mut *self;
+            reserve_scratch.clear();
+            let s = seqs
+                .get(&seq.as_u64())
+                .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })?;
+            for (gi, g) in groups.iter().enumerate() {
+                if !g.spec.is_paged() {
                     continue;
                 }
-                let pool = match pools[gi].as_mut() {
-                    Some(pool) => pool,
-                    None => {
-                        alloc_err = Some(StateError::InvalidBatch {
-                            detail: format!("group {gi} is not a paged group"),
-                        });
-                        break 'alloc;
+                let group = u32::try_from(gi).map_err(|_| StateError::Overflow {
+                    what: "group index".to_owned(),
+                })?;
+                let held = &s.indices[gi];
+                let before = reserve_scratch.len();
+                for idx in first_block..last_block {
+                    let at = held.partition_point(|&i| i < idx);
+                    if held.get(at) != Some(&idx) {
+                        reserve_scratch.push((group, idx));
                     }
-                };
-                let s = match seqs.get_mut(&seq.as_u64()) {
-                    Some(s) => s,
-                    None => {
-                        alloc_err = Some(StateError::UnknownSeq { seq: seq.as_u64() });
-                        break 'alloc;
+                }
+                let want = u64::try_from(reserve_scratch.len() - before).map_err(|_| {
+                    StateError::Overflow {
+                        what: "missing block count".to_owned(),
                     }
-                };
-                for idx in missing {
-                    let Some(id) = pool.alloc() else {
-                        // Unreachable after the pre-check above (single
-                        // thread, counts already verified); handled like any
-                        // other failure: roll back, then report.
-                        alloc_err = Some(StateError::PoolExhausted {
-                            group: gi,
-                            required: *count,
-                            available: 0,
-                            shortfall: *count,
-                            end,
-                            max_ctx: self.config.max_ctx,
-                        });
-                        break 'alloc;
-                    };
-                    let pos = s.indices[gi].partition_point(|&i| i < *idx);
-                    s.indices[gi].insert(pos, *idx);
-                    s.tables[gi].insert(pos, id);
-                    inserted.push((gi, *idx, id));
+                })?;
+                let free = u64::try_from(pools[gi].as_ref().map_or(0, |p| p.free.len())).map_err(
+                    |_| StateError::Overflow {
+                        what: "free block count".to_owned(),
+                    },
+                )?;
+                if want > free {
+                    let available = u32::try_from(free).map_err(|_| StateError::Overflow {
+                        what: "free block count".to_owned(),
+                    })?;
+                    let required = u32::try_from(want).map_err(|_| StateError::Overflow {
+                        what: "missing block count".to_owned(),
+                    })?;
+                    return Err(StateError::PoolExhausted {
+                        group: gi,
+                        required,
+                        available,
+                        shortfall: required.checked_sub(available).ok_or_else(|| {
+                            StateError::Overflow {
+                                what: "pool shortfall".to_owned(),
+                            }
+                        })?,
+                        end,
+                        max_ctx: self.config.max_ctx,
+                    });
                 }
             }
         }
-        if let Some(e) = alloc_err {
-            self.rollback_reserve(seq, &inserted);
-            return Err(e);
-        }
-        // Flattened slots per group for the reserved range. A missing mapping
-        // is a typed error, never a clamp to a neighboring block; the inserts
-        // above roll back on failure so the sequence keeps no tail.
-        let slots = match self.slot_rows_for(seq, ctx, n, end) {
-            Ok(rows) => rows,
-            Err(e) => {
-                self.rollback_reserve(seq, &inserted);
-                return Err(e);
-            }
-        };
+
+        // Pass 2: allocate. Counts were verified above on this same call with
+        // no interleaving (`&mut self`), so every step below succeeds on a
+        // consistent manager; every remainder is still a typed error (never
+        // `expect`/panic), and a mid-pass failure rolls its own prefix back,
+        // so a refusal leaves the sequence and the pools untouched. Table
+        // pushes land within the admission-sized capacity: no heap
+        // allocation, including on block boundary transitions and on the
+        // first call after admission.
+        self.place_reserve_blocks(seq, end)?;
         let s = self.seq_mut(seq)?;
         s.tail_len = n;
         s.compacted = None;
         Ok(SlotRange {
+            seq,
             start: ctx,
             len: n,
-            slots,
         })
     }
 
-    /// Undoes a half-built reservation's block inserts: removes the recorded
-    /// `(group, index)` entries in reverse and returns their ids to the
-    /// pools. The tail is still 0 on this path, so the sequence lands exactly
-    /// where it was before `reserve`.
-    fn rollback_reserve(&mut self, seq: SeqId, inserted: &[(usize, u32, u32)]) {
-        for &(gi, idx, id) in inserted.iter().rev() {
-            if let Some(s) = self.seqs.get_mut(&seq.as_u64()) {
-                let at = s
-                    .indices
-                    .get(gi)
-                    .map(|v| v.partition_point(|&i| i < idx))
-                    .unwrap_or(usize::MAX);
-                let aligned = s.indices.get(gi).and_then(|v| v.get(at)).copied() == Some(idx)
-                    && s.tables.get(gi).is_some_and(|t| at < t.len());
-                if aligned {
-                    s.indices[gi].remove(at);
-                    s.tables[gi].remove(at);
+    /// Allocates every block recorded in [`Self::reserve_scratch`], in
+    /// ascending group/index order (deterministic smallest-free ids, Spec 3
+    /// §5, §8). A typed failure rolls the placed prefix back before
+    /// returning, so the sequence and the pools are untouched.
+    fn place_reserve_blocks(&mut self, seq: SeqId, end: u32) -> StateResult<()> {
+        let Self {
+            pools,
+            seqs,
+            reserve_scratch,
+            config,
+            ..
+        } = &mut *self;
+        let max_ctx = config.max_ctx;
+        let mut placed = 0usize;
+        let mut failure: Option<StateError> = None;
+        for &(group, idx) in reserve_scratch.iter() {
+            let gi = group as usize;
+            // Unreachable on a consistent manager: pass 1 counted a free
+            // block for every recorded index on this same call. Typed (never
+            // `expect`) so even a corrupted pool fails closed with the
+            // numbers, after the prefix rolls back below.
+            let step = place_one_block(pools, seqs, seq, gi, idx, end, max_ctx);
+            match step {
+                Ok(()) => placed += 1,
+                Err(e) => {
+                    failure = Some(e);
+                    break;
                 }
             }
-            if let Some(pool) = self.pools.get_mut(gi).and_then(|p| p.as_mut()) {
-                pool.release(id);
-            }
         }
+        if let Some(e) = failure {
+            // Roll back exactly the placed prefix: remove those entries and
+            // return their ids. Each removal re-searches by binary search, so
+            // order is irrelevant and no allocation is needed. The `release`
+            // calls cannot fail here (the ids were just allocated), but any
+            // failure still propagates typed, never panics.
+            for &(rgroup, ridx) in reserve_scratch.iter().take(placed) {
+                let rgi = rgroup as usize;
+                let mut released: Option<u32> = None;
+                if let Some(s) = seqs.get_mut(&seq.as_u64()) {
+                    let at = s
+                        .indices
+                        .get(rgi)
+                        .map(|v| v.partition_point(|&i| i < ridx))
+                        .unwrap_or(usize::MAX);
+                    let aligned = s.indices.get(rgi).and_then(|v| v.get(at)).copied() == Some(ridx)
+                        && s.tables.get(rgi).is_some_and(|t| at < t.len());
+                    if aligned {
+                        s.indices[rgi].remove(at);
+                        released = Some(s.tables[rgi].remove(at));
+                    }
+                }
+                if let Some(id) = released {
+                    if let Some(pool) = pools.get_mut(rgi).and_then(|p| p.as_mut()) {
+                        pool.release(id)?;
+                    }
+                }
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 
-    /// Flattened slot rows for a reservation: `slots[g][k]` covers
-    /// `ctx + k` (Spec 1 §2.5, Spec 3 §3.3).
-    fn slot_rows_for(&self, seq: SeqId, ctx: u32, n: u32, end: u32) -> StateResult<Vec<Vec<u32>>> {
-        let mut slots: Vec<Vec<u32>> = Vec::with_capacity(self.groups.len());
-        for (gi, g) in self.groups.iter().enumerate() {
-            if !g.spec.is_paged() {
-                slots.push(vec![SLOT_NONE; n as usize]);
-                continue;
-            }
-            let s = self.seq(seq)?;
-            let mut row = Vec::with_capacity(n as usize);
-            for k in 0..n {
-                let pos = ctx.checked_add(k).ok_or_else(|| StateError::Overflow {
+    /// Flattened slot for token `k` of `range` in group `group`
+    /// (`slots[g][k]` covers `start + k`; Spec 1 §2.5, Spec 3 §3.3).
+    ///
+    /// Hot path: shared borrows only, no heap allocation. Recurrent/conv
+    /// groups report [`SLOT_NONE`]; paged groups resolve through the live
+    /// block tables. The range must be the sequence's current open
+    /// reservation (`start == ctx_len`, `len == tail_len`); a stale
+    /// (post-commit/freed/superseded) or foreign descriptor is a typed
+    /// error, never a read of another step's tail. A missing mapping is a
+    /// typed error, never a clamp to a neighboring block.
+    pub fn slot(&self, range: &SlotRange, group: usize, k: u32) -> StateResult<u32> {
+        let g = self
+            .groups
+            .get(group)
+            .ok_or_else(|| StateError::InvalidBatch {
+                detail: format!("group {group} out of range {}", self.groups.len()),
+            })?;
+        if k >= range.len() {
+            return Err(StateError::OutOfRange {
+                start: k,
+                len: 1,
+                end: range.len(),
+            });
+        }
+        let s = self
+            .seqs
+            .get(&range.seq().as_u64())
+            .ok_or(StateError::UnknownSeq {
+                seq: range.seq().as_u64(),
+            })?;
+        check_range_live(s, range)?;
+        if !g.spec.is_paged() {
+            return Ok(SLOT_NONE);
+        }
+        let pos = range
+            .start()
+            .checked_add(k)
+            .ok_or_else(|| StateError::Overflow {
+                what: "slot position".to_owned(),
+            })?;
+        flatten_slot(s, group, pos, range.end())
+    }
+
+    /// Fills a caller-owned row with every slot of `range` in group `group`
+    /// (`out[k]` covers `start + k`; Spec 1 §2.5, Spec 3 §3.3).
+    ///
+    /// Hot path: the caller owns the buffer (scheduler upload staging), so
+    /// filling never allocates regardless of width. A short buffer is a
+    /// typed error before anything is written; a mid-row mapping failure is
+    /// a typed error naming the position (the buffer is caller scratch, not
+    /// manager state, so no rollback applies).
+    pub fn fill_slots(&self, range: &SlotRange, group: usize, out: &mut [u32]) -> StateResult<()> {
+        let need = range.len() as usize;
+        if out.len() < need {
+            return Err(StateError::OutOfRange {
+                start: 0,
+                len: out.len(),
+                end: range.len(),
+            });
+        }
+        let g = self
+            .groups
+            .get(group)
+            .ok_or_else(|| StateError::InvalidBatch {
+                detail: format!("group {group} out of range {}", self.groups.len()),
+            })?;
+        let s = self
+            .seqs
+            .get(&range.seq().as_u64())
+            .ok_or(StateError::UnknownSeq {
+                seq: range.seq().as_u64(),
+            })?;
+        check_range_live(s, range)?;
+        if !g.spec.is_paged() {
+            out[..need].fill(SLOT_NONE);
+            return Ok(());
+        }
+        let end = range.end();
+        for (k, cell) in out[..need].iter_mut().enumerate() {
+            let pos = range
+                .start()
+                .checked_add(k as u32)
+                .ok_or_else(|| StateError::Overflow {
                     what: "slot position".to_owned(),
                 })?;
-                row.push(flatten_slot(s, gi, pos, end)?);
-            }
-            slots.push(row);
+            *cell = flatten_slot(s, group, pos, end)?;
         }
-        Ok(slots)
+        Ok(())
     }
 
     /// Simulates `state_write_kv` into reserved slots (Spec 3 §8 test support).
@@ -1118,14 +1964,33 @@ impl StateManager {
                 end: reserved_end,
             });
         }
-        let paged: Vec<bool> = self.groups.iter().map(|g| g.spec.is_paged()).collect();
-        let s = self.seq_mut(seq)?;
-        for (gi, is_paged) in paged.iter().enumerate() {
+        // DECISION(A1.16): no collected `is_paged` vector — the group
+        // loop borrows `groups` immutably to test paging, then takes the
+        // sequence borrow per paged group. A collected `Vec<bool>` would heap
+        // allocate on every mirror write, including the counted tree flow.
+        // Mirror inserts of new keys still allocate BTreeMap nodes by
+        // construction (test support only; the device path owns scheduler
+        // writes as ops): replacing existing keys allocates nothing, and
+        // removing missing keys allocates nothing, which the counted
+        // device-only and replace flows prove. Spec 3 §8.
+        let paged_count = self.groups.len();
+        for gi in 0..paged_count {
+            let is_paged = self
+                .groups
+                .get(gi)
+                .map(|g| g.spec.is_paged())
+                .unwrap_or(false);
             if !is_paged {
                 continue;
             }
+            let s = self.seq_mut(seq)?;
             for (k, tok) in tokens.iter().enumerate() {
-                s.mirror.insert((gi, start + k as u32), *tok);
+                let pos = start
+                    .checked_add(k as u32)
+                    .ok_or_else(|| StateError::Overflow {
+                        what: "write position".to_owned(),
+                    })?;
+                s.mirror.insert((gi, pos), *tok);
             }
         }
         Ok(())
@@ -1162,6 +2027,15 @@ impl StateManager {
     /// Applies the copy to the in-memory mirror eagerly and returns the
     /// descriptor the scheduler enqueues on device. Atomic: validation
     /// precedes any mutation.
+    ///
+    /// Hot path: success allocates nothing from the cold first verify step.
+    /// At most [`MAX_COMPACT_TOKENS`] accepted positions (spec 1 §4, spec 7
+    /// §5, spec 12 §3); duplicates are an O(n^2) stack scan and overlap
+    /// staging is per-group stack copies. Mirror updates replace existing
+    /// keys (allocation-free) or remove missing keys (allocation-free); the
+    /// device-only flow with no mirror entries therefore allocates nothing.
+    /// Inserting brand-new mirror keys (partial-mirror test writes) still
+    /// allocates BTreeMap nodes by construction — test support only.
     pub fn compact(&mut self, seq: SeqId, accepted_positions: &[u32]) -> StateResult<CompactOp> {
         let (ctx, tail) = {
             let s = self.seq(seq)?;
@@ -1175,55 +2049,67 @@ impl StateManager {
         if tail == 0 {
             return Err(detail("no outstanding tail".to_owned()));
         }
-        let mut seen = BTreeSet::new();
-        for p in accepted_positions {
+        if accepted_positions.len() > MAX_COMPACT_TOKENS {
+            return Err(detail(format!(
+                "accepted len {} exceeds cap {MAX_COMPACT_TOKENS}",
+                accepted_positions.len()
+            )));
+        }
+        // Bounded duplicate + range scan on the stack: no `BTreeSet`, no heap.
+        for (i, p) in accepted_positions.iter().enumerate() {
             if *p >= tail {
                 return Err(detail(format!("position {p} out of range tail {tail}")));
             }
-            if !seen.insert(*p) {
-                return Err(detail(format!("duplicate position {p}")));
+            for q in &accepted_positions[..i] {
+                if q == p {
+                    return Err(detail(format!("duplicate position {p}")));
+                }
             }
         }
         let a = accepted_positions.len();
-        let mut src: Vec<u32> = Vec::with_capacity(accepted_positions.len());
-        for p in accepted_positions {
-            src.push(ctx.checked_add(*p).ok_or_else(|| StateError::Overflow {
+        // Fixed-capacity sources in accepted-path order; destinations are
+        // `ctx + i` computed on the fly below, so no `dsts` vec is needed.
+        // Checked before any mutation, so the write phase cannot fail partway.
+        let mut src = [0u32; MAX_COMPACT_TOKENS];
+        for (i, p) in accepted_positions.iter().enumerate() {
+            src[i] = ctx.checked_add(*p).ok_or_else(|| StateError::Overflow {
                 what: "compact source".to_owned(),
-            })?);
+            })?;
         }
-        // Destination positions are computed before any mutation so the write
-        // phase below cannot fail partway.
-        let mut dsts: Vec<u32> = Vec::with_capacity(accepted_positions.len());
-        for i in 0..accepted_positions.len() {
-            dsts.push(
-                ctx.checked_add(i as u32)
+        for i in 0..a {
+            ctx.checked_add(i as u32)
+                .ok_or_else(|| StateError::Overflow {
+                    what: "compact destination".to_owned(),
+                })?;
+        }
+        // Read-then-write per paged group with a stack staging copy, so
+        // overlapping src/dst sets compact correctly. Staging holds at most
+        // 16 tokens per group; groups are visited in index order
+        // (deterministic, Spec 1 §6.1).
+        let group_count = self.groups.len();
+        for gi in 0..group_count {
+            let is_paged = self
+                .groups
+                .get(gi)
+                .map(|g| g.spec.is_paged())
+                .unwrap_or(false);
+            if !is_paged {
+                continue;
+            }
+            let mut staged: [Option<u32>; MAX_COMPACT_TOKENS] = [None; MAX_COMPACT_TOKENS];
+            {
+                let s = self.seq(seq)?;
+                for (slot, abs) in staged.iter_mut().zip(src.iter()).take(a) {
+                    *slot = s.mirror.get(&(gi, *abs)).copied();
+                }
+            }
+            let s = self.seq_mut(seq)?;
+            for (i, tok) in staged.iter().enumerate().take(a) {
+                let dst = ctx
+                    .checked_add(i as u32)
                     .ok_or_else(|| StateError::Overflow {
                         what: "compact destination".to_owned(),
-                    })?,
-            );
-        }
-        // Read phase (immutable): stage every group's copies before mutating.
-        let staged: Vec<Vec<(u32, Option<u32>)>> = {
-            let s = self.seq(seq)?;
-            self.groups
-                .iter()
-                .enumerate()
-                .map(|(gi, g)| {
-                    if !g.spec.is_paged() {
-                        Vec::new()
-                    } else {
-                        src.iter()
-                            .map(|abs| (*abs, s.mirror.get(&(gi, *abs)).copied()))
-                            .collect()
-                    }
-                })
-                .collect()
-        };
-        // Write phase: apply staged copies, then record the compacted length.
-        let s = self.seq_mut(seq)?;
-        for (gi, copies) in staged.iter().enumerate() {
-            for (i, (_, tok)) in copies.iter().enumerate() {
-                let dst = dsts[i];
+                    })?;
                 match tok {
                     Some(t) => {
                         s.mirror.insert((gi, dst), *t);
@@ -1234,12 +2120,16 @@ impl StateManager {
                 }
             }
         }
+        let s = self.seq_mut(seq)?;
         s.compacted = Some(a);
+        let len = u32::try_from(a).map_err(|_| StateError::Overflow {
+            what: "compact length".to_owned(),
+        })?;
         Ok(CompactOp {
             seq,
-            src_positions: src,
+            src,
             dst_start: ctx,
-            len: a as u32,
+            len,
         })
     }
 
@@ -1306,10 +2196,21 @@ impl StateManager {
         } else {
             None
         };
-        let swap_groups: Vec<bool> = self.groups.iter().map(|g| g.spec.is_recurrent()).collect();
-
-        // Compute window releases before mutating: (table position, block index).
-        let mut releases: Vec<Vec<(u32, u32)>> = vec![Vec::new(); self.groups.len()];
+        // DECISION(A1.16): window releases are computed as per-group
+        // evictable block-index ranges on the stack — no per-call `Vec`s.
+        // Held indices are ascending, so the held entries inside
+        // `[sink_blocks, ws / 32)` form one contiguous run drained in reverse.
+        // `(idx + 1) * 32 <= ws` is exactly `idx < ws / 32` (floor division:
+        // `idx + 1 <= ws / 32` over integers), matching the previous
+        // per-entry `block_end <= ws` test bit for bit. Rejected: collecting
+        // `(position, index)` pairs plus id lists per group (a heap
+        // allocation on every windowed commit). Spec 3 §3.5.
+        //
+        // `groups.len() <= MAX_GROUPS_HARD` is established at construction
+        // (`group_layers`/`group_layer_specs` refuse more), so indexing this
+        // array by `gi` is always in bounds.
+        debug_assert!(self.groups.len() <= MAX_GROUPS_HARD);
+        let mut evict: [(u32, u32); MAX_GROUPS_HARD] = [(u32::MAX, 0); MAX_GROUPS_HARD];
         for (gi, g) in self.groups.iter().enumerate() {
             let retain = match g.spec.retain() {
                 Some(r) if r.is_windowed() => r,
@@ -1323,28 +2224,76 @@ impl StateManager {
                 crate::spec::Retain::SinkWindow { n, .. } => n.div_ceil(BLOCK_TOKENS),
                 _ => 0,
             };
-            let indices = &self.seq(seq)?.indices[gi];
-            for (at, idx) in indices.iter().enumerate() {
-                if *idx < sink_blocks {
+            let hi = ws / BLOCK_TOKENS;
+            if hi > sink_blocks {
+                evict[gi] = (sink_blocks, hi);
+            }
+        }
+
+        // Pre-validate every evicted block id before mutating anything: an
+        // out-of-range or already-free id is a typed error with the sequence
+        // and pools untouched (same atomicity as `free_seq`). The scan is
+        // allocation-free (binary searches over the sorted tables); it runs
+        // only for groups with a nonempty evict range. The releases below
+        // then cannot fail on a validated manager, but still propagate typed
+        // (never `expect`/panic).
+        {
+            let s = self.seq(seq)?;
+            for (gi, g) in self.groups.iter().enumerate() {
+                let (lo, hi) = evict[gi];
+                if hi <= lo {
                     continue;
                 }
-                let block_end = idx
-                    .checked_add(1)
-                    .and_then(|v| v.checked_mul(BLOCK_TOKENS))
-                    .ok_or_else(|| StateError::Overflow {
-                        what: "block end".to_owned(),
-                    })?;
-                if block_end <= ws {
-                    releases[gi].push((at as u32, *idx));
+                if !g.spec.is_paged() {
+                    return Err(StateError::InvalidBatch {
+                        detail: format!("group {gi} is not a paged group"),
+                    });
+                }
+                let pool = self.pools.get(gi).and_then(|p| p.as_ref()).ok_or_else(|| {
+                    StateError::InvalidBatch {
+                        detail: format!("group {gi} is not a paged group"),
+                    }
+                })?;
+                let indices = s.indices.get(gi).ok_or_else(|| StateError::InvalidBatch {
+                    detail: format!("sequence {} has no table", seq.as_u64()),
+                })?;
+                let tables = s.tables.get(gi).ok_or_else(|| StateError::InvalidBatch {
+                    detail: format!("sequence {} has no table", seq.as_u64()),
+                })?;
+                let start_at = indices.partition_point(|&i| i < lo);
+                let end_at = indices.partition_point(|&i| i < hi);
+                for at in start_at..end_at {
+                    let id = tables
+                        .get(at)
+                        .copied()
+                        .ok_or_else(|| StateError::InvalidBatch {
+                            detail: format!("sequence {} has no table", seq.as_u64()),
+                        })?;
+                    if id >= pool.total {
+                        return Err(StateError::InvalidBatch {
+                            detail: format!(
+                                "release block {id} out of range: pool holds {}",
+                                pool.total
+                            ),
+                        });
+                    }
+                    if pool.contains(id) {
+                        return Err(StateError::InvalidBatch {
+                            detail: format!("double release of block {id}"),
+                        });
+                    }
                 }
             }
         }
 
-        // Mutate (disjoint field borrows: seqs, pools, swaps, commits).
+        // Mutate (disjoint field borrows: seqs, pools, groups, swaps,
+        // commits). Every fallible step propagates typed errors; the
+        // evict-id pre-check above keeps window releases transactional.
         {
             let Self {
                 seqs,
                 pools,
+                groups,
                 swaps,
                 commits,
                 ..
@@ -1355,32 +2304,44 @@ impl StateManager {
             s.ctx_len = new_ctx;
             s.tail_len = 0;
             s.compacted = None;
-            for (gi, ato) in releases.iter().enumerate() {
-                let mut ids = Vec::with_capacity(ato.len());
-                let mut dropped: Vec<u32> = Vec::with_capacity(ato.len());
-                for &(at, idx) in ato.iter().rev() {
-                    s.indices[gi].remove(at as usize);
-                    ids.push(s.tables[gi].remove(at as usize));
-                    dropped.push(idx);
+            for (gi, g) in groups.iter().enumerate() {
+                let (lo, hi) = evict[gi];
+                if hi <= lo {
+                    continue;
+                }
+                if !g.spec.is_paged() {
+                    return Err(StateError::InvalidBatch {
+                        detail: format!("group {gi} is not a paged group"),
+                    });
+                }
+                let held = &s.indices[gi];
+                let start_at = held.partition_point(|&i| i < lo);
+                let end_at = held.partition_point(|&i| i < hi);
+                let pool = pools.get_mut(gi).and_then(|p| p.as_mut()).ok_or_else(|| {
+                    StateError::InvalidBatch {
+                        detail: format!("group {gi} is not a paged group"),
+                    }
+                })?;
+                for at in (start_at..end_at).rev() {
+                    s.indices[gi].remove(at);
+                    let id = s.tables[gi].remove(at);
+                    pool.release(id)?;
                 }
                 // Released blocks are gone: drop their mirrored tokens so a
                 // re-read of an evicted position reports absence (Spec 3 §3.5).
+                // Mirror entries always name mapped blocks, so testing the
+                // evicted index range is exactly testing the dropped set.
                 s.mirror.retain(|(g, p), _| {
-                    *g != gi || !dropped.contains(&(*p / crate::spec::BLOCK_TOKENS))
+                    *g != gi || {
+                        let b = *p / crate::spec::BLOCK_TOKENS;
+                        b < lo || b >= hi
+                    }
                 });
-                for id in ids {
-                    pools[gi]
-                        .as_mut()
-                        .ok_or_else(|| StateError::InvalidBatch {
-                            detail: format!("group {gi} is not a paged group"),
-                        })?
-                        .release(id);
-                }
             }
             if swap {
-                for (gi, is_rec) in swap_groups.iter().enumerate() {
-                    if *is_rec {
-                        s.parity[gi] ^= 1;
+                for g in groups.iter() {
+                    if g.spec.is_recurrent() {
+                        s.parity[g.index] ^= 1;
                     }
                 }
                 if let Some(next) = next_swaps {
@@ -1432,7 +2393,7 @@ impl StateManager {
                         ),
                     });
                 }
-                if pool.free.contains(&id) {
+                if pool.contains(id) {
                     return Err(StateError::InvalidBatch {
                         detail: format!("block {id} in group {gi} is already free"),
                     });
@@ -1467,11 +2428,13 @@ impl StateManager {
             }
         }
 
-        // Infallible commit phase: all validations passed, so mutations cannot fail.
+        // Commit phase: validation passed, so every step below succeeds on a
+        // consistent manager; every remainder still propagates typed (never
+        // `expect`/panic).
         let s = self
             .seqs
             .remove(&seq.as_u64())
-            .expect("validated sequence exists in seqs");
+            .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })?;
 
         for (gi, ids) in s.tables.into_iter().enumerate() {
             if ids.is_empty() {
@@ -1481,9 +2444,11 @@ impl StateManager {
                 .pools
                 .get_mut(gi)
                 .and_then(|p| p.as_mut())
-                .expect("validated paged pool exists");
+                .ok_or_else(|| StateError::InvalidBatch {
+                    detail: format!("group {gi} is not a paged group"),
+                })?;
             for id in ids {
-                pool.release(id);
+                pool.release(id)?;
             }
         }
         for (gi, slot) in s.fixed_slots.into_iter().enumerate() {
@@ -1492,7 +2457,9 @@ impl StateManager {
                 .fixed
                 .get_mut(gi)
                 .and_then(|p| p.as_mut())
-                .expect("validated fixed pool exists");
+                .ok_or_else(|| StateError::InvalidBatch {
+                    detail: format!("group {gi} is not a fixed group"),
+                })?;
             pool.free.insert(id);
         }
         self.live_count = next_live;
@@ -1505,11 +2472,18 @@ impl StateManager {
     /// that sequence's outstanding reservation. Problems across sequences are
     /// collected into one typed error.
     // DECISION(A1.15): StateManager produces canonical r9v_ir::BatchMeta directly, preserving row-major flattened [G,T], [G,S,max_blocks], [G,S] tensors, exact block-table sentinel holes, and optional TreeMask; rejected maintaining a duplicate parallel BatchMeta struct in r9v-state. Spec 1 §2.5, Spec 3 §3.3, §5, card A1.15.
+    // DECISION(A1.16): this owned builder is cold convenience only — it
+    // allocates every tensor per call. The scheduler hot path uses
+    // `fill_batch_meta` into a pre-sized `BatchWorkspace` and never calls
+    // this. Spec 1 §2.5, Spec 3 §5.
     pub fn batch_meta(&self, seqs: &[SeqId], query_lens: &[u32]) -> StateResult<BatchMeta> {
         self.batch_meta_with_options(seqs, query_lens, None, None)
     }
 
     /// Builds canonical [`r9v_ir::BatchMeta`] with optional speculative [`TreeMask`] (Spec 1 §4.D.1, Spec 3 §5).
+    ///
+    /// Cold convenience like [`Self::batch_meta`]; the hot path uses
+    /// [`Self::fill_batch_meta`].
     pub fn batch_meta_with_tree(
         &self,
         seqs: &[SeqId],
@@ -1520,6 +2494,9 @@ impl StateManager {
     }
 
     /// Builds canonical [`r9v_ir::BatchMeta`] with explicit positions (scalar or MRoPE) and optional [`TreeMask`].
+    ///
+    /// Cold convenience like [`Self::batch_meta`]; the hot path uses
+    /// [`Self::fill_batch_meta`].
     // DECISION(A1.15): device seq_ids are checked global u32 identifiers validated with u32::try_from; sequence allocation checks that next_seq <= u32::MAX before mutating state; rejected lossy as-casts, rollover, batch-local indexing that breaks Philox batch invariance, and unbounded host-to-device ID maps. Spec 1 §2.5, §4.F, Spec 3 §5, SI-40.
     pub fn batch_meta_with_options(
         &self,
@@ -1528,6 +2505,529 @@ impl StateManager {
         positions: Option<Positions>,
         tree: Option<TreeMask>,
     ) -> StateResult<BatchMeta> {
+        // Cold: fresh scratch and fresh tensors may allocate per call. Values
+        // are bit-identical to the hot fill path (same plan, same emit).
+        let mut seen_ids = Vec::new();
+        let plan = self.plan_batch(
+            seqs,
+            query_lens,
+            positions.as_ref().map(|p| p.len()),
+            tree.as_ref().map(|t| t.t()),
+            &mut seen_ids,
+        )?;
+        let total_tokens = plan.total_tokens;
+
+        let mut seq_ids = Vec::with_capacity(seqs.len());
+        let mut ctx_len = Vec::with_capacity(seqs.len());
+        let mut default_positions: Vec<u32> = Vec::with_capacity(total_tokens);
+        let total_slots =
+            self.groups
+                .len()
+                .checked_mul(total_tokens)
+                .ok_or_else(|| StateError::Overflow {
+                    what: "flat slot map size".to_owned(),
+                })?;
+        let mut flat_slot_map = Vec::with_capacity(total_slots);
+        let max_b = usize::try_from(self.max_blocks).map_err(|_| StateError::Overflow {
+            what: "max blocks conversion".to_owned(),
+        })?;
+        let total_blocks = self
+            .groups
+            .len()
+            .checked_mul(seqs.len())
+            .and_then(|v| v.checked_mul(max_b))
+            .ok_or_else(|| StateError::Overflow {
+                what: "flat block table size".to_owned(),
+            })?;
+        let mut flat_block_table = vec![BLOCK_TABLE_SENTINEL; total_blocks];
+        let total_windows =
+            self.groups
+                .len()
+                .checked_mul(seqs.len())
+                .ok_or_else(|| StateError::Overflow {
+                    what: "flat window start size".to_owned(),
+                })?;
+        let mut flat_window_start = Vec::with_capacity(total_windows);
+        self.emit_batch_into(
+            seqs,
+            query_lens,
+            &plan,
+            &mut seq_ids,
+            &mut ctx_len,
+            Some(&mut default_positions),
+            &mut flat_slot_map,
+            &mut flat_block_table,
+            &mut flat_window_start,
+        )?;
+        let final_positions = positions.unwrap_or(Positions::PerToken(default_positions));
+
+        let num_groups = u32::try_from(self.groups.len()).map_err(|_| StateError::Overflow {
+            what: "batch meta group count".to_owned(),
+        })?;
+        let num_seqs = u32::try_from(seqs.len()).map_err(|_| StateError::Overflow {
+            what: "batch meta seq count".to_owned(),
+        })?;
+        let total_tokens_u32 = u32::try_from(plan.total_u64).map_err(|_| StateError::Overflow {
+            what: "batch meta total tokens".to_owned(),
+        })?;
+
+        BatchMeta::builder(num_groups, num_seqs, total_tokens_u32, self.max_blocks)
+            .seq_ids(seq_ids)
+            .query_len(query_lens.to_vec())
+            .ctx_len(ctx_len)
+            .positions(final_positions)
+            .slot_map(flat_slot_map)
+            .block_table(flat_block_table)
+            .window_start(flat_window_start)
+            .tree(tree)
+            .build()
+            .map_err(StateError::Ir)
+    }
+
+    /// Fills caller-owned batch buffers for one step (Spec 1 §2.5, Spec 3 §5).
+    ///
+    /// The scheduler hot path: validates and emits the same tensors the
+    /// owned [`Self::batch_meta`] builds — device ids, query/context
+    /// lengths, default positions, `[G, T]` slot map, `[G, S, max_blocks]`
+    /// block table, `[G, S]` window starts — into `workspace`, moving `tree`
+    /// in when the step verifies drafts. Order follows the input slices;
+    /// each `query_len` must be covered by that sequence's outstanding
+    /// reservation; problems across sequences are collected into one typed
+    /// error, exactly like the owned builder.
+    ///
+    /// Hot path: success allocates nothing. Every required length is
+    /// computed with checked arithmetic up front, and an undersized buffer
+    /// is a typed error naming the capacity and the requirement — buffers
+    /// never grow here. Size the workspace once with
+    /// [`BatchWorkspace::with_capacity`] (cold) and reuse it.
+    ///
+    /// Default scalar positions (`ctx + k`); for exact explicit positions
+    /// including MRoPE `[T,3]` use
+    /// [`Self::fill_batch_meta_with_options`], which is bit-identical to
+    /// [`Self::batch_meta_with_options`].
+    pub fn fill_batch_meta(
+        &self,
+        seqs: &[SeqId],
+        query_lens: &[u32],
+        tree: Option<TreeMask>,
+        workspace: &mut BatchWorkspace,
+    ) -> StateResult<()> {
+        self.fill_batch_meta_with_options(seqs, query_lens, None, tree, workspace)
+    }
+
+    /// Fills caller-owned batch buffers with exact explicit positions
+    /// (Spec 1 §2.5, Spec 3 §5).
+    ///
+    /// Hot equivalent of [`Self::batch_meta_with_options`]: `positions`
+    /// carries exact scalar `[T]` or MRoPE `[T,3]` values (`None` builds the
+    /// default `ctx + k` scalar positions). Values are copied into the
+    /// workspace's caller-owned buffers with no heap allocation on success;
+    /// an undersized positions/MRoPE buffer is a typed error, never a grow.
+    /// `position_width()` reports 1 (scalar) or 3 (MRoPE) afterwards, so
+    /// `positions()` vs `positions_mrope()` is unambiguous. Bit-identical
+    /// to the owned builder for scalar, MRoPE, and tree.
+    pub fn fill_batch_meta_with_options(
+        &self,
+        seqs: &[SeqId],
+        query_lens: &[u32],
+        positions: Option<&Positions>,
+        tree: Option<TreeMask>,
+        workspace: &mut BatchWorkspace,
+    ) -> StateResult<()> {
+        let overflow = |what: &str| StateError::Overflow {
+            what: what.to_owned(),
+        };
+        let max_b =
+            usize::try_from(self.max_blocks).map_err(|_| overflow("max blocks conversion"))?;
+        // Required lengths, all checked: fail before touching the workspace.
+        let s_len = seqs.len();
+        let g_len = self.groups.len();
+        // Validation needs the token total before the buffers can be sized;
+        // run the plan against workspace scratch first (no allocation when
+        // the scratch fits, which the capacity check below guarantees — the
+        // check itself only reads capacities).
+        if workspace.id_scratch.capacity() < s_len {
+            return Err(StateError::InvalidBatch {
+                detail: format!(
+                    "batch workspace id scratch capacity {} < required {s_len}",
+                    workspace.id_scratch.capacity()
+                ),
+            });
+        }
+        let positions_len = positions.as_ref().map(|p| p.len());
+        let plan = self.plan_batch(
+            seqs,
+            query_lens,
+            positions_len,
+            tree.as_ref().map(|t| t.t()),
+            &mut workspace.id_scratch,
+        )?;
+        let t_len = plan.total_tokens;
+        let need_slot = g_len
+            .checked_mul(t_len)
+            .ok_or_else(|| overflow("flat slot map size"))?;
+        let need_block = g_len
+            .checked_mul(s_len)
+            .and_then(|v| v.checked_mul(max_b))
+            .ok_or_else(|| overflow("flat block table size"))?;
+        let need_window = g_len
+            .checked_mul(s_len)
+            .ok_or_else(|| overflow("flat window start size"))?;
+        let check = |what: &str, cap: usize, need: usize| {
+            if cap < need {
+                Err(StateError::InvalidBatch {
+                    detail: format!("batch workspace {what} capacity {cap} < required {need}"),
+                })
+            } else {
+                Ok(())
+            }
+        };
+        check("seq_ids", workspace.seq_ids.capacity(), s_len)?;
+        check("query_lens", workspace.query_lens.capacity(), s_len)?;
+        check("ctx_lens", workspace.ctx_lens.capacity(), s_len)?;
+        // Positions buffers are exclusive by width: scalar fills need
+        // `positions`, MRoPE fills need `positions_mrope`. Check only the
+        // active one so a scalar-sized workspace is not forced to also fit
+        // triplets and vice versa.
+        let want_mrope = matches!(positions, Some(Positions::Mrope(_)));
+        if want_mrope {
+            check(
+                "positions_mrope",
+                workspace.positions_mrope.capacity(),
+                t_len,
+            )?;
+        } else {
+            check("positions", workspace.positions.capacity(), t_len)?;
+        }
+        check("slot_map", workspace.slot_map.capacity(), need_slot)?;
+        check("block_table", workspace.block_table.capacity(), need_block)?;
+        check(
+            "window_start",
+            workspace.window_start.capacity(),
+            need_window,
+        )?;
+        // Batch-relative tree rules the owned builder enforces (Spec 1
+        // §4.D.1): `t_max` covers the longest query and no parent crosses
+        // its sequence. The fill path used to skip these (the `TreeMask`
+        // was built valid, but never against this batch); closing that hole
+        // keeps validation complete on every entry point. Runs before any
+        // workspace mutation, like every other check above.
+        // DECISION(A1.16): the owned fill enforces the builder's
+        // batch-relative tree rules instead of trusting a prebuilt mask;
+        // rejected: trusting `TreeMask::new` alone (it cannot see
+        // `query_lens`). Spec 1 §4.D.1.
+        if let Some(t) = tree.as_ref() {
+            check_tree_batch_rules(t.parents(), t.t_max(), query_lens).map_err(StateError::Ir)?;
+        }
+        // Capacities fit, so nothing below allocates: clears keep capacity,
+        // pushes/extends land within it, and `resize` only writes sentinels.
+        workspace.seq_ids.clear();
+        workspace.query_lens.clear();
+        workspace.ctx_lens.clear();
+        workspace.positions.clear();
+        workspace.positions_mrope.clear();
+        workspace.slot_map.clear();
+        workspace.block_table.clear();
+        workspace.window_start.clear();
+        workspace.query_lens.extend(query_lens.iter().copied());
+        workspace
+            .block_table
+            .resize(need_block, BLOCK_TABLE_SENTINEL);
+        // Explicit positions are copied verbatim (no alloc within capacity);
+        // `None` emits the default `ctx + k` scalar positions. Either way
+        // the width is recorded so the two accessors stay unambiguous.
+        match positions {
+            None => {
+                self.emit_batch_into(
+                    seqs,
+                    query_lens,
+                    &plan,
+                    &mut workspace.seq_ids,
+                    &mut workspace.ctx_lens,
+                    Some(&mut workspace.positions),
+                    &mut workspace.slot_map,
+                    &mut workspace.block_table,
+                    &mut workspace.window_start,
+                )?;
+                workspace.last_position_width = 1;
+            }
+            Some(Positions::PerToken(v)) => {
+                self.emit_batch_into(
+                    seqs,
+                    query_lens,
+                    &plan,
+                    &mut workspace.seq_ids,
+                    &mut workspace.ctx_lens,
+                    None,
+                    &mut workspace.slot_map,
+                    &mut workspace.block_table,
+                    &mut workspace.window_start,
+                )?;
+                // `plan_batch` already proved `v.len() == T`; the capacity
+                // check above proves the extend below cannot reallocate.
+                workspace.positions.extend(v.iter().copied());
+                workspace.last_position_width = 1;
+            }
+            Some(Positions::Mrope(v)) => {
+                self.emit_batch_into(
+                    seqs,
+                    query_lens,
+                    &plan,
+                    &mut workspace.seq_ids,
+                    &mut workspace.ctx_lens,
+                    None,
+                    &mut workspace.slot_map,
+                    &mut workspace.block_table,
+                    &mut workspace.window_start,
+                )?;
+                workspace.positions_mrope.extend(v.iter().copied());
+                workspace.last_position_width = 3;
+            }
+        }
+        workspace.last_g = u32::try_from(g_len).map_err(|_| overflow("batch meta group count"))?;
+        workspace.last_s = u32::try_from(s_len).map_err(|_| overflow("batch meta seq count"))?;
+        workspace.last_t =
+            u32::try_from(plan.total_u64).map_err(|_| overflow("batch meta total tokens"))?;
+        workspace.last_max_blocks = self.max_blocks;
+        // Single live source: an owned fill clears the hot slices staging.
+        workspace.clear_tree();
+        workspace.tree = tree;
+        Ok(())
+    }
+
+    /// Fills caller-owned batch buffers for a verify step from borrowed tree
+    /// slices (Spec 1 §2.5, §4.D.1, Spec 3 §5).
+    ///
+    /// The scheduler hot path: `tree` stays in the scheduler's buffers until
+    /// this call copies it into the workspace's preallocated storage and
+    /// runs the complete validation — shape, parent bounds/self-parent,
+    /// cycles, plus the batch rules (`T` match, `t_max` covering the longest
+    /// query, no parent crossing its sequence) — with the same typed
+    /// [`IrError`](r9v_ir::IrError) variants the owned builder reports.
+    /// Default scalar positions (`ctx + k`); for exact explicit positions
+    /// use [`Self::fill_batch_meta_with_options_and_tree_input`].
+    ///
+    /// Hot path: success allocates nothing and fabricates no owned
+    /// `TreeMask` — read the stored tree with
+    /// [`BatchWorkspace::tree_view`]. Undersized buffers are a typed error
+    /// naming the capacity and the requirement, never a grow. Size the
+    /// workspace once cold with
+    /// [`BatchWorkspace::try_with_capacity_and_tree`] and reuse it.
+    pub fn fill_batch_meta_with_tree_input(
+        &self,
+        seqs: &[SeqId],
+        query_lens: &[u32],
+        tree: TreeInput<'_>,
+        workspace: &mut BatchWorkspace,
+    ) -> StateResult<()> {
+        self.fill_batch_meta_with_options_and_tree_input(
+            seqs,
+            query_lens,
+            None,
+            Some(tree),
+            workspace,
+        )
+    }
+
+    /// Fills caller-owned batch buffers with exact explicit positions and an
+    /// optional borrowed tree (Spec 1 §2.5, §4.D.1, Spec 3 §5).
+    ///
+    /// Hot equivalent of [`Self::batch_meta_with_options`] without the owned
+    /// `TreeMask`: `positions` carries exact scalar `[T]` or MRoPE `[T,3]`
+    /// values (`None` builds the default `ctx + k` scalar positions) and
+    /// `tree` carries the verify tree (`None` stores no tree). Bit-identical
+    /// to the owned builder for scalar, MRoPE, and tree. Same allocation
+    /// contract as [`Self::fill_batch_meta_with_tree_input`]: success
+    /// allocates nothing, undersized buffers fail closed typed.
+    pub fn fill_batch_meta_with_options_and_tree_input(
+        &self,
+        seqs: &[SeqId],
+        query_lens: &[u32],
+        positions: Option<&Positions>,
+        tree: Option<TreeInput<'_>>,
+        workspace: &mut BatchWorkspace,
+    ) -> StateResult<()> {
+        let overflow = |what: &str| StateError::Overflow {
+            what: what.to_owned(),
+        };
+        let max_b =
+            usize::try_from(self.max_blocks).map_err(|_| overflow("max blocks conversion"))?;
+        // Required lengths, all checked: fail before touching the workspace.
+        let s_len = seqs.len();
+        let g_len = self.groups.len();
+        // Validation needs the token total before the buffers can be sized;
+        // run the plan against workspace scratch first (no allocation when
+        // the scratch fits, which the capacity check below guarantees — the
+        // check itself only reads capacities).
+        if workspace.id_scratch.capacity() < s_len {
+            return Err(StateError::InvalidBatch {
+                detail: format!(
+                    "batch workspace id scratch capacity {} < required {s_len}",
+                    workspace.id_scratch.capacity()
+                ),
+            });
+        }
+        let positions_len = positions.as_ref().map(|p| p.len());
+        // The tree/batch size match is reported as the builder's
+        // `TreeBatchMismatch` below, so the plan skips its own count check.
+        let plan = self.plan_batch(
+            seqs,
+            query_lens,
+            positions_len,
+            None,
+            &mut workspace.id_scratch,
+        )?;
+        let t_len = plan.total_tokens;
+        if let Some(t) = tree.as_ref() {
+            if t.t() != t_len {
+                return Err(StateError::Ir(IrError::TreeBatchMismatch {
+                    tree_t: t.t(),
+                    batch_t: u32::try_from(plan.total_u64)
+                        .map_err(|_| overflow("batch meta total tokens"))?,
+                }));
+            }
+        }
+        let need_slot = g_len
+            .checked_mul(t_len)
+            .ok_or_else(|| overflow("flat slot map size"))?;
+        let need_block = g_len
+            .checked_mul(s_len)
+            .and_then(|v| v.checked_mul(max_b))
+            .ok_or_else(|| overflow("flat block table size"))?;
+        let need_window = g_len
+            .checked_mul(s_len)
+            .ok_or_else(|| overflow("flat window start size"))?;
+        let check = |what: &str, cap: usize, need: usize| {
+            if cap < need {
+                Err(StateError::InvalidBatch {
+                    detail: format!("batch workspace {what} capacity {cap} < required {need}"),
+                })
+            } else {
+                Ok(())
+            }
+        };
+        check("seq_ids", workspace.seq_ids.capacity(), s_len)?;
+        check("query_lens", workspace.query_lens.capacity(), s_len)?;
+        check("ctx_lens", workspace.ctx_lens.capacity(), s_len)?;
+        // Positions buffers are exclusive by width: scalar fills need
+        // `positions`, MRoPE fills need `positions_mrope`. Check only the
+        // active one so a scalar-sized workspace is not forced to also fit
+        // triplets and vice versa.
+        let want_mrope = matches!(positions, Some(Positions::Mrope(_)));
+        if want_mrope {
+            check(
+                "positions_mrope",
+                workspace.positions_mrope.capacity(),
+                t_len,
+            )?;
+        } else {
+            check("positions", workspace.positions.capacity(), t_len)?;
+        }
+        check("slot_map", workspace.slot_map.capacity(), need_slot)?;
+        check("block_table", workspace.block_table.capacity(), need_block)?;
+        check(
+            "window_start",
+            workspace.window_start.capacity(),
+            need_window,
+        )?;
+        // Tree before any buffer is touched. The batch-relative rules
+        // (`t_max` cover, no cross-sequence parent) read only the input
+        // slices, so they run first and mutate nothing; `fill_tree` then
+        // copies into the preallocated buffers with the intrinsic validation
+        // (shape, bounds/self-parent, cycles). Every failure below leaves
+        // the batch buffers exactly as they were.
+        if let Some(t) = tree.as_ref() {
+            check_tree_batch_rules(t.parents(), t.t_max(), query_lens).map_err(StateError::Ir)?;
+            workspace.fill_tree(*t)?;
+        } else {
+            workspace.clear_tree();
+        }
+        // Capacities fit, so nothing below allocates: clears keep capacity,
+        // pushes/extends land within it, and `resize` only writes sentinels.
+        workspace.seq_ids.clear();
+        workspace.query_lens.clear();
+        workspace.ctx_lens.clear();
+        workspace.positions.clear();
+        workspace.positions_mrope.clear();
+        workspace.slot_map.clear();
+        workspace.block_table.clear();
+        workspace.window_start.clear();
+        workspace.query_lens.extend(query_lens.iter().copied());
+        workspace
+            .block_table
+            .resize(need_block, BLOCK_TABLE_SENTINEL);
+        // Explicit positions are copied verbatim (no alloc within capacity);
+        // `None` emits the default `ctx + k` scalar positions. Either way
+        // the width is recorded so the two accessors stay unambiguous.
+        match positions {
+            None => {
+                self.emit_batch_into(
+                    seqs,
+                    query_lens,
+                    &plan,
+                    &mut workspace.seq_ids,
+                    &mut workspace.ctx_lens,
+                    Some(&mut workspace.positions),
+                    &mut workspace.slot_map,
+                    &mut workspace.block_table,
+                    &mut workspace.window_start,
+                )?;
+                workspace.last_position_width = 1;
+            }
+            Some(Positions::PerToken(v)) => {
+                self.emit_batch_into(
+                    seqs,
+                    query_lens,
+                    &plan,
+                    &mut workspace.seq_ids,
+                    &mut workspace.ctx_lens,
+                    None,
+                    &mut workspace.slot_map,
+                    &mut workspace.block_table,
+                    &mut workspace.window_start,
+                )?;
+                // `plan_batch` already proved `v.len() == T`; the capacity
+                // check above proves the extend below cannot reallocate.
+                workspace.positions.extend(v.iter().copied());
+                workspace.last_position_width = 1;
+            }
+            Some(Positions::Mrope(v)) => {
+                self.emit_batch_into(
+                    seqs,
+                    query_lens,
+                    &plan,
+                    &mut workspace.seq_ids,
+                    &mut workspace.ctx_lens,
+                    None,
+                    &mut workspace.slot_map,
+                    &mut workspace.block_table,
+                    &mut workspace.window_start,
+                )?;
+                workspace.positions_mrope.extend(v.iter().copied());
+                workspace.last_position_width = 3;
+            }
+        }
+        workspace.last_g = u32::try_from(g_len).map_err(|_| overflow("batch meta group count"))?;
+        workspace.last_s = u32::try_from(s_len).map_err(|_| overflow("batch meta seq count"))?;
+        workspace.last_t =
+            u32::try_from(plan.total_u64).map_err(|_| overflow("batch meta total tokens"))?;
+        workspace.last_max_blocks = self.max_blocks;
+        // The slices path never fabricates an owned mask: `fill_tree` (or
+        // `clear_tree`) already settled the single live source.
+        workspace.tree = None;
+        Ok(())
+    }
+
+    /// Validates a batch into a [`BatchPlan`]: no allocation on success
+    /// (`seen_ids` is caller scratch; details formatted only on failure).
+    fn plan_batch(
+        &self,
+        seqs: &[SeqId],
+        query_lens: &[u32],
+        positions_len: Option<usize>,
+        tree_t: Option<usize>,
+        seen_ids: &mut Vec<u64>,
+    ) -> StateResult<BatchPlan> {
         if seqs.len() != query_lens.len() {
             return Err(StateError::InvalidBatch {
                 detail: format!("seqs={} query_lens={}", seqs.len(), query_lens.len()),
@@ -1539,7 +3039,7 @@ impl StateManager {
             });
         }
         let mut problems: Vec<String> = Vec::new();
-        let mut seen: BTreeSet<u64> = BTreeSet::new();
+        seen_ids.clear();
         for (i, seq) in seqs.iter().enumerate() {
             if seq.as_u64() > u64::from(u32::MAX) {
                 return Err(StateError::SeqIdOverflow {
@@ -1547,8 +3047,10 @@ impl StateManager {
                     max: u32::MAX,
                 });
             }
-            if !seen.insert(seq.as_u64()) {
+            if seen_ids.contains(&seq.as_u64()) {
                 problems.push(format!("batch[{i}]: duplicate sequence {}", seq.as_u64()));
+            } else {
+                seen_ids.push(seq.as_u64());
             }
         }
         let mut total: u64 = 0;
@@ -1584,19 +3086,17 @@ impl StateManager {
         let total_tokens = usize::try_from(total).map_err(|_| StateError::Overflow {
             what: "total tokens conversion".to_owned(),
         })?;
-        if let Some(ref pos) = positions {
-            if pos.len() != total_tokens {
+        if let Some(len) = positions_len {
+            if len != total_tokens {
                 problems.push(format!(
-                    "positions len {} != total tokens {total_tokens}",
-                    pos.len()
+                    "positions len {len} != total tokens {total_tokens}"
                 ));
             }
         }
-        if let Some(ref tr) = tree {
-            if tr.t() != total_tokens {
+        if let Some(t) = tree_t {
+            if t != total_tokens {
                 problems.push(format!(
-                    "tree token count {} != total tokens {total_tokens}",
-                    tr.t()
+                    "tree token count {t} != total tokens {total_tokens}"
                 ));
             }
         }
@@ -1605,8 +3105,39 @@ impl StateManager {
                 detail: problems.join("; "),
             });
         }
+        Ok(BatchPlan {
+            total_tokens,
+            total_u64: total,
+        })
+    }
 
-        let mut seq_ids = Vec::with_capacity(seqs.len());
+    /// Emits validated batch tensors into caller-provided buffers, shared by
+    /// the owned and fill metadata paths (Spec 1 §2.5, Spec 3 §3.3, §3.5).
+    ///
+    /// Buffers arrive empty with sufficient capacity, except `block_table`,
+    /// which arrives pre-filled with [`BLOCK_TABLE_SENTINEL`] to its full
+    /// `[G, S, max_blocks]` length for scattered writes. `positions` is
+    /// `Some` when the caller wants the default `ctx + k` scalar positions
+    /// emitted and `None` when it copies exact explicit positions itself
+    /// afterwards. Success pushes within capacity only and never allocates.
+    //
+    // Nine arguments is over the default lint count; they are the tensors of
+    // one batch (Spec 1 §2.5), so bundling them would only rename the
+    // argument.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_batch_into(
+        &self,
+        seqs: &[SeqId],
+        query_lens: &[u32],
+        plan: &BatchPlan,
+        seq_ids: &mut Vec<u32>,
+        ctx_lens: &mut Vec<u32>,
+        mut positions: Option<&mut Vec<u32>>,
+        slot_map: &mut Vec<u32>,
+        block_table: &mut [u32],
+        window_start: &mut Vec<u32>,
+    ) -> StateResult<()> {
+        let total_tokens = plan.total_tokens;
         for seq in seqs {
             let dev_id = u32::try_from(seq.as_u64()).map_err(|_| StateError::SeqIdOverflow {
                 seq: seq.as_u64(),
@@ -1615,76 +3146,48 @@ impl StateManager {
             seq_ids.push(dev_id);
         }
 
-        let mut ctx_len = Vec::with_capacity(seqs.len());
-        let mut default_positions: Vec<u32> = Vec::with_capacity(total_tokens);
         for (seq, q) in seqs.iter().zip(query_lens.iter()) {
             let s = self.seq(*seq).map_err(|_| StateError::InvalidBatch {
                 detail: "sequence vanished during batch build".to_owned(),
             })?;
-            ctx_len.push(s.ctx_len);
-            for k in 0..*q {
-                default_positions.push(s.ctx_len.checked_add(k).ok_or_else(|| {
-                    StateError::Overflow {
-                        what: "batch position".to_owned(),
-                    }
-                })?);
+            ctx_lens.push(s.ctx_len);
+            if let Some(positions) = positions.as_deref_mut() {
+                for k in 0..*q {
+                    positions.push(s.ctx_len.checked_add(k).ok_or_else(|| {
+                        StateError::Overflow {
+                            what: "batch position".to_owned(),
+                        }
+                    })?);
+                }
             }
         }
-        let final_positions = positions.unwrap_or(Positions::PerToken(default_positions));
-
-        let total_slots =
-            self.groups
-                .len()
-                .checked_mul(total_tokens)
-                .ok_or_else(|| StateError::Overflow {
-                    what: "flat slot map size".to_owned(),
-                })?;
-        let mut flat_slot_map = Vec::with_capacity(total_slots);
 
         let max_b = usize::try_from(self.max_blocks).map_err(|_| StateError::Overflow {
             what: "max blocks conversion".to_owned(),
         })?;
-        let total_blocks = self
-            .groups
-            .len()
-            .checked_mul(seqs.len())
-            .and_then(|v| v.checked_mul(max_b))
-            .ok_or_else(|| StateError::Overflow {
-                what: "flat block table size".to_owned(),
-            })?;
-        let mut flat_block_table = vec![BLOCK_TABLE_SENTINEL; total_blocks];
-
-        let total_windows =
-            self.groups
-                .len()
-                .checked_mul(seqs.len())
-                .ok_or_else(|| StateError::Overflow {
-                    what: "flat window start size".to_owned(),
-                })?;
-        let mut flat_window_start = Vec::with_capacity(total_windows);
 
         for (gi, g) in self.groups.iter().enumerate() {
             // slot_map [G, T] row-major
             if !g.spec.is_paged() {
-                flat_slot_map.extend(std::iter::repeat_n(SLOT_NONE, total_tokens));
+                slot_map.extend(std::iter::repeat_n(SLOT_NONE, total_tokens));
             } else {
                 for (si, (seq, q)) in seqs.iter().zip(query_lens.iter()).enumerate() {
                     let s = self.seq(*seq).map_err(|_| StateError::InvalidBatch {
                         detail: "sequence vanished during batch build".to_owned(),
                     })?;
-                    let end = ctx_len[si]
+                    let end = ctx_lens[si]
                         .checked_add(*q)
                         .ok_or_else(|| StateError::Overflow {
                             what: "batch reserved end".to_owned(),
                         })?;
                     for k in 0..*q {
                         let pos =
-                            ctx_len[si]
+                            ctx_lens[si]
                                 .checked_add(k)
                                 .ok_or_else(|| StateError::Overflow {
                                     what: "batch position".to_owned(),
                                 })?;
-                        flat_slot_map.push(flatten_slot(s, gi, pos, end)?);
+                        slot_map.push(flatten_slot(s, gi, pos, end)?);
                     }
                 }
             }
@@ -1733,11 +3236,12 @@ impl StateManager {
                             .ok_or_else(|| StateError::Overflow {
                                 what: "block table offset".to_owned(),
                             })?;
-                        let cell_ref = flat_block_table.get_mut(offset).ok_or_else(|| {
-                            StateError::Overflow {
-                                what: "block table index".to_owned(),
-                            }
-                        })?;
+                        let cell_ref =
+                            block_table
+                                .get_mut(offset)
+                                .ok_or_else(|| StateError::Overflow {
+                                    what: "block table index".to_owned(),
+                                })?;
                         *cell_ref = id;
                     }
                 }
@@ -1748,31 +3252,10 @@ impl StateManager {
                         window_start_of(s.ctx_len, w)
                     }
                 };
-                flat_window_start.push(ws);
+                window_start.push(ws);
             }
         }
-
-        let num_groups = u32::try_from(self.groups.len()).map_err(|_| StateError::Overflow {
-            what: "batch meta group count".to_owned(),
-        })?;
-        let num_seqs = u32::try_from(seqs.len()).map_err(|_| StateError::Overflow {
-            what: "batch meta seq count".to_owned(),
-        })?;
-        let total_tokens_u32 = u32::try_from(total).map_err(|_| StateError::Overflow {
-            what: "batch meta total tokens".to_owned(),
-        })?;
-
-        BatchMeta::builder(num_groups, num_seqs, total_tokens_u32, self.max_blocks)
-            .seq_ids(seq_ids)
-            .query_len(query_lens.to_vec())
-            .ctx_len(ctx_len)
-            .positions(final_positions)
-            .slot_map(flat_slot_map)
-            .block_table(flat_block_table)
-            .window_start(flat_window_start)
-            .tree(tree)
-            .build()
-            .map_err(StateError::Ir)
+        Ok(())
     }
 
     /// Pool budget snapshot (Spec 3 §5 `budget`).
@@ -1864,6 +3347,76 @@ impl StateManager {
     }
 }
 
+/// Batch-relative tree rules shared by the owned and slices fill paths,
+/// mirroring [`BatchMetaBuilder`](r9v_ir::BatchMetaBuilder) exactly
+/// (Spec 1 §4.D.1).
+///
+/// `t_max` covers the longest query and no parent points outside its own
+/// sequence's flattened token range (out-of-range ids are the intrinsic
+/// check's job and are skipped here, as in the builder). Pure: collects
+/// every failure, allocates only while reporting.
+fn check_tree_batch_rules(parents: &[i32], t_max: u32, query_lens: &[u32]) -> Result<(), IrError> {
+    let mut problems = Vec::new();
+    let required = query_lens.iter().copied().max().unwrap_or(0);
+    if t_max < required {
+        problems.push(IrError::TreeMaxTooSmall {
+            required,
+            actual: t_max,
+        });
+    }
+    let total: usize = query_lens.iter().map(|&q| q as usize).sum();
+    if parents.len() == total {
+        let mut seq_start = 0usize;
+        for (seq, &seq_len) in query_lens.iter().enumerate() {
+            let seq_end = seq_start + seq_len as usize;
+            for (token, &parent) in parents
+                .iter()
+                .enumerate()
+                .skip(seq_start)
+                .take(seq_end - seq_start)
+            {
+                if parent >= 0 && ((parent as usize) < seq_start || (parent as usize) >= seq_end) {
+                    problems.push(IrError::TreeParentCrossesSequence {
+                        token,
+                        parent,
+                        seq,
+                        seq_start,
+                        seq_end,
+                    });
+                }
+            }
+            seq_start = seq_end;
+        }
+    }
+    IrError::from_problems(problems)
+}
+
+/// Grows `v` toward `need` once, cold (Spec 3 §5).
+///
+/// Already-fitting buffers are untouched; a refused reservation is a typed
+/// error, never a partial size the hot path could trip over. The request is
+/// measured from `len`, not `capacity`: `try_reserve_exact` counts additional
+/// space beyond `len`, so `need - capacity` silently under-serves reused
+/// (nonempty) vectors with spare capacity while reporting success.
+fn reserve_at_least<T>(v: &mut Vec<T>, need: usize, what: &'static str) -> StateResult<()> {
+    if v.capacity() < need {
+        // `capacity < need` with the `Vec` invariant `len <= capacity` gives
+        // `len < need`, so the checked subtraction below cannot fail on a
+        // live vector; it stays checked so a violated invariant is a typed
+        // refusal rather than an underflow wrap.
+        let additional = need
+            .checked_sub(v.len())
+            .ok_or_else(|| StateError::Overflow {
+                what: what.to_owned(),
+            })?;
+        v.try_reserve_exact(additional)
+            .map_err(|_| StateError::Overflow {
+                what: what.to_owned(),
+            })?;
+    }
+    Ok(())
+}
+
 /// Mathematical `max(0, ctx - w)` via checked branching (Spec 3 §3.5).
 ///
 /// A short unverified sequence is normal, not malformed state, so this is an
@@ -1882,6 +3435,54 @@ fn window_start_of(ctx: u32, w: u32) -> u32 {
     }
 }
 
+/// Allocates one recorded `(group, index)` block into its sequence table
+/// (Spec 3 §3.6, §5). Takes the smallest free id, keeping block ids a
+/// deterministic function of the request history alone.
+fn place_one_block(
+    pools: &mut [Option<BlockPool>],
+    seqs: &mut BTreeMap<u64, SeqState>,
+    seq: SeqId,
+    gi: usize,
+    idx: u32,
+    end: u32,
+    max_ctx: u32,
+) -> StateResult<()> {
+    let pool =
+        pools
+            .get_mut(gi)
+            .and_then(|p| p.as_mut())
+            .ok_or_else(|| StateError::InvalidBatch {
+                detail: format!("group {gi} is not a paged group"),
+            })?;
+    let id = pool.alloc().ok_or(StateError::PoolExhausted {
+        group: gi,
+        required: 1,
+        available: 0,
+        shortfall: 1,
+        end,
+        max_ctx,
+    })?;
+    let s = seqs
+        .get_mut(&seq.as_u64())
+        .ok_or(StateError::UnknownSeq { seq: seq.as_u64() })?;
+    let indices = s
+        .indices
+        .get_mut(gi)
+        .ok_or_else(|| StateError::InvalidBatch {
+            detail: format!("sequence {} has no table", seq.as_u64()),
+        })?;
+    let at = indices.partition_point(|&i| i < idx);
+    indices.insert(at, idx);
+    let tables = s
+        .tables
+        .get_mut(gi)
+        .ok_or_else(|| StateError::InvalidBatch {
+            detail: format!("sequence {} has no table", seq.as_u64()),
+        })?;
+    tables.insert(at, id);
+    Ok(())
+}
+
 /// Flattened slot for one retained position: `block_id * 32 + lane`
 /// (Spec 1 §2.5, Spec 3 §3.3).
 ///
@@ -1890,6 +3491,28 @@ fn window_start_of(ctx: u32, w: u32) -> u32 {
 // `base[group] + block_id * block_bytes` directly; ids are per-group-pool,
 // never arena-global across groups. A position with no mapped block is a
 // typed error, never a clamp to a neighboring block.
+/// Scope check for a `SlotRange`: it must name the sequence's current open
+/// reservation (Spec 3 §3.6, §5).
+///
+/// `UnknownSeq` is reported by the caller before this runs; here a mismatch
+/// of `start`/`len` against the live `ctx_len`/`tail_len` (post-commit,
+/// freed, superseded by a later reserve, or foreign) is a typed
+/// `InvalidBatch` naming both sides, never a read of another step's tail.
+fn check_range_live(s: &SeqState, range: &SlotRange) -> StateResult<()> {
+    if s.ctx_len != range.start() || s.tail_len != range.len() {
+        return Err(StateError::InvalidBatch {
+            detail: format!(
+                "stale SlotRange: start={} len={} but live ctx_len={} tail_len={}",
+                range.start(),
+                range.len(),
+                s.ctx_len,
+                s.tail_len,
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn flatten_slot(s: &SeqState, group: usize, pos: u32, end: u32) -> StateResult<u32> {
     let missing = || StateError::UnmappedPosition { group, pos, end };
     let indices = s.indices.get(group).ok_or_else(missing)?;
@@ -2009,6 +3632,43 @@ mod tests {
     }
 
     #[test]
+    fn block_pool_release_validates_in_release_builds() {
+        // Direct pool proof: valid release/alloc round-trips, while
+        // out-of-range and double releases fail typed (never `debug_assert`
+        // only, never panic) — the guarantee every reserve/commit/free path
+        // relies on transactionally.
+        let mut pool = BlockPool {
+            total: 4,
+            free: (0..4).rev().collect(),
+            base_offset: 0,
+            block_bytes: 64,
+        };
+        assert_eq!(pool.alloc(), Some(0));
+        assert_eq!(pool.alloc(), Some(1));
+        pool.release(1).expect("releasing a held block succeeds");
+        // Double release fails typed, in every build profile.
+        let err = pool.release(1).unwrap_err();
+        assert!(
+            matches!(err, StateError::InvalidBatch { .. }),
+            "got {err:?}"
+        );
+        // Out-of-range ids fail typed, including the `u32::MAX` free_seq
+        // corruption probe.
+        for bad in [4, 5, u32::MAX - 10, u32::MAX] {
+            let err = pool.release(bad).unwrap_err();
+            assert!(
+                matches!(err, StateError::InvalidBatch { .. }),
+                "got {err:?} for {bad}"
+            );
+        }
+        // The failed releases mutated nothing: smallest-free order is intact.
+        assert_eq!(pool.alloc(), Some(1));
+        assert_eq!(pool.alloc(), Some(2));
+        assert_eq!(pool.alloc(), Some(3));
+        assert_eq!(pool.alloc(), None);
+    }
+
+    #[test]
     fn free_seq_atomic_rejects_already_free_block_and_mutates_nothing() {
         let mut m = test_hybrid_manager();
         let (a, _) = m.new_seq(&[]).unwrap();
@@ -2020,7 +3680,12 @@ mod tests {
         let block_to_corrupt = s.tables[0][0];
 
         // Corrupt internal state: insert block back into pool.free
-        m.pools[0].as_mut().unwrap().free.insert(block_to_corrupt);
+        // (sorted insert keeps the descending free-list order intact).
+        m.pools[0]
+            .as_mut()
+            .unwrap()
+            .release(block_to_corrupt)
+            .expect("releasing a held block is a valid pool op (the corruption is that the sequence still references it)");
 
         let before_stats = m.stats();
         let before_budget = m.budget();

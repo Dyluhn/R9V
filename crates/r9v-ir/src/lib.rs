@@ -30,7 +30,9 @@ pub use arch::{
     ArchDescriptor, ArchFamily, DeviceDescriptor, DeviceFacts, DeviceIdentity, GraphCapture,
     MatrixOp, Measured, P2pLink, P2pTransport, RelRate, ValuDot,
 };
-pub use batch::{BatchMeta, BatchMetaBuilder, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
+pub use batch::{
+    validate_tree_slices, BatchMeta, BatchMetaBuilder, Positions, TreeMask, BLOCK_TABLE_SENTINEL,
+};
 pub use constrained::{
     spoof_catalog, spoof_lookup, ConstrainedDevice, CuMask, EffectiveDeviceView,
     PreQueueLaunchContract, Provenance, SpoofProfile, SpoofProfileId, CU_MASK_ENV_NAME,

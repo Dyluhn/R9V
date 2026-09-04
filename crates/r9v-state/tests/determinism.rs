@@ -49,7 +49,9 @@ fn freed_blocks_are_reused_smallest_first() {
     let (c, _) = m.new_seq(&[]).unwrap();
     let slots = m.reserve(c, 32).unwrap();
     // Block 0 is the smallest free id: flattened slot 0 * 32 + lane.
-    assert_eq!(slots.slots[0], (0..32).collect::<Vec<u32>>());
+    let mut row = vec![0u32; 32];
+    m.fill_slots(&slots, 0, &mut row).unwrap();
+    assert_eq!(row, (0..32).collect::<Vec<u32>>());
     m.commit(c, 32).unwrap();
 }
 
