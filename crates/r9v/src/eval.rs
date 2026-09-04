@@ -93,7 +93,15 @@ fn read_tokens(path: &Path, vocab: u32) -> Result<Vec<u32>, String> {
 /// Hand-rolled (no new dependency): magic, version 1.0, dict header padded
 /// to 64-byte alignment, then little-endian floats.
 pub fn write_npy_f32(path: &Path, shape: &[usize], data: &[f32]) -> Result<(), String> {
-    let expected: usize = shape.iter().product();
+    let expected = shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| {
+            format!(
+                "r9v eval: cannot write {}: shape {shape:?} overflows usize",
+                path.display()
+            )
+        })?;
     if data.len() != expected {
         return Err(format!(
             "r9v eval: cannot write {}: data length {} != shape {shape:?} ({expected})",
@@ -109,15 +117,53 @@ pub fn write_npy_f32(path: &Path, shape: &[usize], data: &[f32]) -> Result<(), S
     let trailing = if shape.len() == 1 { "," } else { "" };
     let dict = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': ({dims}{trailing}), }}");
     let mut header = dict.into_bytes();
-    header.push(b'\n');
-    // Pad so magic(6) + version(2) + len(2) + header is a multiple of 64.
-    let pad = (64 - (10 + header.len()) % 64) % 64;
+    // Pad with spaces BEFORE the final newline so magic(6) + version(2) +
+    // len(2) + header.len() is a multiple of 64, terminating with '\n'.
+    // NumPy parsers evaluate the header with Python literal_eval and reject
+    // whitespace after the newline.
+    let unpadded_len = 10usize
+        .checked_add(header.len())
+        .and_then(|l| l.checked_add(1))
+        .ok_or_else(|| {
+            format!(
+                "r9v eval: cannot write {}: header length overflows usize",
+                path.display()
+            )
+        })?;
+    let pad = (64 - (unpadded_len % 64)) % 64;
     header.extend(std::iter::repeat_n(b' ', pad));
-    let mut bytes = Vec::with_capacity(10 + header.len() + data.len() * 4);
+    header.push(b'\n');
+
+    let header_len = u16::try_from(header.len()).map_err(|_| {
+        format!(
+            "r9v eval: cannot write {}: header length {} exceeds u16::MAX for .npy v1.0",
+            path.display(),
+            header.len()
+        )
+    })?;
+    let data_bytes_len = data
+        .len()
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            format!(
+                "r9v eval: cannot write {}: data byte size overflows usize",
+                path.display()
+            )
+        })?;
+    let total_bytes = 10usize
+        .checked_add(header.len())
+        .and_then(|l| l.checked_add(data_bytes_len))
+        .ok_or_else(|| {
+            format!(
+                "r9v eval: cannot write {}: total file size overflows usize",
+                path.display()
+            )
+        })?;
+    let mut bytes = Vec::with_capacity(total_bytes);
     bytes.extend_from_slice(b"\x93NUMPY");
     bytes.push(1);
     bytes.push(0);
-    bytes.extend_from_slice(&(header.len() as u16).to_le_bytes());
+    bytes.extend_from_slice(&header_len.to_le_bytes());
     bytes.extend_from_slice(&header);
     for value in data {
         bytes.extend_from_slice(&value.to_le_bytes());
@@ -142,18 +188,26 @@ pub fn read_npy_f32(path: &Path) -> Result<(Vec<usize>, Vec<f32>), String> {
         return Err(fail("only v1.0 is supported"));
     }
     let header_len = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
-    if bytes.len() < 10 + header_len {
+    let header_end = 10usize
+        .checked_add(header_len)
+        .ok_or_else(|| fail("header length overflows usize"))?;
+    if bytes.len() < header_end {
         return Err(fail("truncated header"));
     }
-    let header =
-        std::str::from_utf8(&bytes[10..10 + header_len]).map_err(|_| fail("bad header"))?;
+    let header = std::str::from_utf8(&bytes[10..header_end]).map_err(|_| fail("bad header"))?;
     if !header.contains("'<f4'") || !header.contains("False") {
         return Err(fail("only <f4 C-order is supported"));
     }
     let shape = parse_npy_shape(header).ok_or_else(|| fail("bad shape"))?;
-    let count: usize = shape.iter().product();
-    let body = &bytes[10 + header_len..];
-    if body.len() != count * 4 {
+    let count: usize = shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| fail("shape element count overflows usize"))?;
+    let body = &bytes[header_end..];
+    let expected_body_len = count
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| fail("body byte size overflows usize"))?;
+    if body.len() != expected_body_len {
         return Err(fail("body length disagrees with shape"));
     }
     let mut values = Vec::with_capacity(count);
@@ -175,6 +229,8 @@ fn parse_npy_shape(header: &str) -> Option<Vec<usize>> {
     }
     inner
         .split(',')
-        .map(|piece| piece.trim().parse::<usize>().ok())
+        .map(str::trim)
+        .filter(|piece| !piece.is_empty())
+        .map(|piece| piece.parse::<usize>().ok())
         .collect()
 }

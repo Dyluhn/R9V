@@ -152,6 +152,8 @@ mod tests {
                 "logit {index} differs: direct={a} file={b}"
             );
         }
+        // Independent validation with real Python NumPy (Spec 14 §10, Card A1.12).
+        validate_with_python_numpy(&out_path, &[5, 64], &direct);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -177,6 +179,117 @@ mod tests {
                 "element {i} round-trip mismatch: wrote {a}, read {b}"
             );
         }
+        validate_with_python_numpy(&npy_path, &shape, &original_data);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn numpy_interoperability_validates_with_python_numpy() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/card-tests/r9v-cli-numpy-interop");
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        fs::create_dir_all(&dir).unwrap();
+
+        // Validate multiple shapes: 1D (checks trailing comma), 2D, and 3D.
+        let cases: Vec<(Vec<usize>, Vec<f32>)> = vec![
+            (vec![7], (0..7).map(|i| (i as f32) * 1.5 - 3.0).collect()),
+            (
+                vec![3, 8],
+                (0..24).map(|i| (i as f32) * 0.125 - 1.5).collect(),
+            ),
+            (
+                vec![2, 3, 4],
+                (0..24).map(|i| ((i as f32) + 0.5) / 7.0).collect(),
+            ),
+        ];
+
+        for (case_idx, (shape, original_data)) in cases.into_iter().enumerate() {
+            let npy_path = dir.join(format!("test_interop_{case_idx}.npy"));
+            super::eval::write_npy_f32(&npy_path, &shape, &original_data).unwrap();
+
+            // Validate with in-tree reader.
+            let (read_shape, read_data) = super::eval::read_npy_f32(&npy_path).unwrap();
+            assert_eq!(read_shape, shape);
+            assert_eq!(read_data.len(), original_data.len());
+            for (i, (&a, &b)) in original_data.iter().zip(read_data.iter()).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "case {case_idx} element {i} mismatch"
+                );
+            }
+
+            // Validate with real Python NumPy.
+            validate_with_python_numpy(&npy_path, &shape, &original_data);
+        }
+
+        // Validate checked arithmetic on invalid shape/data length.
+        let invalid_path = dir.join("invalid.npy");
+        let err = super::eval::write_npy_f32(&invalid_path, &[2, 3], &[1.0, 2.0, 3.0]).unwrap_err();
+        assert!(err.contains("data length 3 != shape [2, 3] (6)"));
+
+        // Validate checked multiplication on overflowing shape.
+        let overflow_err =
+            super::eval::write_npy_f32(&invalid_path, &[usize::MAX, 2], &[]).unwrap_err();
+        assert!(overflow_err.contains("overflows usize"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Validates an emitted .npy file with real Python NumPy via subprocess.
+    fn validate_with_python_numpy(
+        path: &std::path::Path,
+        expected_shape: &[usize],
+        expected_data: &[f32],
+    ) {
+        use std::io::Write;
+        let py = std::env::var("PYTHON").unwrap_or_else(|_| "python3".to_string());
+        let shape_tuple = if expected_shape.len() == 1 {
+            format!("({},)", expected_shape[0])
+        } else {
+            let dims = expected_shape
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({dims})")
+        };
+        let py_script = format!(
+            r#"
+import sys, numpy as np
+arr = np.load(r"{}")
+assert arr.dtype == np.float32, f"unexpected dtype: {{arr.dtype}}"
+assert arr.flags.c_contiguous, "array is not C-contiguous"
+assert tuple(arr.shape) == {shape_tuple}, f"shape mismatch: {{arr.shape}} vs {shape_tuple}"
+expected_bytes = sys.stdin.buffer.read()
+assert arr.tobytes() == expected_bytes, "array byte payload mismatch"
+"#,
+            path.display(),
+        );
+        let mut child = std::process::Command::new(&py)
+            .arg("-c")
+            .arg(&py_script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap_or_else(|err| panic!("failed to spawn python interpreter ({py}): {err}"));
+        let expected_bytes: Vec<u8> = expected_data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        {
+            let mut stdin = child.stdin.take().expect("child stdin open");
+            stdin.write_all(&expected_bytes).unwrap();
+        }
+        let output = child
+            .wait_with_output()
+            .expect("failed waiting for python process");
+        assert!(
+            output.status.success(),
+            "python numpy validation failed for {}: stdout={}\nstderr={}",
+            path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
