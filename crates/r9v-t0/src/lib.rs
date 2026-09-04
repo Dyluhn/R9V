@@ -16,9 +16,11 @@ pub mod causal_conv1d;
 pub mod collectives;
 pub mod concat;
 pub mod copy;
+pub mod decode;
 pub mod dtype;
 pub mod embed_gather;
 pub mod error;
+pub mod exec;
 pub mod gather_rows;
 pub mod harness;
 pub mod linear_attn_scan;
@@ -36,6 +38,7 @@ pub mod sampling;
 pub mod scatter_add_rows;
 pub mod segments;
 pub mod split;
+pub mod synthetic;
 pub mod tolerance;
 
 pub use act_mul::{act_mul, act_mul_f64_reference};
@@ -54,12 +57,14 @@ pub use causal_conv1d::{causal_conv1d, causal_conv1d_f64_reference};
 pub use collectives::{all_gather, all_reduce, all_to_all, barrier, recv, reduce_scatter, send};
 pub use concat::{concat, concat_f64_reference};
 pub use copy::{copy, copy_f64_reference};
+pub use decode::{decode_greedy, DecodeConfig, DecodeResult};
 pub use dtype::{
     bf16_to_f32, dtype_element_size, f16_to_f32, f32_to_bf16, f32_to_f16, fp8_e4m3_decode,
     fp8_e4m3_encode, fp8_e5m2_decode, fp8_e5m2_encode, read_f32_at, read_f64_at, write_f32_at,
 };
 pub use embed_gather::{embed_gather, embed_gather_f64_reference, embed_gather_with_scales};
 pub use error::T0Error;
+pub use exec::{CpuExecutor, ExecError, RunArgs};
 pub use gather_rows::{gather_rows, gather_rows_f64_reference};
 pub use linear_attn_scan::{
     linear_attn_scan_chunked, linear_attn_scan_f64_reference, linear_attn_scan_recurrent,
@@ -83,6 +88,7 @@ pub use sampling::{
 pub use scatter_add_rows::{scatter_add_rows, scatter_add_rows_f64_reference};
 pub use segments::SeqLayout;
 pub use split::{split, split_f64_reference};
+pub use synthetic::{build as build_synthetic, SyntheticSpec, TinyModel, CACHE_BLOCK_TOKENS};
 pub use tolerance::Tolerance;
 
 use r9v_ir::Op;

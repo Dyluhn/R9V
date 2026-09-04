@@ -11,4 +11,5 @@ description = "R9V CPU reference scalar T0 and SIMD T0v implementations (Spec 4,
 r9v-common = { path = "../r9v-common" }
 r9v-format = { path = "../r9v-format" }
 r9v-ir = { path = "../r9v-ir" }
+serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"

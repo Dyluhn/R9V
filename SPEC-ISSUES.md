@@ -346,3 +346,9 @@ What: Spec 14 §5 defines the hosted `cpu-only` lane and the runner `gpu/gfx1201
 Why it blocks or misleads: Without a stated lane split, a green VM run (generic CPU, fixed topology) could be read as hardware evidence, silently weakening the immutable performance floors that §7 gates on the reference receipt protocol.
 Option taken: The VM lane runs the consolidated CPU gates for iteration only and is marked non-authoritative; only the bare-metal hardware container (explicit render nodes, read-only source mount, full gates plus `r9v-hip` GPU smoke) can produce qualification evidence.
 Proposed resolution: Resolved in spec 14 §5.2a: the VM lane is non-authoritative by construction and the immutable performance floors remain gated on the reference receipt protocol.
+
+## SI-63 — A1.12 — spec 14 §10
+What: Spec 14 §10 illustrates the developer workflow with `r9v eval --logits --model ... --prompts ...`, but the GGUF loader pipeline (cards A2.5–A2.6) and tokenizer (A1.4) are scheduled downstream of A1.12.
+Why it blocks or misleads: Without a checkpoint loader or tokenizer, `r9v eval` in A1.12 cannot consume real binary checkpoints or raw prompt strings; attempting to implement either would pull downstream Phase A2 scope into A1.12.
+Option taken: Per `phase-a-agent-breakdown.md` A1.12, `r9v eval` consumes a token file containing whitespace-separated token IDs via `--tokens <file>` and a JSON `SyntheticSpec` file via `--model <path>` to deterministically build a tiny dense decoder on CPU. Logits are emitted as a NumPy `.npy` array (v1.0, `<f4`, row-major C order) defaulting to `<tokens>.logits.npy` or specified via `--out <path>`.
+Proposed resolution: Update Spec 14 §10 to clarify that `eval` accepts `--tokens <file>` for pre-tokenized sequences and note that `--model` accepts the synthetic JSON specification prior to A2.6 and GGUF checkpoint paths thereafter.

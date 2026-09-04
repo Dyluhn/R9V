@@ -568,3 +568,28 @@ fn test_a19_public_surface_markers_and_dispatch() {
     let mut yr = TypedBuffer::zeros(&[2, 2], DType::F32);
     assert!(execute_collective_op(&reduce_op, &[xr.as_view()], &mut [yr.as_view_mut()]).is_ok());
 }
+
+#[test]
+fn test_a112_executor_api_shape_and_markers() {
+    assert_send::<CpuExecutor>();
+    assert_sync::<CpuExecutor>();
+    assert_send::<ExecError>();
+    assert_sync::<ExecError>();
+    assert_send::<DecodeConfig>();
+    assert_sync::<DecodeConfig>();
+    assert_send::<DecodeResult>();
+    assert_sync::<DecodeResult>();
+    assert_send::<SyntheticSpec>();
+    assert_sync::<SyntheticSpec>();
+    assert_send::<TinyModel>();
+    assert_sync::<TinyModel>();
+
+    let exec = CpuExecutor::default();
+    assert!(exec.edge(r9v_ir::EdgeId(0)).is_none());
+
+    let spec = SyntheticSpec::test_default();
+    assert!(spec.validate().is_ok());
+
+    let model = build_synthetic(&spec).unwrap();
+    assert_eq!(model.spec, spec);
+}

@@ -994,6 +994,44 @@ impl TypedBuffer {
         (0..self.num_elements()).map(|i| self.read_f32(i)).collect()
     }
 
+    /// Copies this buffer under a new shape with identical bytes (Spec 1 §3.3).
+    ///
+    /// Used by the CPU executor to realize contiguous metadata-only views
+    /// (reshape). Returns `None` when the shape's element count differs, so
+    /// callers fail closed instead of reinterpreting truncated data.
+    pub fn copy_with_shape(&self, shape: &[usize]) -> Option<Self> {
+        let expected: usize = shape.iter().product();
+        if self.num_elements() != expected {
+            return None;
+        }
+        let out = Self {
+            shape: shape.to_vec(),
+            dtype: self.dtype,
+            f32_data: self.f32_data.clone(),
+            f16_data: self.f16_data.clone(),
+            bf16_data: self.bf16_data.clone(),
+            i8_data: self.i8_data.clone(),
+            u32_data: self.u32_data.clone(),
+            byte_data: self.byte_data.clone(),
+            quant: self.quant,
+            layout: self.layout,
+        };
+        Some(out)
+    }
+
+    /// Borrows the f32 backing mutably for in-place T0 fills (Spec 4 §2).
+    ///
+    /// Returns `None` unless the buffer stores f32 with live backing, so
+    /// callers fail closed with a typed dtype error instead of writing
+    /// through a converted copy.
+    pub fn as_f32_slice_mut(&mut self) -> Option<&mut [f32]> {
+        if self.dtype == DType::F32 && !self.f32_data.is_empty() {
+            Some(&mut self.f32_data)
+        } else {
+            None
+        }
+    }
+
     /// Copies data out as a vector of `i8` (Spec 1 §2.3, Spec 4 §2).
     pub fn to_i8_vec(&self) -> Vec<i8> {
         match self.dtype {

@@ -60,6 +60,9 @@ version = "0.1.0"
 dependencies = [
  "r9v-common",
  "r9v-config",
+ "r9v-ir",
+ "r9v-t0",
+ "serde_json",
 ]
 
 [[package]]
@@ -206,6 +209,7 @@ dependencies = [
  "r9v-common",
  "r9v-format",
  "r9v-ir",
+ "serde",
  "thiserror",
 ]
 
