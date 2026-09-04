@@ -115,6 +115,20 @@ pub enum SchedError {
         maximum: usize,
     },
 
+    /// In-flight step identity mismatch: the device readback echoed a StepId
+    /// that does not match the candidate issued in pre-step, or a recovery
+    /// call named a step that is not in flight (Spec 6 §3.2, §8).
+    ///
+    /// The reservation is aborted transactionally and nothing is committed,
+    /// so retrying with the live candidate cannot double-commit.
+    #[error("stale step id: expected {expected:?}, got {got}")]
+    StaleStep {
+        /// Candidate StepId the scheduler issued, if one is in flight.
+        expected: Option<u64>,
+        /// StepId the device (or caller) reported.
+        got: u64,
+    },
+
     /// Internal scheduler invariant error.
     #[error("internal scheduler error: {0}")]
     Internal(String),

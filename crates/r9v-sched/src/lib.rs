@@ -35,6 +35,9 @@ pub use log::{GraphMode, ScheduleLogRing, ScheduleRecord, SCHEDULE_LOG_CAPACITY}
 pub use scheduler::{
     DeviceStepSample, Scheduler, SchedulerConfig, StepExecutor, StepInputs, DEFAULT_MAX_OUTSTANDING,
 };
+// Re-exported reservation/batch types naming the `StepInputs` contract
+// (Spec 3 §5, Spec 1 §2.5).
+pub use r9v_state::{BatchWorkspace, SlotRange};
 pub use streams::{EventId, EventKind, StepEventChain, StepEventRecord, StreamKind};
 pub use types::{
     ByteDetokenizer, Detokenizer, FinishReason, InlineVec, Request, Sequence, SequencePhase, Step,

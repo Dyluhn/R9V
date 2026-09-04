@@ -208,13 +208,28 @@ pub trait Detokenizer: Send + Sync {
     /// Decodes the provided token ID into UTF-8 text and appends it to `output` for the given sequence,
     /// returning the exact number of bytes appended to `output` for this token (Spec 6 §7).
     ///
-    /// Must reject invalid/unsupported byte sequences with an error.
+    /// A return of `0` is ambiguous on its own: it means either a buffered
+    /// partial UTF-8 code point (more bytes needed) or a genuinely empty token
+    /// text. Callers must consult [`Self::buffered_len`] to tell the two
+    /// apart. Must reject invalid/unsupported byte sequences with an error.
     fn append_token(
         &mut self,
         seq_id: SeqId,
         token: u32,
         output: &mut String,
     ) -> SchedResult<usize>;
+
+    /// Number of bytes currently buffered as an incomplete multi-byte UTF-8
+    /// code point for the given sequence (Spec 6 §7).
+    ///
+    /// Distinguishes a zero-byte [`Self::append_token`] caused by a buffered
+    /// partial code point (returns nonzero: the buffered byte count) from a
+    /// genuinely empty token text (returns zero: EOS/stop evaluation applies
+    /// normally). The default is zero for detokenizers without partial
+    /// buffering.
+    fn buffered_len(&self, _seq_id: SeqId) -> usize {
+        0
+    }
 
     /// Decodes and appends the text of `tokens` into the provided `output` string (Spec 6 §7).
     fn detokenize_to(
@@ -264,6 +279,14 @@ impl ByteDetokenizer {
 }
 
 impl Detokenizer for ByteDetokenizer {
+    fn buffered_len(&self, seq_id: SeqId) -> usize {
+        if self.active_seq == Some(seq_id) {
+            self.buf_len
+        } else {
+            0
+        }
+    }
+
     fn append_token(
         &mut self,
         seq_id: SeqId,
@@ -436,7 +459,7 @@ impl StopCriteria {
 /// Request submitted to the scheduler (Spec 6 §2).
 ///
 /// Contains prompt tokens, generation bounds, sampling parameters, stop criteria,
-/// and streaming flag.
+/// streaming flag, and the deterministic sampling seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
     /// Opaque unique request identifier (Spec 6 §2, CONVENTIONS.md §3.1).
@@ -451,10 +474,26 @@ pub struct Request {
     pub stop: StopCriteria,
     /// Whether output tokens are streamed per-step (Spec 6 §2, §3.3).
     pub stream: bool,
+    /// Deterministic sampling seed carried into every step upload (Spec 1 §4.F,
+    /// Spec 6 §3.1 step 9).
+    ///
+    /// Seeds the [`r9v_common::SeededRng`] convention: the per-step RNG
+    /// identity is `(seed, step_id)`, so identical requests replay
+    /// bit-identically and distinct requests diverge deterministically. No
+    /// wall-clock, no thread RNG.
+    pub seed: u64,
 }
 
+// DECISION(A3.9): `Request::new` defaults `seed` to the request id value so
+// every existing caller gets a deterministic per-request stream with no extra
+// argument; callers needing an explicit stream use `new_with_seed`/`with_seed`.
+// Rejected: `thread_rng` seeding and wall-clock seeds (nondeterministic,
+// violating Spec 6 §1 Principle 6). `SeededRng` (Xoshiro256++ via SplitMix64)
+// is the shared convention.
 impl Request {
     /// Constructs and validates a new Request (Spec 6 §2, CONVENTIONS.md §1.4, §2.2).
+    ///
+    /// The sampling seed defaults deterministically to the request id value.
     pub fn new(
         id: ReqId,
         tokens: Vec<u32>,
@@ -462,6 +501,20 @@ impl Request {
         max_tokens: u32,
         stop: StopCriteria,
         stream: bool,
+    ) -> SchedResult<Self> {
+        Self::new_with_seed(id, tokens, sampling, max_tokens, stop, stream, id.as_u64())
+    }
+
+    /// Constructs and validates a new Request with an explicit deterministic
+    /// sampling seed (Spec 6 §2, Spec 1 §4.F).
+    pub fn new_with_seed(
+        id: ReqId,
+        tokens: Vec<u32>,
+        sampling: SamplingParams,
+        max_tokens: u32,
+        stop: StopCriteria,
+        stream: bool,
+        seed: u64,
     ) -> SchedResult<Self> {
         let mut problems = Vec::new();
         if tokens.is_empty() {
@@ -494,7 +547,16 @@ impl Request {
             max_tokens,
             stop,
             stream,
+            seed,
         })
+    }
+
+    /// Returns a copy of this request with an explicit deterministic sampling
+    /// seed (Spec 1 §4.F, Spec 6 §2).
+    pub fn with_seed(&self, seed: u64) -> Self {
+        let mut out = self.clone();
+        out.seed = seed;
+        out
     }
 }
 
@@ -684,12 +746,23 @@ impl Sequence {
             return Ok((Some(FinishReason::MaxTokens), false));
         }
 
-        // 3. Below the budget, EOS wins over stop strings.
+        // 3. A buffered partial UTF-8 code point contributed no complete text:
+        // EOS/stop evaluation defers until the code point completes. A zero
+        // byte count with nothing buffered is a genuinely empty token text and
+        // falls through to normal EOS/stop evaluation below. Rejected: treating
+        // a buffered start byte as its byte value for EOS/stop matching (a
+        // start byte equal to an EOS id is not an emitted character yet).
+        // Spec 6 §7.
+        if detok.buffered_len(self.seq_id) > 0 {
+            return Ok((None, false));
+        }
+
+        // 4. Below the budget, EOS wins over stop strings.
         if is_eos {
             return Ok((Some(FinishReason::Eos(token)), false));
         }
 
-        // 4. Check stop strings against bounded detokenized tail (Spec 6 §7)
+        // 5. Check stop strings against bounded detokenized tail (Spec 6 §7)
         if !self.req.stop.stop_strings.is_empty() {
             if let Some((match_offset, matched_str)) =
                 self.req.stop.check_stop_string(&self.detokenized_tail)
@@ -718,7 +791,7 @@ impl Sequence {
             }
         }
 
-        // 5. Keep tail bounded (up to 2 * max_stop_len)
+        // 6. Keep tail bounded (up to 2 * max_stop_len)
         if self.req.stop.max_stop_len > 0 {
             let max_keep = self
                 .req
