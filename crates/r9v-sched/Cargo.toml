@@ -9,3 +9,10 @@ description = "R9V sequence scheduler, step graph execution, and budgeting (Spec
 
 [dependencies]
 r9v-common = { path = "../r9v-common" }
+r9v-ir = { path = "../r9v-ir" }
+r9v-registry = { path = "../r9v-registry" }
+r9v-state = { path = "../r9v-state" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
