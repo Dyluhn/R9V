@@ -71,6 +71,8 @@ pinned = [ staging ring for I/O (io.chunk_mb × io.queue_depth) ]
 
 A budget failure reports, per device and for host: required, available, shortfall, and the largest contributors (top five tensors or pools). It suggests the smallest single change that would fit (`state.max_ctx`, `state.max_seqs`, `experts.hot_set_vram`, or a smaller quant) with the resulting numbers. It never silently lowers a setting.
 
+Under a spoof-constrained plan (spec 1 App. A), per-device budgets run against the `EffectiveDeviceView` VRAM bound, not physical VRAM: a plan that fits the physical card but exceeds the spoof target refuses here, before I/O, with the spoof shortfall. The spoof VRAM bound is planning-only — the CU mask narrows CU visibility and enforces nothing about allocation — so this refusal is the VRAM enforcement.
+
 ## 5. Materialization
 
 ### 5.1 I/O
@@ -155,7 +157,7 @@ Written to the log and stored for the doctor bundle:
 
 - source: path(s), `file_fp`, `model_fp`, format (native / standard GGUF via cache / standard GGUF first load), shard count
 - model: family, `general.architecture`, layer classes, vocab, tied, mtp present, export_hidden
-- plan: strategy, stages, TP degree, expert map summary, transport per link, `expected` costs
+- plan: strategy, stages, TP degree, expert map summary, transport per link, `expected` costs, provenance (`Physical` or the qualified `MODEL (SPOOF)` target plus the physical identity)
 - per device: arena size and map (weights / state pools per group / workspace / comms / reserve), `max_ctx` and `max_seqs` as actually provisioned
 - host: pinned usage by category, slab size, expected slab hit rate
 - per tensor (collapsed by layer in the summary, full in the bundle): source type → scheme, layout, zero-copy or permuted, placement, resolved tier (T0v / T1 / T2), bytes

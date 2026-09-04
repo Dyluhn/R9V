@@ -11,6 +11,7 @@
 
 pub mod arch;
 pub mod batch;
+pub mod constrained;
 pub mod dtype;
 pub mod error;
 pub mod fusion;
@@ -29,6 +30,11 @@ pub use arch::{
     MatrixOp, Measured, P2pLink, P2pTransport, RelRate, ValuDot,
 };
 pub use batch::{BatchMeta, BatchMetaBuilder, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
+pub use constrained::{
+    spoof_catalog, spoof_lookup, ConstrainedDevice, CuMask, EffectiveDeviceView,
+    PreQueueLaunchContract, Provenance, SpoofProfile, SpoofProfileId, CU_MASK_ENV_NAME,
+    MAX_MASK_CUS, SPOOF_CATALOG,
+};
 pub use dtype::DType;
 pub use error::IrError;
 pub use fusion::{

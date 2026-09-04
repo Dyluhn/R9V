@@ -14,20 +14,21 @@ use r9v_ir::{
     match_gated_pair, matmul_numerics, moe_ffn_gemm_numerics, ActMulOp, ActivationKind,
     ActivationOp, AllGatherOp, AllReduceOp, AllToAllOp, ArchDescriptor, ArchFamily, AttentionMask,
     AttentionOp, BarrierOp, BatchMeta, BatchMetaBuilder, CacheScaleGranularity, CastOp,
-    CausalConv1dOp, Class, ConcatOp, ConvActivation, CopyKind, CopyOp, DType, DeviceDescriptor,
-    DeviceFacts, DeviceIdentity, Dim, EdgeId, EmbedGatherOp, Epilogue, ExpertCount, ExternalInput,
-    ExternalInputKind, ExternalOutput, ExternalOutputKind, FusionEntry, FusionPattern,
-    GatherRowsOp, Graph, GraphCapture, GraphEdge, GraphNode, GraphSummary, GroupId, HashId,
-    HeadCount, InsertedCopy, IrError, IrVersion, LayoutId, LinearAttnKind, LinearAttnScanOp,
-    LogitSoftcapOp, LogitsPostprocessOp, MatmulOp, MatrixOp, Measured, MlaAttentionSpec, MlaLatent,
-    MoeFfnOp, MoeGroup, MoeRouteOp, MoeScoring, NgramCombine, NgramGatherOp, NgramSource, NodeId,
-    NormAxis, NormKind, NormOp, Numerics, Op, P2pLink, P2pTransport, Placement, PlanId, Positions,
-    PositionsKind, QuantActOp, QuantScheme, RecvOp, ReduceOp, ReduceScatterOp, ReductionOrder,
+    CausalConv1dOp, Class, ConcatOp, ConstrainedDevice, ConvActivation, CopyKind, CopyOp, CuMask,
+    DType, DeviceDescriptor, DeviceFacts, DeviceIdentity, Dim, EdgeId, EffectiveDeviceView,
+    EmbedGatherOp, Epilogue, ExpertCount, ExternalInput, ExternalInputKind, ExternalOutput,
+    ExternalOutputKind, FusionEntry, FusionPattern, GatherRowsOp, Graph, GraphCapture, GraphEdge,
+    GraphNode, GraphSummary, GroupId, HashId, HeadCount, InsertedCopy, IrError, IrVersion,
+    LayoutId, LinearAttnKind, LinearAttnScanOp, LogitSoftcapOp, LogitsPostprocessOp, MatmulOp,
+    MatrixOp, Measured, MlaAttentionSpec, MlaLatent, MoeFfnOp, MoeGroup, MoeRouteOp, MoeScoring,
+    NgramCombine, NgramGatherOp, NgramSource, NodeId, NormAxis, NormKind, NormOp, Numerics, Op,
+    P2pLink, P2pTransport, Placement, PlanId, Positions, PositionsKind, PreQueueLaunchContract,
+    Provenance, QuantActOp, QuantScheme, RecvOp, ReduceOp, ReduceScatterOp, ReductionOrder,
     RelRate, ResidualAddOp, RngAlgorithm, RopeOp, RopeScaling, RopeStyle, SampleOp, SamplingParams,
     ScatterAddRowsOp, SchemeId, SendOp, ShapeSymbol, ShardLayout, ShardLayoutPattern, ShardingRule,
-    Smoothing, SplitOp, StateHandle, StateKind, StateWriteKvOp, StepGraphKey, StrideRequirement,
-    Tensor, TreeMask, ValuDot, VerifyMethod, VerifyOp, BLOCK_TABLE_SENTINEL, BUCKET_SIZES,
-    FUSION_TABLE,
+    Smoothing, SplitOp, SpoofProfile, SpoofProfileId, StateHandle, StateKind, StateWriteKvOp,
+    StepGraphKey, StrideRequirement, Tensor, TreeMask, ValuDot, VerifyMethod, VerifyOp,
+    BLOCK_TABLE_SENTINEL, BUCKET_SIZES, FUSION_TABLE,
 };
 
 fn assert_send<T: Send>() {}
@@ -96,6 +97,34 @@ fn api_shape_markers_and_errors() {
     assert_send::<DeviceIdentity>();
     assert_sync::<DeviceIdentity>();
     assert_clone::<DeviceIdentity>();
+
+    assert_send::<SpoofProfileId>();
+    assert_sync::<SpoofProfileId>();
+    assert_copy::<SpoofProfileId>();
+    assert_hash::<SpoofProfileId>();
+    assert_display::<SpoofProfileId>();
+    assert_send::<SpoofProfile>();
+    assert_sync::<SpoofProfile>();
+    assert_copy::<SpoofProfile>();
+    assert_send::<Provenance>();
+    assert_sync::<Provenance>();
+    assert_clone::<Provenance>();
+    assert_display::<Provenance>();
+    assert_send::<ConstrainedDevice>();
+    assert_sync::<ConstrainedDevice>();
+    assert_clone::<ConstrainedDevice>();
+    assert_send::<EffectiveDeviceView>();
+    assert_sync::<EffectiveDeviceView>();
+    assert_clone::<EffectiveDeviceView>();
+    assert_send::<CuMask>();
+    assert_sync::<CuMask>();
+    assert_copy::<CuMask>();
+    assert_hash::<CuMask>();
+    assert_display::<CuMask>();
+    assert_send::<PreQueueLaunchContract>();
+    assert_sync::<PreQueueLaunchContract>();
+    assert_copy::<PreQueueLaunchContract>();
+    assert_hash::<PreQueueLaunchContract>();
 
     assert_send::<IrVersion>();
     assert_sync::<IrVersion>();
@@ -781,4 +810,36 @@ fn api_shape_constructors_are_reachable() {
     let op_sample = Op::Copy(CopyOp::default());
     let _ = legal_layouts(&op_sample);
     let _ = legal_layout_tuples(&op_sample);
+}
+
+#[test]
+fn api_shape_constrained_spoof_surface() {
+    // Exhaustive matches (no wildcard): a new profile or provenance variant
+    // breaks this test until it is handled deliberately.
+    for id in SpoofProfileId::all() {
+        let stable = match id {
+            SpoofProfileId::Rx9070Xt => "rx-9070-xt-spoof",
+            SpoofProfileId::Rx9070 => "rx-9070-spoof",
+        };
+        assert_eq!(id.stable_id(), stable);
+    }
+    let physical = Provenance::Physical {
+        identity: r9v_ir::DeviceIdentity::Cpu,
+    };
+    let is_spoof = match &physical {
+        Provenance::Physical { .. } => false,
+        Provenance::Spoof { .. } => true,
+    };
+    assert!(!is_spoof);
+
+    let catalog: &[SpoofProfile] = r9v_ir::spoof_catalog();
+    assert_eq!(catalog.len(), 2);
+    let _ = r9v_ir::SPOOF_CATALOG;
+    assert_eq!(r9v_ir::MAX_MASK_CUS, 64);
+    assert_eq!(r9v_ir::CU_MASK_ENV_NAME, "ROC_GLOBAL_CU_MASK");
+    fn assert_constrained_markers() {
+        assert_send::<ConstrainedDevice>();
+        assert_sync::<ConstrainedDevice>();
+    }
+    assert_constrained_markers();
 }

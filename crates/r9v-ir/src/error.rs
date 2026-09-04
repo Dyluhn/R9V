@@ -550,6 +550,157 @@ pub enum IrError {
         expected: Box<[i64]>,
     },
 
+    /// An unknown spoof profile id was requested from the constrained-device
+    /// catalog (Spec 1 App. A; constrained planning view).
+    #[error("unknown spoof profile '{id}': expected one of {known:?}")]
+    UnknownSpoofProfile {
+        /// The unrecognized profile id string.
+        id: String,
+        /// Stable catalog ids, in catalog order.
+        known: Vec<&'static str>,
+    },
+
+    /// A spoof profile was applied to a physical device reporting a different
+    /// ISA target (Spec 1 App. A; constrained planning view).
+    #[error("spoof profile '{profile}' requires arch '{required_arch}', physical device reports '{physical_arch}'")]
+    SpoofArchMismatch {
+        /// Stable catalog id of the requested profile.
+        profile: &'static str,
+        /// ISA target the profile constrains (from catalog data).
+        required_arch: &'static str,
+        /// ISA target the physical device reports.
+        physical_arch: String,
+    },
+
+    /// The physical device has fewer CUs than the spoof profile requires, so
+    /// no reducing constraint exists (Spec 1 App. A; constrained planning view).
+    #[error("spoof profile '{profile}' requires {required_cus} CUs, physical device has {physical_cus} CUs (shortfall {shortfall_cus})")]
+    SpoofInsufficientCus {
+        /// Stable catalog id of the requested profile.
+        profile: &'static str,
+        /// CU count the profile constrains (from catalog data).
+        required_cus: u32,
+        /// CU count the physical device reports.
+        physical_cus: u32,
+        /// `required_cus - physical_cus`.
+        shortfall_cus: u32,
+    },
+
+    /// The physical device has less VRAM than the spoof profile requires, so
+    /// no reducing constraint exists (Spec 1 App. A; constrained planning view).
+    #[error("spoof profile '{profile}' requires {required_bytes} B VRAM, physical device has {physical_bytes} B (shortfall {shortfall_bytes} B)")]
+    SpoofInsufficientVram {
+        /// Stable catalog id of the requested profile.
+        profile: &'static str,
+        /// VRAM bytes the profile constrains (from catalog data).
+        required_bytes: u64,
+        /// VRAM bytes the physical device reports.
+        physical_bytes: u64,
+        /// `required_bytes - physical_bytes`.
+        shortfall_bytes: u64,
+    },
+
+    /// A launch contract was validated against a constrained device built for
+    /// a different spoof profile (constrained planning view).
+    #[error("launch contract targets spoof profile '{contract_profile}', device was constrained to '{device_profile}'")]
+    SpoofProfileMismatch {
+        /// Stable catalog id recorded in the contract.
+        contract_profile: &'static str,
+        /// Stable catalog id the device was constrained to.
+        device_profile: &'static str,
+    },
+
+    /// A pre-queue launch contract was reused with a constrained device whose
+    /// resource facts differ from the device that produced the contract.
+    #[error("launch contract field '{field}' is {contract}, constrained device requires {device}")]
+    SpoofLaunchContractMismatch {
+        /// Resource field that disagreed.
+        field: &'static str,
+        /// Value stored in the launch contract.
+        contract: String,
+        /// Value required by the constrained device.
+        device: String,
+    },
+
+    /// A CU count is outside the single-word mask width `1..=64`
+    /// (constrained planning view).
+    #[error("CU count {cus} is outside the supported mask width 1..={max_supported}")]
+    InvalidCuCount {
+        /// Requested CU count.
+        cus: u32,
+        /// Maximum CUs one mask word expresses.
+        max_supported: u32,
+    },
+
+    /// A `ROC_GLOBAL_CU_MASK` value is not the canonical R9V form
+    /// (constrained planning view).
+    #[error("invalid ROC_GLOBAL_CU_MASK '{input}': {details}; expected {expected}")]
+    InvalidCuMask {
+        /// The rejected mask string.
+        input: String,
+        /// What was wrong with it.
+        details: String,
+        /// Canonical form to use instead (a concrete mask or the grammar).
+        expected: String,
+    },
+
+    /// A CU mask enables a different number of CUs than the constrained
+    /// device plans for (constrained planning view).
+    #[error(
+        "CU mask {mask} enables {mask_cus} CUs, constrained device plans for {effective_cus} CUs"
+    )]
+    CuMaskMismatch {
+        /// Canonical rendering of the presented mask.
+        mask: String,
+        /// Set-bit count of the presented mask.
+        mask_cus: u32,
+        /// CU count the constrained device plans for.
+        effective_cus: u32,
+    },
+
+    /// A spoof planning result was presented for official product
+    /// qualification or a performance claim (constrained planning view).
+    ///
+    /// Returned by the only qualification gate spoof types expose; a
+    /// disclaimer string alone never authorizes such use.
+    #[error("spoof target '{target}' (profile '{profile}') refuses official product qualification and performance claims: {disclaimer}")]
+    SpoofQualificationRefused {
+        /// Stable catalog id of the spoof target.
+        profile: &'static str,
+        /// Qualified `MODEL (SPOOF)` target label.
+        target: &'static str,
+        /// The provenance disclaimer naming the boundary.
+        disclaimer: &'static str,
+    },
+
+    /// A reduced-CU launch contract found no `ROC_GLOBAL_CU_MASK` value where
+    /// one is required (constrained planning view).
+    #[error("launch contract for spoof profile '{profile}' requires {env_name}={expected} ({effective_cus} CUs); the variable is unset")]
+    MissingCuMask {
+        /// Stable catalog id the queue was planned for.
+        profile: &'static str,
+        /// Environment variable the launcher must assign.
+        env_name: &'static str,
+        /// Canonical mask value the launcher must assign.
+        expected: String,
+        /// CU count the queue was planned for.
+        effective_cus: u32,
+    },
+
+    /// An exact-CU launch contract found a `ROC_GLOBAL_CU_MASK` value where
+    /// none is required (constrained planning view).
+    #[error("launch contract for spoof profile '{profile}' needs no CU mask (exact {cus} CUs), but the environment carries {env_name}='{input}'")]
+    UnexpectedCuMask {
+        /// Stable catalog id the queue was planned for.
+        profile: &'static str,
+        /// CU count shared by the physical device and the plan.
+        cus: u32,
+        /// Environment variable that must stay unset on this path.
+        env_name: &'static str,
+        /// The unexpected mask value.
+        input: String,
+    },
+
     /// Collect-all wrapper: every problem found before returning
     /// (CONVENTIONS.md §1.4). Constructors return the single problem directly
     /// when only one exists.

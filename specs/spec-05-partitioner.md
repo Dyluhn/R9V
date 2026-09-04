@@ -133,6 +133,8 @@ Plan {
 
 `ModelSummary` comes from the model definition (spec 8): per-layer weight bytes per scheme, state cost per token, expert count and sizes, `hkv`, `V`, `Dm`.
 
+Topology devices always carry truthful discovered `DeviceDescriptor`s. When planning against a smaller card, the planner consumes the `EffectiveDeviceView` bounds (spec 1 App. A) in place of that device's CU/VRAM quantities — never a mutated descriptor — and the resulting `Plan` records the `Spoof` provenance with its qualified `MODEL (SPOOF)` target. Bandwidth and transport still come only from measured physical topology; the view carries no measured or P2P facts to substitute.
+
 ### 5.2 Selection
 
 1. Select `CPU` for zero GPUs and `Single` for one GPU. For two or more GPUs, enumerate candidate plans for the discovered device set: `Single` where feasible; PP with each balanced boundary set; TP at each degree dividing `hkv`; EP for MoE; PP+TP for 4+ devices; host-expert variants when experts exceed VRAM.

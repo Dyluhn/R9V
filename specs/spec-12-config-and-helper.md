@@ -100,6 +100,7 @@ defaults  <  config file  <  environment  <  CLI flags  <  runtime changes (POST
 - Environment: `R9V__SECTION__KEY=value` (double underscore), parsed with the same types.
 - CLI: `--section.key value`, generated from the schema.
 - The effective config (`GET /r9v/config`, `config.toml` in the bundle) records for every value: the source (`default`, `file:line`, `env`, `cli`, `runtime:<requester>:<time>`) and, for `auto`, the resolved value and the rule text.
+- `ROC_GLOBAL_CU_MASK` is not config: it is launcher-applied data derived from the spoof plan's pre-queue launch contract (spec 14 §3), validated before HIP queue creation, and never set through any config source above.
 
 ## 5. Validation
 

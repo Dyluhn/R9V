@@ -376,6 +376,10 @@ gfx1201 ISA values: wave 32; 64 KB LDS/WG; matrix ops f16/bf16 (1×), e4m3/e5m2 
 
 HIP device ordinals are ephemeral handles valid only inside the process that enumerated them. They never appear in a persistent device identity, plan-cache key or receipt fingerprint. GPU identity uses the runtime UUID when available plus canonical PCI BDF; rank is assigned only after discovery. CPU is always a valid device and does not depend on HIP being installed.
 
+### Constrained planning views (spoof)
+
+Planning against a smaller card than the bench hardware never mutates the discovered `DeviceDescriptor`. It derives a separate `EffectiveDeviceView` (`r9v-ir::constrained`): the shared ISA descriptor, the unchanged physical identity, and the reduced CU/VRAM bounds from the spoof-profile catalog — and nothing else. The view is not a `DeviceDescriptor`, carries no `measured` block and no `p2p` links, and offers no conversion into a bare descriptor, so physical measured performance can never travel as a spoof fact and provenance cannot be dropped silently. `Provenance` records `Physical` versus `Spoof { physical, profile }`; spoof targets render only as `MODEL (SPOOF)` (initial catalog: `RX 9070 XT (SPOOF)` 16 GiB/64 CU and `RX 9070 (SPOOF)` 16 GiB/56 CU, both gfx1201, dispatched by profile enum/stable id, never by marketing-name string matching). Any attempt to use a spoof result for official product qualification or a performance claim fails with the typed `SpoofQualificationRefused` refusal; the disclaimer string alone authorizes nothing. Constraints only reduce: construction refuses wrong-arch or under-resourced physical devices with collect-all typed errors. The truthful physical descriptor remains separately accessible beside every view.
+
 ## Appendix B — Determinism and tolerance policy
 
 - **Levels.** L0: bit-exact (same arch, same kernel hash, same seed). L1: within §6.1 tolerances (across kernel versions or archs). L2: statistical (across quant formats; measured by KL and top-1 on the calibration set).

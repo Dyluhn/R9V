@@ -98,6 +98,8 @@ Results are cached under the hardware fingerprint (`GPU UUID+BDF identities ‖ 
 
 No-GPU is a valid measurement result. With no HIP runtime, the bundle records `hip_runtime = absent`, the GPU list and link matrix are empty, and CPU measurements continue. A present but broken HIP runtime is a typed diagnostic failure rather than being silently treated as absence.
 
+The measurement pass fills only physical-device descriptors. Measured values are never copied into an `EffectiveDeviceView` (spec 1 App. A): the view type cannot carry them, so a spoof plan can never present physical measured performance as its own fact.
+
 ## 8. Doctor bundle
 
 `r9v doctor` or `GET /r9v/doctor`. A tarball containing:
@@ -153,7 +155,7 @@ Fixed prompts are token-id sequences generated from a seeded random walk over th
 ```
 receipt.json
   r9v:        version, gen_version, bundle hash, tune coverage for the graph (shipped/local/partial), profile mode
-  hardware:   hardware.json (spec + measured)
+  hardware:   hardware.json (spec + measured) plus provenance (`Physical`, or the qualified `MODEL (SPOOF)` target with the physical identity and the qualification disclaimer)
   model:      model_fp, source file name and file_fp, format, per-scheme byte totals, plan
   config:     effective config
   suites:     per workload: runs[], median/min/max/p95, achieved_gbps, utilization_spec, utilization_meas, byte breakdown,
@@ -163,7 +165,7 @@ receipt.json
 receipt.md    a table a person can paste into a thread
 ```
 
-The markdown table always includes the utilization denominators and the comparison tool's commit so a reader can't misread it.
+The markdown table always includes the utilization denominators and the comparison tool's commit so a reader can't misread it. A receipt for a spoof-constrained run names the qualified `MODEL (SPOOF)` target and carries the qualification disclaimer; its numbers are planning-bounded observations, never official product qualification or performance claims, and presenting them as such is a typed `SpoofQualificationRefused` refusal in `r9v-ir`, not a wording convention.
 
 ### 9.5 Efficiency floors
 
