@@ -201,39 +201,105 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Length of a trailing incomplete UTF-8 sequence (0 when the buffer ends
-/// on a codepoint boundary).
+/// on a codepoint boundary or cannot be completed into valid UTF-8).
+///
+/// DECISION(A2.9): detokenizer holds only a genuinely incomplete terminal
+/// sequence whose lead can be completed by future continuation bytes; rejected
+/// holding orphan continuation bytes or invalid lead bytes (which would corrupt
+/// preceding complete scalars upon flush/drain). Spec 9 §7.
 pub(crate) fn incomplete_tail_len(bytes: &[u8]) -> usize {
-    if bytes.is_empty() {
+    let n = bytes.len();
+    if n == 0 {
         return 0;
     }
-    // Walk back over continuation bytes (at most 3).
-    let mut start = bytes.len() - 1;
+    // Count trailing continuation bytes (0x80..=0xBF).
     let mut cont = 0;
-    while start > 0 && bytes[start] & 0xC0 == 0x80 && cont < 3 {
-        start -= 1;
+    while cont < n && (bytes[n - 1 - cont] & 0xC0 == 0x80) {
         cont += 1;
     }
-    let lead = bytes[start];
-    let need = if lead < 0x80 {
-        // `start` points at a continuation run with no lead in range:
-        // treat the run itself as incomplete.
-        return if cont > 0 { cont + 1 } else { 0 };
-    } else if lead >= 0xF0 {
-        4
-    } else if lead >= 0xE0 {
-        3
-    } else if lead >= 0xC0 {
-        2
-    } else {
-        // Stray continuation byte with no lead: hold 1 and let flush
-        // replace it with U+FFFD.
-        return 1;
-    };
-    let have = bytes.len() - start;
-    if have < need {
-        have
-    } else {
-        0
+    if cont >= 3 {
+        // A complete 4-byte sequence has 3 continuation bytes. An incomplete
+        // sequence can have at most 2 continuation bytes (1 lead + 0..2 cont).
+        // Any larger run is overfull or an orphan run.
+        return 0;
+    }
+    // If every byte is a continuation byte, they are orphans with no lead in buffer.
+    if cont == n {
+        return 0;
+    }
+    let lead_idx = n - 1 - cont;
+    let lead = bytes[lead_idx];
+    if lead < 0x80 {
+        // Preceded by complete ASCII scalar; trailing continuation bytes are orphans.
+        return 0;
+    }
+    match cont {
+        0 => match lead {
+            0xC2..=0xDF => 1,
+            0xE0..=0xEF => 1,
+            0xF0..=0xF4 => 1,
+            _ => 0,
+        },
+        1 => {
+            let b1 = bytes[n - 1];
+            match lead {
+                0xC0..=0xDF => 0, // 2-byte sequence already complete or overlong
+                0xE0 => {
+                    if b1 >= 0xA0 {
+                        2
+                    } else {
+                        0
+                    }
+                }
+                0xED => {
+                    if b1 < 0xA0 {
+                        2
+                    } else {
+                        0
+                    }
+                }
+                0xE1..=0xEC | 0xEE..=0xEF => 2,
+                0xF0 => {
+                    if b1 >= 0x90 {
+                        2
+                    } else {
+                        0
+                    }
+                }
+                0xF4 => {
+                    if b1 <= 0x8F {
+                        2
+                    } else {
+                        0
+                    }
+                }
+                0xF1..=0xF3 => 2,
+                _ => 0,
+            }
+        }
+        2 => {
+            let b1 = bytes[n - 2];
+            match lead {
+                0xC0..=0xEF => 0, // 2-byte or 3-byte sequence already complete or overlong
+                0xF0 => {
+                    if b1 >= 0x90 {
+                        3
+                    } else {
+                        0
+                    }
+                }
+                0xF4 => {
+                    if b1 <= 0x8F {
+                        3
+                    } else {
+                        0
+                    }
+                }
+                0xF1..=0xF3 => 3,
+                _ => 0,
+            }
+        }
+        _ => 0,
     }
 }
 
@@ -256,7 +322,155 @@ fn complete_utf8(tail: &mut Vec<u8>) {
     tail.truncate(tail.len() - hold);
     let mut done = sanitize(tail);
     if hold > 0 {
-        done.push('�');
+        done.push('\u{FFFD}');
     }
     *tail = done.into_bytes();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::catch_unwind;
+
+    #[test]
+    fn incomplete_tail_len_semantics() {
+        let res = catch_unwind(|| {
+            // Empty and ASCII
+            assert_eq!(incomplete_tail_len(b""), 0);
+            assert_eq!(incomplete_tail_len(b"a"), 0);
+            assert_eq!(incomplete_tail_len(b"hello world"), 0);
+
+            // ASCII + orphan continuation: must never hold or consume ASCII
+            assert_eq!(incomplete_tail_len(b"a\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"hello\xbf"), 0);
+
+            // Multiple orphans
+            assert_eq!(incomplete_tail_len(b"\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"\x80\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"\x80\x80\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"\x80\x80\x80\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"a\x80\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"a\x80\x80\x80"), 0);
+
+            // Valid partial 2-byte sequences
+            assert_eq!(incomplete_tail_len(b"\xC3"), 1);
+            assert_eq!(incomplete_tail_len(b"a\xC3"), 1);
+            // Complete 2-byte sequence
+            assert_eq!(incomplete_tail_len(b"\xC3\xA9"), 0);
+            assert_eq!(incomplete_tail_len(b"a\xC3\xA9"), 0);
+
+            // Valid partial 3-byte sequences
+            assert_eq!(incomplete_tail_len(b"\xE2"), 1);
+            assert_eq!(incomplete_tail_len(b"a\xE2"), 1);
+            assert_eq!(incomplete_tail_len(b"\xE2\x82"), 2);
+            assert_eq!(incomplete_tail_len(b"a\xE2\x82"), 2);
+            // Complete 3-byte sequence
+            assert_eq!(incomplete_tail_len(b"\xE2\x82\xAC"), 0);
+            assert_eq!(incomplete_tail_len(b"a\xE2\x82\xAC"), 0);
+
+            // Valid partial 4-byte sequences
+            assert_eq!(incomplete_tail_len(b"\xF0"), 1);
+            assert_eq!(incomplete_tail_len(b"a\xF0"), 1);
+            assert_eq!(incomplete_tail_len(b"\xF0\x9F"), 2);
+            assert_eq!(incomplete_tail_len(b"a\xF0\x9F"), 2);
+            assert_eq!(incomplete_tail_len(b"\xF0\x9F\x8E"), 3);
+            assert_eq!(incomplete_tail_len(b"a\xF0\x9F\x8E"), 3);
+            // Complete 4-byte sequence
+            assert_eq!(incomplete_tail_len(b"\xF0\x9F\x8E\x89"), 0);
+            assert_eq!(incomplete_tail_len(b"a\xF0\x9F\x8E\x89"), 0);
+
+            // Invalid lead sequences (never held)
+            assert_eq!(incomplete_tail_len(b"\xC0"), 0);
+            assert_eq!(incomplete_tail_len(b"\xC1"), 0);
+            assert_eq!(incomplete_tail_len(b"\xF5"), 0);
+            assert_eq!(incomplete_tail_len(b"\xFF"), 0);
+            assert_eq!(incomplete_tail_len(b"a\xC0"), 0);
+            assert_eq!(incomplete_tail_len(b"a\xF5"), 0);
+
+            // Overlong sequences (never held)
+            assert_eq!(incomplete_tail_len(b"\xE0\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"\xE0\x9F"), 0);
+            assert_eq!(incomplete_tail_len(b"\xE0\xA0"), 2); // valid non-overlong
+            assert_eq!(incomplete_tail_len(b"\xF0\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"\xF0\x8F"), 0);
+            assert_eq!(incomplete_tail_len(b"\xF0\x90"), 2); // valid non-overlong
+
+            // Surrogate sequences (never held)
+            assert_eq!(incomplete_tail_len(b"\xED\xA0"), 0);
+            assert_eq!(incomplete_tail_len(b"\xED\xBF"), 0);
+            assert_eq!(incomplete_tail_len(b"\xED\x9F"), 2); // valid non-surrogate
+
+            // Out-of-range sequences (never held)
+            assert_eq!(incomplete_tail_len(b"\xF4\x90"), 0);
+            assert_eq!(incomplete_tail_len(b"\xF4\xBF"), 0);
+            assert_eq!(incomplete_tail_len(b"\xF4\x8F"), 2); // valid in-range
+            assert_eq!(incomplete_tail_len(b"\xF4\x8F\xBF"), 3); // valid in-range
+
+            // Run with excess continuation bytes
+            assert_eq!(incomplete_tail_len(b"\xC3\xA9\x80"), 0);
+            assert_eq!(incomplete_tail_len(b"\xE2\x82\xAC\x80"), 0);
+        });
+        assert!(res.is_ok(), "incomplete_tail_len panicked");
+    }
+
+    #[test]
+    fn complete_utf8_preserves_preceding_scalars() {
+        let res = catch_unwind(|| {
+            // ASCII + orphan continuation: 'a' MUST be preserved
+            let mut tail = b"a\x80".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}");
+
+            // ASCII + multiple orphans
+            let mut tail = b"a\x80\x81".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}\u{FFFD}");
+
+            // Single orphan continuation
+            let mut tail = b"\x80".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "\u{FFFD}");
+
+            // Valid incomplete 2-byte sequence
+            let mut tail = b"\xC3".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "\u{FFFD}");
+
+            // Preceding ASCII + valid incomplete 2-byte sequence
+            let mut tail = b"a\xC3".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}");
+
+            // Preceding ASCII + valid incomplete 3-byte sequence
+            let mut tail = b"a\xE2\x82".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}");
+
+            // Preceding ASCII + valid incomplete 4-byte sequence
+            let mut tail = b"a\xF0\x9F\x8E".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}");
+
+            // Invalid lead
+            let mut tail = b"a\xC0".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}");
+
+            // Overlong
+            let mut tail = b"a\xE0\x80".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}\u{FFFD}");
+
+            // Surrogate
+            let mut tail = b"a\xED\xA0".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}\u{FFFD}");
+
+            // Out of range
+            let mut tail = b"a\xF4\x90".to_vec();
+            complete_utf8(&mut tail);
+            assert_eq!(String::from_utf8(tail).unwrap(), "a\u{FFFD}\u{FFFD}");
+        });
+        assert!(res.is_ok(), "complete_utf8 panicked");
+    }
 }

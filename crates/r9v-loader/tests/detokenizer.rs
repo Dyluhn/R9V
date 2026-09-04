@@ -165,3 +165,239 @@ fn empty_stream_flushes_empty() {
     let mut detok = Detokenizer::new(&tok, &[], false).unwrap();
     assert_eq!(detok.flush(), "");
 }
+
+#[test]
+fn streaming_ascii_and_orphan_continuation_preserves_ascii() {
+    let res = std::panic::catch_unwind(|| {
+        let tok = fixture("fixture-bpe.gguf");
+        let mut detok = Detokenizer::new(&tok, &[], false).unwrap();
+        // 'a' (97) then orphan continuation 0x80 (128)
+        let out1 = match detok.push(b'a' as u32).unwrap() {
+            PushOutcome::Emit(s) => s,
+            other => panic!("expected Emit, got {other:?}"),
+        };
+        assert_eq!(out1, "a");
+        let out2 = match detok.push(0x80).unwrap() {
+            PushOutcome::Emit(s) => s,
+            other => panic!("expected Emit, got {other:?}"),
+        };
+        assert_eq!(out2, "\u{FFFD}");
+        let flushed = detok.flush();
+        assert_eq!(flushed, "");
+
+        // Flush directly on pending 'a' + orphan continuation: 'a' must not be deleted
+        let mut detok2 = Detokenizer::new(&tok, &[], false).unwrap();
+        // Manually push tokens without draining
+        let mut out = String::new();
+        if let PushOutcome::Emit(s) = detok2.push(b'x' as u32).unwrap() {
+            out.push_str(&s);
+        }
+        if let PushOutcome::Emit(s) = detok2.push(0x80).unwrap() {
+            out.push_str(&s);
+        }
+        out.push_str(&detok2.flush());
+        assert_eq!(out, "x\u{FFFD}");
+    });
+    assert!(res.is_ok(), "test panicked");
+}
+
+#[test]
+fn streaming_multiple_orphans() {
+    let res = std::panic::catch_unwind(|| {
+        let tok = fixture("fixture-bpe.gguf");
+        let mut detok = Detokenizer::new(&tok, &[], false).unwrap();
+        let mut out = String::new();
+        for &byte in &[0x80u32, 0x81, 0x82, 0xBF] {
+            if let PushOutcome::Emit(s) = detok.push(byte).unwrap() {
+                out.push_str(&s);
+            }
+        }
+        out.push_str(&detok.flush());
+        assert_eq!(out, "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}");
+    });
+    assert!(res.is_ok(), "test panicked");
+}
+
+#[test]
+fn streaming_valid_partial_sequences_across_tokens() {
+    let res = std::panic::catch_unwind(|| {
+        let tok = fixture("fixture-bpe.gguf");
+
+        // 2-byte: 'é' = 0xC3 0xA9
+        let mut detok2 = Detokenizer::new(&tok, &[], false).unwrap();
+        assert_eq!(detok2.push(0xC3).unwrap(), PushOutcome::Emit(String::new()));
+        assert_eq!(
+            detok2.push(0xA9).unwrap(),
+            PushOutcome::Emit("é".to_owned())
+        );
+        assert_eq!(detok2.flush(), "");
+
+        // 3-byte: '€' = 0xE2 0x82 0xAC
+        let mut detok3 = Detokenizer::new(&tok, &[], false).unwrap();
+        assert_eq!(detok3.push(0xE2).unwrap(), PushOutcome::Emit(String::new()));
+        assert_eq!(detok3.push(0x82).unwrap(), PushOutcome::Emit(String::new()));
+        assert_eq!(
+            detok3.push(0xAC).unwrap(),
+            PushOutcome::Emit("€".to_owned())
+        );
+        assert_eq!(detok3.flush(), "");
+
+        // 4-byte: '🎉' = 0xF0 0x9F 0x8E 0x89
+        let mut detok4 = Detokenizer::new(&tok, &[], false).unwrap();
+        assert_eq!(detok4.push(0xF0).unwrap(), PushOutcome::Emit(String::new()));
+        assert_eq!(detok4.push(0x9F).unwrap(), PushOutcome::Emit(String::new()));
+        assert_eq!(detok4.push(0x8E).unwrap(), PushOutcome::Emit(String::new()));
+        assert_eq!(
+            detok4.push(0x89).unwrap(),
+            PushOutcome::Emit("🎉".to_owned())
+        );
+        assert_eq!(detok4.flush(), "");
+    });
+    assert!(res.is_ok(), "test panicked");
+}
+
+#[test]
+fn streaming_invalid_lead_overlong_surrogate_and_out_of_range() {
+    let res = std::panic::catch_unwind(|| {
+        let tok = fixture("fixture-bpe.gguf");
+
+        // Invalid lead: 0xC0 (overlong) and 0xF5 (out of range)
+        let mut detok_lead = Detokenizer::new(&tok, &[], false).unwrap();
+        assert_eq!(
+            detok_lead.push(0xC0).unwrap(),
+            PushOutcome::Emit("\u{FFFD}".to_owned())
+        );
+        assert_eq!(
+            detok_lead.push(0xF5).unwrap(),
+            PushOutcome::Emit("\u{FFFD}".to_owned())
+        );
+        assert_eq!(
+            detok_lead.push(0xFF).unwrap(),
+            PushOutcome::Emit("\u{FFFD}".to_owned())
+        );
+        assert_eq!(detok_lead.flush(), "");
+
+        // Overlong 3-byte: 0xE0 followed by 0x80 (< 0xA0)
+        let mut detok_overlong = Detokenizer::new(&tok, &[], false).unwrap();
+        assert_eq!(
+            detok_overlong.push(0xE0).unwrap(),
+            PushOutcome::Emit(String::new())
+        ); // 0xE0 holds
+        assert_eq!(
+            detok_overlong.push(0x80).unwrap(),
+            PushOutcome::Emit("\u{FFFD}\u{FFFD}".to_owned())
+        ); // overlong released
+        assert_eq!(detok_overlong.flush(), "");
+
+        // Surrogate 3-byte: 0xED followed by 0xA0 (0xD800..0xDFFF)
+        let mut detok_surrogate = Detokenizer::new(&tok, &[], false).unwrap();
+        assert_eq!(
+            detok_surrogate.push(0xED).unwrap(),
+            PushOutcome::Emit(String::new())
+        ); // 0xED holds
+        assert_eq!(
+            detok_surrogate.push(0xA0).unwrap(),
+            PushOutcome::Emit("\u{FFFD}\u{FFFD}".to_owned())
+        ); // surrogate released
+        assert_eq!(detok_surrogate.flush(), "");
+
+        // Out-of-range 4-byte: 0xF4 followed by 0x90 (> 0x10FFFF)
+        let mut detok_oor = Detokenizer::new(&tok, &[], false).unwrap();
+        assert_eq!(
+            detok_oor.push(0xF4).unwrap(),
+            PushOutcome::Emit(String::new())
+        ); // 0xF4 holds
+        assert_eq!(
+            detok_oor.push(0x90).unwrap(),
+            PushOutcome::Emit("\u{FFFD}\u{FFFD}".to_owned())
+        ); // out-of-range released
+        assert_eq!(detok_oor.flush(), "");
+    });
+    assert!(res.is_ok(), "test panicked");
+}
+
+#[test]
+fn streaming_stop_prefix_interactions_and_flush() {
+    let res = std::panic::catch_unwind(|| {
+        let tok = fixture("fixture-bpe.gguf");
+
+        // Stop prefix interaction with partial UTF-8
+        let mut detok = Detokenizer::new(&tok, &["STOP"], true).unwrap();
+        // Push 'a'
+        assert_eq!(
+            detok.push(b'a' as u32).unwrap(),
+            PushOutcome::Emit("a".to_owned())
+        );
+        // Push 0xC3 (held for UTF-8)
+        assert_eq!(detok.push(0xC3).unwrap(), PushOutcome::Emit(String::new()));
+        // Push 0xA9 (completes 'é')
+        assert_eq!(detok.push(0xA9).unwrap(), PushOutcome::Emit("é".to_owned()));
+        // Push 'S' (held for "STOP")
+        assert_eq!(
+            detok.push(b'S' as u32).unwrap(),
+            PushOutcome::Emit(String::new())
+        );
+        // Push 'T' (held for "STOP")
+        assert_eq!(
+            detok.push(b'T' as u32).unwrap(),
+            PushOutcome::Emit(String::new())
+        );
+        // Push 'O' (held for "STOP")
+        assert_eq!(
+            detok.push(b'O' as u32).unwrap(),
+            PushOutcome::Emit(String::new())
+        );
+        // Push 'P' (matches "STOP", returns Stop)
+        match detok.push(b'P' as u32).unwrap() {
+            PushOutcome::Stop(final_text) => assert_eq!(final_text, ""),
+            other => panic!("expected Stop, got {other:?}"),
+        }
+
+        // Multibyte stop string: "€" = 0xE2 0x82 0xAC
+        let mut detok_mb = Detokenizer::new(&tok, &["€"], true).unwrap();
+        assert_eq!(
+            detok_mb.push(b'h' as u32).unwrap(),
+            PushOutcome::Emit("h".to_owned())
+        );
+        assert_eq!(
+            detok_mb.push(0xE2).unwrap(),
+            PushOutcome::Emit(String::new())
+        );
+        assert_eq!(
+            detok_mb.push(0x82).unwrap(),
+            PushOutcome::Emit(String::new())
+        );
+        match detok_mb.push(0xAC).unwrap() {
+            PushOutcome::Stop(final_text) => assert_eq!(final_text, ""),
+            other => panic!("expected Stop, got {other:?}"),
+        }
+
+        // Flush partial UTF-8 and partial stop prefix
+        let mut detok_flush = Detokenizer::new(&tok, &["END"], true).unwrap();
+        assert_eq!(
+            detok_flush.push(b'o' as u32).unwrap(),
+            PushOutcome::Emit("o".to_owned())
+        );
+        assert_eq!(
+            detok_flush.push(b'k' as u32).unwrap(),
+            PushOutcome::Emit("k".to_owned())
+        );
+        assert_eq!(
+            detok_flush.push(0xC3).unwrap(),
+            PushOutcome::Emit(String::new())
+        );
+        assert_eq!(detok_flush.flush(), "\u{FFFD}");
+
+        let mut detok_stop_flush = Detokenizer::new(&tok, &["STOP"], true).unwrap();
+        assert_eq!(
+            detok_stop_flush.push(b'S' as u32).unwrap(),
+            PushOutcome::Emit(String::new())
+        );
+        assert_eq!(
+            detok_stop_flush.push(b'T' as u32).unwrap(),
+            PushOutcome::Emit(String::new())
+        );
+        assert_eq!(detok_stop_flush.flush(), "ST");
+    });
+    assert!(res.is_ok(), "test panicked");
+}

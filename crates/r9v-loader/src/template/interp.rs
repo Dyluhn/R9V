@@ -618,18 +618,31 @@ impl Interp {
                 Ok(())
             }
             AssignTarget::Attr { obj, attr } => {
-                let current = self.get(obj);
-                let TemplateValue::Dict(mut entries) = current else {
-                    return Err(LoaderError::TemplateRender {
-                        detail: format!("cannot set attribute on non-namespace '{obj}'"),
-                    });
-                };
-                match entries.iter_mut().find(|(k, _)| k == attr) {
-                    Some((_, v)) => *v = value,
-                    None => entries.push((attr.clone(), value)),
+                // DECISION(A2.9): namespace attribute mutation updates the
+                // declaring scope; rejected assigning into the innermost scope
+                // (shadows and loses mutations on scope exit) and rejected
+                // global mutation of undeclared names. Spec 10 §3.1 silent
+                // on namespace scoping.
+                for scope in self.scopes.iter_mut().rev() {
+                    if let Some(target_val) = scope.get_mut(obj) {
+                        let TemplateValue::Dict(entries) = target_val else {
+                            return Err(LoaderError::TemplateRender {
+                                detail: format!("cannot set attribute on non-namespace '{obj}'"),
+                            });
+                        };
+                        match entries.iter_mut().find(|(k, _)| k == attr) {
+                            Some((_, v)) => *v = value,
+                            None => {
+                                ensure_list_add(entries.len(), 1, "template namespace attributes")?;
+                                entries.push((attr.clone(), value));
+                            }
+                        }
+                        return Ok(());
+                    }
                 }
-                self.set(obj, TemplateValue::Dict(entries));
-                Ok(())
+                Err(LoaderError::TemplateRender {
+                    detail: format!("cannot set attribute on non-namespace '{obj}'"),
+                })
             }
         }
     }

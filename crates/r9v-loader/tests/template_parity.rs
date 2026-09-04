@@ -7,8 +7,10 @@
 //! context matrix, including failure parity (the mistral `tool_roundtrip`
 //! case raises in both engines) and render-twice repeatability.
 
-use r9v_loader::{ChatContext, ChatMessage, ToolCall};
+use r9v_loader::{render_template_vars, ChatContext, ChatMessage, LoaderError, ToolCall};
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::panic::catch_unwind;
 
 mod common;
 use common::ordered_json::{self, OrderedValue};
@@ -145,4 +147,158 @@ fn repeatability() {
         let second = render_case(tmpl, ctx_name, &contexts).unwrap();
         assert_eq!(first, second, "{tmpl}/{ctx_name}: render not repeatable");
     }
+}
+
+fn render_str(source: &str) -> Result<String, LoaderError> {
+    render_template_vars(source, BTreeMap::new())
+}
+
+#[test]
+fn namespace_counter_and_last_across_iterations() {
+    let res = catch_unwind(|| {
+        let tmpl = r#"{% set ns = namespace(count=0, last="") -%}
+{% for item in ["apple", "banana", "cherry"] -%}
+  {% set ns.count = ns.count + 1 -%}
+  {% set ns.last = item -%}
+{% endfor -%}
+count={{ ns.count }}, last={{ ns.last }}"#;
+        let out = render_str(tmpl).expect("render should succeed");
+        assert_eq!(out, "count=3, last=cherry");
+    });
+    assert!(res.is_ok(), "namespace counter test panicked");
+}
+
+#[test]
+fn namespace_nested_loops_and_scopes() {
+    let res = catch_unwind(|| {
+        let tmpl = r#"{% set outer_var = "outer" -%}
+{% set ns = namespace(total=0, last_inner="", runs=0) -%}
+{% for i in [1, 2, 3] -%}
+  {% set loop_var = i -%}
+  {% for j in [10, 20] -%}
+    {% set inner_var = j -%}
+    {% set ns.total = ns.total + i * j -%}
+    {% set ns.last_inner = j -%}
+    {% set ns.runs = ns.runs + 1 -%}
+  {% endfor -%}
+  {% set outer_var = "shadowed_in_loop" -%}
+{% endfor -%}
+total={{ ns.total }}, last_inner={{ ns.last_inner }}, runs={{ ns.runs }}, outer={{ outer_var }}"#;
+        let out = render_str(tmpl).expect("nested render should succeed");
+        // 1*10 + 1*20 + 2*10 + 2*20 + 3*10 + 3*20 = 30 + 60 + 90 = 180
+        assert_eq!(out, "total=180, last_inner=20, runs=6, outer=outer");
+
+        // Explicit inner shadowing preserves outer namespace after scope exit
+        let tmpl_shadow = r#"{% set ns = namespace(val="outer") -%}
+{% for x in [1] -%}
+  {% set ns = namespace(val="inner") -%}
+  {% set ns.val = "inner_mutated" -%}
+  inner={{ ns.val }}
+{% endfor -%}
+outer={{ ns.val }}"#;
+        let out_shadow = render_str(tmpl_shadow).expect("shadow render should succeed");
+        assert_eq!(out_shadow, "inner=inner_mutated\nouter=outer");
+
+        // Macro scope mutation of declaring namespace
+        let tmpl_macro = r#"{% set ns = namespace(val=10) -%}
+{% macro add_five() -%}
+  {% set ns.val = ns.val + 5 -%}
+{% endmacro -%}
+{{ add_five() -}}
+val={{ ns.val }}"#;
+        let out_macro = render_str(tmpl_macro).expect("macro render should succeed");
+        assert_eq!(out_macro, "val=15");
+
+        // Macro called inside loop mutating outer namespace
+        let tmpl_macro_loop = r#"{% set ns = namespace(count=0) -%}
+{% macro inc() -%}
+  {% set ns.count = ns.count + 1 -%}
+{% endmacro -%}
+{% for x in [1, 2, 3] -%}
+  {{ inc() -}}
+{% endfor -%}
+count={{ ns.count }}"#;
+        let out_macro_loop = render_str(tmpl_macro_loop).expect("macro in loop should succeed");
+        assert_eq!(out_macro_loop, "count=3");
+
+        // Tuple unpack assignment on namespace attributes
+        let tmpl_tuple = r#"{% set ns = namespace(x=0, y=0) -%}
+{% set ns.x, ns.y = 10, 20 -%}
+x={{ ns.x }}, y={{ ns.y }}"#;
+        let out_tuple = render_str(tmpl_tuple).expect("tuple unpack should succeed");
+        assert_eq!(out_tuple, "x=10, y=20");
+
+        // Loop over pairs mutating namespace attributes
+        let tmpl_pairs = r#"{% set ns = namespace(sum_x=0, sum_y=0) -%}
+{% for a, b in [[1, 10], [2, 20], [3, 30]] -%}
+  {% set ns.sum_x = ns.sum_x + a -%}
+  {% set ns.sum_y = ns.sum_y + b -%}
+{% endfor -%}
+sum_x={{ ns.sum_x }}, sum_y={{ ns.sum_y }}"#;
+        let out_pairs = render_str(tmpl_pairs).expect("pairs loop should succeed");
+        assert_eq!(out_pairs, "sum_x=6, sum_y=60");
+    });
+    assert!(res.is_ok(), "nested loops and scopes test panicked");
+}
+
+#[test]
+fn namespace_missing_attr_and_errors() {
+    let res = catch_unwind(|| {
+        let tmpl = r#"{% set ns = namespace() -%}
+defined={{ ns.missing is defined }}, undefined={{ ns.missing is undefined }}, truthy={{ not not ns.missing }}, default={{ ns.missing | default("fallback", true) }}
+{% set ns.new_attr = 42 -%}
+new={{ ns.new_attr }}"#;
+        let out = render_str(tmpl).expect("missing attr render should succeed");
+        assert_eq!(
+            out,
+            "defined=False, undefined=True, truthy=False, default=fallback\nnew=42"
+        );
+
+        // Setting attribute on non-namespace fails with typed TemplateRender error
+        let tmpl_err1 = "{% set x = 42 %}{% set x.attr = 1 %}";
+        match render_str(tmpl_err1) {
+            Err(LoaderError::TemplateRender { detail }) => {
+                assert!(detail.contains("cannot set attribute on non-namespace 'x'"));
+            }
+            other => panic!("expected TemplateRender error, got {other:?}"),
+        }
+
+        // Setting attribute on undeclared identifier fails with typed error
+        let tmpl_err2 = "{% set undeclared.attr = 1 %}";
+        match render_str(tmpl_err2) {
+            Err(LoaderError::TemplateRender { detail }) => {
+                assert!(detail.contains("cannot set attribute on non-namespace 'undeclared'"));
+            }
+            other => panic!("expected TemplateRender error, got {other:?}"),
+        }
+    });
+    assert!(res.is_ok(), "missing attr test panicked");
+}
+
+#[test]
+fn namespace_resource_budgets() {
+    let res = catch_unwind(|| {
+        // Range loop iteration budget trips
+        let tmpl_loop = r#"{% set ns = namespace(count=0) -%}
+{% for i in range(200000) -%}
+  {% set ns.count = ns.count + 1 -%}
+{% endfor -%}"#;
+        match render_str(tmpl_loop) {
+            Err(LoaderError::Limit { what, .. }) => {
+                assert!(what.contains("range") || what.contains("loop") || what.contains("steps"));
+            }
+            other => panic!("expected Limit error for huge range, got {other:?}"),
+        }
+
+        // Huge string repetition budget trips on namespace assignment
+        let tmpl_str = r#"{% set ns = namespace(s="a") -%}
+{% set ns.s = "a" * 1000000000 -%}"#;
+        match render_str(tmpl_str) {
+            Err(LoaderError::Limit { what, .. }) => {
+                assert!(what.contains("repeat") || what.contains("bytes"));
+            }
+            other => panic!("expected Limit error for huge string repeat, got {other:?}"),
+        }
+    });
+    assert!(res.is_ok(), "resource budgets test panicked");
 }
