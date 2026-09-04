@@ -10,13 +10,19 @@ use crate::abi::types::{AbiStruct, AbiType, FieldRole, PointeeType};
 use crate::abi::workspace::{WorkspaceSlot, WorkspaceSlotKind};
 use crate::error::KgenError;
 
+// DECISION(A3.API): every OpStatic family maps 1:1 to its own family name (MoeRoute and
+// CausalConv1d included); rejected reusing MoeFfn/LinearAttnScan names for those ops because
+// shared names let two compile-time-distinct kernels hash to the same family and collide.
+// Spec 4 §3.
 /// Returns the family name string for an [`OpStatic`] descriptor (Spec 4 §3).
 pub const fn op_static_family(op_static: &OpStatic) -> &'static str {
     match op_static {
         OpStatic::Matmul(_) => "matmul",
+        OpStatic::MoeRoute(_) => "moe_route",
         OpStatic::MoeFfn(_) => "moe_ffn",
         OpStatic::Attention(_) => "attention",
         OpStatic::StateWriteKv(_) => "state_write_kv",
+        OpStatic::CausalConv1d(_) => "causal_conv1d",
         OpStatic::LinearAttnScan(_) => "linear_attn_scan",
         OpStatic::Elementwise(_) => "elementwise",
         OpStatic::Sampling(_) => "sampling",
@@ -30,18 +36,23 @@ pub fn canonical_struct_name(op: OpId, op_static: &OpStatic) -> String {
     format!("{}_{:016x}_args", op.as_str(), hash)
 }
 
-/// Validates compatibility between an [`OpId`] and an [`OpStatic`] family descriptor exhaustively (Spec 4 §3, §7).
+/// Validates compatibility between an [`OpId`] and an [`OpStatic`] descriptor exhaustively (Spec 4 §3, §7).
+// DECISION(A3.API): op-to-static agreement is exact down to the nested descriptor
+// (Sample requires Sampling::Sample, Send requires Collectives::Send); rejected
+// family-level-only checks because two different compile-time kernel semantics
+// must never share an identity. Cross-family mismatches report MismatchedOpFamily,
+// within-family mismatches report NestedOpMismatch. Spec 4 §3.
 fn validate_op_family(op: OpId, op_static: &OpStatic) -> Result<(), KgenError> {
     let family = op_static_family(op_static);
-    let is_valid = matches!(
+    let is_valid_family = matches!(
         (op, op_static),
         (OpId::Matmul, OpStatic::Matmul(_))
+            | (OpId::MoeRoute, OpStatic::MoeRoute(_))
             | (OpId::MoeFfn, OpStatic::MoeFfn(_))
-            | (OpId::MoeRoute, OpStatic::MoeFfn(_))
             | (OpId::Attention, OpStatic::Attention(_))
             | (OpId::StateWriteKv, OpStatic::StateWriteKv(_))
+            | (OpId::CausalConv1d, OpStatic::CausalConv1d(_))
             | (OpId::LinearAttnScan, OpStatic::LinearAttnScan(_))
-            | (OpId::CausalConv1d, OpStatic::LinearAttnScan(_))
             | (
                 OpId::EmbedGather
                     | OpId::NgramGather
@@ -76,11 +87,14 @@ fn validate_op_family(op: OpId, op_static: &OpStatic) -> Result<(), KgenError> {
             )
     );
 
-    if is_valid {
-        Ok(())
-    } else {
-        Err(KgenError::MismatchedOpFamily { op, family })
+    if !is_valid_family {
+        return Err(KgenError::MismatchedOpFamily { op, family });
     }
+    let static_op = op_static.op_id();
+    if static_op != op {
+        return Err(KgenError::NestedOpMismatch { op, static_op });
+    }
+    Ok(())
 }
 
 /// Derives the canonical ABI description from an [`OpStatic`] parameter descriptor (Spec 4 §4.1).
@@ -89,16 +103,12 @@ fn validate_op_family(op: OpId, op_static: &OpStatic) -> Result<(), KgenError> {
 pub fn abi(op_static: &OpStatic) -> Result<AbiStruct, KgenError> {
     match op_static {
         OpStatic::Matmul(_) => abi_for_op(OpId::Matmul, op_static),
+        OpStatic::MoeRoute(_) => abi_for_op(OpId::MoeRoute, op_static),
+        OpStatic::MoeFfn(_) => abi_for_op(OpId::MoeFfn, op_static),
         OpStatic::Attention(_) => abi_for_op(OpId::Attention, op_static),
         OpStatic::StateWriteKv(_) => abi_for_op(OpId::StateWriteKv, op_static),
-        OpStatic::MoeFfn(_) => Err(KgenError::AmbiguousOpFamily {
-            family: "moe_ffn",
-            valid_ops: vec![OpId::MoeFfn, OpId::MoeRoute],
-        }),
-        OpStatic::LinearAttnScan(_) => Err(KgenError::AmbiguousOpFamily {
-            family: "linear_attn_scan",
-            valid_ops: vec![OpId::LinearAttnScan, OpId::CausalConv1d],
-        }),
+        OpStatic::CausalConv1d(_) => abi_for_op(OpId::CausalConv1d, op_static),
+        OpStatic::LinearAttnScan(_) => abi_for_op(OpId::LinearAttnScan, op_static),
         OpStatic::Elementwise(_) => Err(KgenError::AmbiguousOpFamily {
             family: "elementwise",
             valid_ops: vec![
@@ -160,6 +170,18 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 "Embedding table [V, Dm] (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
+                "embed_override",
+                AbiType::nullable_const_ptr(PointeeType::Void),
+                FieldRole::InputTensor,
+                "Optional external embeddings [T, Dm]; null when unused (Spec 1 §3.2)",
+            ))
+            .add_field(FieldSpec::new(
+                "embed_mask",
+                AbiType::nullable_const_ptr(PointeeType::U8),
+                FieldRole::InputTensor,
+                "Optional override mask [T] bool; rows set replace gathered output, null when unused (Spec 1 §3.2)",
+            ))
+            .add_field(FieldSpec::new(
                 "x",
                 AbiType::mut_ptr(PointeeType::Void),
                 FieldRole::OutputTensor,
@@ -173,18 +195,34 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .build(),
 
+        // DECISION(A3.API): one ngram_gather struct carries both source signatures with the
+        // inactive pair null (staging/row_scales live for Staged, token_ids/table for Device);
+        // rejected two structs per source because the op key must stay one variant per static
+        // descriptor. Spec 1 §4.A.
         OpId::NgramGather => b
             .add_field(FieldSpec::new(
                 "staging",
-                AbiType::const_ptr(PointeeType::Void),
+                AbiType::nullable_const_ptr(PointeeType::Void),
                 FieldRole::InputTensor,
-                "Staging buffer [T, Np, Dn] (Spec 1 §4.A)",
+                "Staging buffer [T, Np, Dn]; null in Device-table mode (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "row_scales",
                 AbiType::nullable_const_ptr(PointeeType::F32),
                 FieldRole::WeightScale,
-                "Row scales buffer (Spec 1 §4.A)",
+                "Row scales buffer; null in Device-table mode (Spec 1 §4.A)",
+            ))
+            .add_field(FieldSpec::new(
+                "token_ids",
+                AbiType::nullable_const_ptr(PointeeType::U32),
+                FieldRole::InputTensor,
+                "Token IDs [T] u32 for on-device hashing; null in Staged mode (Spec 1 §4.A)",
+            ))
+            .add_field(FieldSpec::new(
+                "table",
+                AbiType::nullable_const_ptr(PointeeType::Void),
+                FieldRole::InputTensor,
+                "Device n-gram table [TotalEntries, Dn]; null in Staged mode (Spec 1 §4.A)",
             ))
             .add_field(FieldSpec::new(
                 "x",
@@ -529,9 +567,16 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             .build(),
 
         OpId::Matmul => {
+            // validate_op_family above enforces exact Matmul pairing; re-check here
+            // without panicking so input-dependent misuse stays a typed error.
             let s = match op_static {
                 OpStatic::Matmul(s) => s,
-                _ => unreachable!(),
+                _ => {
+                    return Err(KgenError::MismatchedOpFamily {
+                        op,
+                        family: op_static_family(op_static),
+                    });
+                }
             };
             b.add_field(FieldSpec::new(
                 "w",
@@ -553,9 +598,9 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .add_field(FieldSpec::new(
                 "x",
-                AbiType::const_ptr(PointeeType::from_dtype(s.out_dtype)),
+                AbiType::const_ptr(PointeeType::from_dtype(s.in_dtype)),
                 FieldRole::InputTensor,
-                "Activation input tensor (Spec 1 §4.C)",
+                "Activation input tensor; pointer type follows activation dtype, not out_dtype (Spec 1 §4.C)",
             ))
             .add_field(FieldSpec::new(
                 "x_scale",
@@ -580,6 +625,17 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 AbiType::mut_ptr(PointeeType::from_dtype(s.out_dtype)),
                 FieldRole::OutputTensor,
                 "Output tensor [M, N] (Spec 1 §4.C)",
+            ))
+            // DECISION(A3.API): split-K partials workspace is part of the common matmul ABI for
+            // every variant (sized by k_splits at tune time); rejected emitting it only for
+            // k_splits > 1 because the struct shape must not depend on the tuned config.
+            // Spec 4 §5.1, §7.
+            .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::SplitKPartials, 0))
+            .add_field(FieldSpec::new(
+                "m",
+                AbiType::u32(),
+                FieldRole::DynamicScalar,
+                "Dynamic row count M <= m_bucket (Spec 1 §3.5, Spec 4 §7)",
             ))
             .build()
         }
@@ -676,9 +732,16 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             .build(),
 
         OpId::Attention => {
+            // validate_op_family above enforces exact Attention pairing; re-check here
+            // without panicking so input-dependent misuse stays a typed error.
             let s = match op_static {
                 OpStatic::Attention(s) => s,
-                _ => unreachable!(),
+                _ => {
+                    return Err(KgenError::MismatchedOpFamily {
+                        op,
+                        family: op_static_family(op_static),
+                    });
+                }
             };
             let mut builder = b
                 .add_field(FieldSpec::new(
@@ -942,58 +1005,90 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
             ))
             .build(),
 
-        OpId::Verify => b
-            .add_field(FieldSpec::new(
-                "draft_tokens",
-                AbiType::const_ptr(PointeeType::U32),
-                FieldRole::InputTensor,
-                "Draft speculative tokens [S, k] u32 (Spec 1 §4.F, Spec 7 §4)",
-            ))
-            .add_field(FieldSpec::new(
-                "draft_probs",
-                AbiType::nullable_const_ptr(PointeeType::F32),
-                FieldRole::InputTensor,
-                "Optional draft probabilities [S, k, V] f32 (Spec 1 §4.F, Spec 7 §4)",
-            ))
-            .add_field(FieldSpec::new(
-                "target_probs",
-                AbiType::const_ptr(PointeeType::F32),
-                FieldRole::InputTensor,
-                "Target model probabilities [S, k+1, V] f32 (Spec 1 §4.F, Spec 7 §4)",
-            ))
-            .add_field(FieldSpec::new(
-                "rng_state",
-                AbiType::mut_ptr(PointeeType::U64),
-                FieldRole::InputTensor,
-                "Philox PRNG state array [S] (Spec 1 §4.F, Spec 7 §4)",
-            ))
-            .add_batch_meta_field(BatchMetaField::SeqIds)
-            .add_field(FieldSpec::new(
-                "accepted",
-                AbiType::mut_ptr(PointeeType::U32),
-                FieldRole::OutputTensor,
-                "Accepted tokens buffer [S, k+1] u32 (Spec 1 §4.F, Spec 7 §4)",
-            ))
-            .add_field(FieldSpec::new(
-                "accept_len",
-                AbiType::mut_ptr(PointeeType::U32),
-                FieldRole::OutputTensor,
-                "Accepted length per sequence [S] u32 (Spec 1 §4.F, Spec 7 §4)",
-            ))
-            .add_field(FieldSpec::new(
-                "s",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Active sequence count S <= S_bucket (Spec 1 §3.5)",
-            ))
-            .add_field(FieldSpec::new(
-                "k",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Draft speculative token count k (Spec 1 §4.F, Spec 7 §4)",
-            ))
-            .build(),
+        OpId::Verify => {
+            // validate_op_family above enforces Sampling::Verify pairing; re-check
+            // without panicking so input-dependent misuse stays a typed error.
+            let tree = match op_static {
+                OpStatic::Sampling(r9v_registry::SamplingStatic::Verify(v)) => v.tree,
+                OpStatic::Sampling(other) => {
+                    return Err(KgenError::NestedOpMismatch {
+                        op,
+                        static_op: other.op_id(),
+                    });
+                }
+                _ => {
+                    return Err(KgenError::MismatchedOpFamily {
+                        op,
+                        family: op_static_family(op_static),
+                    });
+                }
+            };
+            let mut builder = b
+                .add_field(FieldSpec::new(
+                    "draft_tokens",
+                    AbiType::const_ptr(PointeeType::U32),
+                    FieldRole::InputTensor,
+                    "Draft speculative tokens [S, k] u32 (Spec 1 §4.F, Spec 7 §4)",
+                ))
+                .add_field(FieldSpec::new(
+                    "draft_probs",
+                    AbiType::nullable_const_ptr(PointeeType::F32),
+                    FieldRole::InputTensor,
+                    "Optional draft probabilities [S, k, V] f32 (Spec 1 §4.F, Spec 7 §4)",
+                ))
+                .add_field(FieldSpec::new(
+                    "target_probs",
+                    AbiType::const_ptr(PointeeType::F32),
+                    FieldRole::InputTensor,
+                    "Target model probabilities [S, k+1, V] f32 (Spec 1 §4.F, Spec 7 §4)",
+                ))
+                .add_field(FieldSpec::new(
+                    "rng_state",
+                    AbiType::mut_ptr(PointeeType::U64),
+                    FieldRole::InputTensor,
+                    "Philox PRNG state array [S] (Spec 1 §4.F, Spec 7 §4)",
+                ))
+                .add_batch_meta_field(BatchMetaField::SeqIds);
+            // DECISION(A3.API): tree verify inputs ride the static tree flag so the struct shape
+            // is compile-time; rejected a runtime tree pointer because shape must come from
+            // static_hash. Spec 7 §4.
+            if tree {
+                builder = builder
+                    .add_batch_meta_field(BatchMetaField::TreeParents)
+                    .add_batch_meta_field(BatchMetaField::TreeAncestors);
+            }
+            builder
+                .add_field(FieldSpec::new(
+                    "accepted",
+                    AbiType::mut_ptr(PointeeType::U32),
+                    FieldRole::OutputTensor,
+                    "Accepted tokens buffer [S, k+1] u32 (Spec 1 §4.F, Spec 7 §4)",
+                ))
+                .add_field(FieldSpec::new(
+                    "accept_len",
+                    AbiType::mut_ptr(PointeeType::U32),
+                    FieldRole::OutputTensor,
+                    "Accepted length per sequence [S] u32 (Spec 1 §4.F, Spec 7 §4)",
+                ))
+                .add_field(FieldSpec::new(
+                    "s",
+                    AbiType::u32(),
+                    FieldRole::DynamicScalar,
+                    "Active sequence count S <= S_bucket (Spec 1 §3.5)",
+                ))
+                .add_field(FieldSpec::new(
+                    "k",
+                    AbiType::u32(),
+                    FieldRole::DynamicScalar,
+                    "Draft speculative token count k (Spec 1 §4.F, Spec 7 §4)",
+                ))
+                .build()
+        }
 
+        // DECISION(A3.API): rank, world_size, peer and group_id are compile-time statics, so
+        // count is the only dynamic collective scalar; rejected runtime rank/world/peer scalars
+        // because a kernel launched with a different rank than its static descriptor is a wrong
+        // launch, not a dynamic shape. Spec 1 §4.G, Spec 4 §3.
         OpId::AllReduce => b
             .add_field(FieldSpec::new(
                 "send_buf",
@@ -1013,18 +1108,6 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 AbiType::u64(),
                 FieldRole::DynamicScalar,
                 "Element count to reduce (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "rank",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Local communicator rank (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "world_size",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Communicator world size (Spec 1 §4.G)",
             ))
             .build(),
 
@@ -1048,18 +1131,6 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Element count per rank (Spec 1 §4.G)",
             ))
-            .add_field(FieldSpec::new(
-                "rank",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Local communicator rank (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "world_size",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Communicator world size (Spec 1 §4.G)",
-            ))
             .build(),
 
         OpId::ReduceScatter => b
@@ -1081,18 +1152,6 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 AbiType::u64(),
                 FieldRole::DynamicScalar,
                 "Element count per rank (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "rank",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Local communicator rank (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "world_size",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Communicator world size (Spec 1 §4.G)",
             ))
             .build(),
 
@@ -1116,18 +1175,6 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 "Per-rank row counts [P] u32 (Spec 1 §4.G, SI-11)",
             ))
             .add_workspace_slot(WorkspaceSlot::new(WorkspaceSlotKind::CollectiveStaging, 0))
-            .add_field(FieldSpec::new(
-                "rank",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Local communicator rank (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "world_size",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Communicator world size (Spec 1 §4.G)",
-            ))
             .build(),
 
         OpId::Send => b
@@ -1143,12 +1190,6 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 AbiType::u64(),
                 FieldRole::DynamicScalar,
                 "Element count to transfer (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "peer",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Peer rank destination (Spec 1 §4.G)",
             ))
             .build(),
 
@@ -1166,12 +1207,6 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 FieldRole::DynamicScalar,
                 "Expected element count (Spec 1 §4.G)",
             ))
-            .add_field(FieldSpec::new(
-                "peer",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Peer rank source (Spec 1 §4.G)",
-            ))
             .build(),
 
         OpId::Barrier => b
@@ -1180,18 +1215,6 @@ pub fn abi_for_op(op: OpId, op_static: &OpStatic) -> Result<AbiStruct, KgenError
                 AbiType::mut_ptr(PointeeType::U32),
                 FieldRole::InputTensor,
                 "Inter-rank barrier synchronization flags (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "rank",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Local communicator rank (Spec 1 §4.G)",
-            ))
-            .add_field(FieldSpec::new(
-                "world_size",
-                AbiType::u32(),
-                FieldRole::DynamicScalar,
-                "Communicator world size (Spec 1 §4.G)",
             ))
             .build(),
     }

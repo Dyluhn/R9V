@@ -2,12 +2,14 @@
 //! Serde serialization and deserialization adapters for Op IR types (Spec 1, Spec 4 §3).
 
 use r9v_ir::{
-    ActivationKind, AttentionMask, DType, Epilogue, LayoutId, LinearAttnKind, P2pTransport,
-    Placement, QuantScheme, SchemeId,
+    ActivationKind, AttentionMask, CacheScaleGranularity, ConvActivation, CopyKind, DType,
+    Epilogue, HashId, LayoutId, LinearAttnKind, MoeGroup, MoeScoring, NgramCombine, NgramSource,
+    NormAxis, NormKind, P2pTransport, Placement, QuantScheme, ReduceOp, RngAlgorithm, RopeStyle,
+    SchemeId, Smoothing,
 };
 use serde::de::{self, Deserializer};
 use serde::ser::{SerializeSeq, Serializer};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub mod serde_p2p_transport {
     use super::*;
@@ -339,5 +341,347 @@ pub mod serde_linear_attn_kind {
                 "unknown LinearAttnKind '{other}'"
             ))),
         }
+    }
+}
+
+pub mod serde_moe_scoring {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(s_mode: &MoeScoring, s: S) -> Result<S::Ok, S::Error> {
+        match s_mode {
+            MoeScoring::Softmax => s.serialize_str("softmax"),
+            MoeScoring::Sigmoid => s.serialize_str("sigmoid"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<MoeScoring, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "softmax" => Ok(MoeScoring::Softmax),
+            "sigmoid" => Ok(MoeScoring::Sigmoid),
+            other => Err(de::Error::custom(format!("unknown MoeScoring '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_opt_moe_group {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    struct MoeGroupRepr {
+        n_group: u32,
+        topk_group: u32,
+    }
+
+    pub fn serialize<S: Serializer>(opt: &Option<MoeGroup>, s: S) -> Result<S::Ok, S::Error> {
+        match opt {
+            Some(g) => {
+                let repr = MoeGroupRepr {
+                    n_group: g.n_group,
+                    topk_group: g.topk_group,
+                };
+                repr.serialize(s)
+            }
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<MoeGroup>, D::Error> {
+        let opt = Option::<MoeGroupRepr>::deserialize(d)?;
+        Ok(opt.map(|g| MoeGroup {
+            n_group: g.n_group,
+            topk_group: g.topk_group,
+        }))
+    }
+}
+
+pub mod serde_conv_activation {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(act: &ConvActivation, s: S) -> Result<S::Ok, S::Error> {
+        match act {
+            ConvActivation::Silu => s.serialize_str("silu"),
+            ConvActivation::Identity => s.serialize_str("identity"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ConvActivation, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "silu" => Ok(ConvActivation::Silu),
+            "identity" => Ok(ConvActivation::Identity),
+            other => Err(de::Error::custom(format!(
+                "unknown ConvActivation '{other}'"
+            ))),
+        }
+    }
+}
+
+pub mod serde_norm_kind {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(kind: &NormKind, s: S) -> Result<S::Ok, S::Error> {
+        match kind {
+            NormKind::Rms => s.serialize_str("rms"),
+            NormKind::Layer => s.serialize_str("layer"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<NormKind, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "rms" => Ok(NormKind::Rms),
+            "layer" => Ok(NormKind::Layer),
+            other => Err(de::Error::custom(format!("unknown NormKind '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_norm_axis {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(axis: &NormAxis, s: S) -> Result<S::Ok, S::Error> {
+        match axis {
+            NormAxis::Last => s.serialize_str("last"),
+            NormAxis::Head(h) => s.serialize_str(&format!("head:{h}")),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<NormAxis, D::Error> {
+        let s = String::deserialize(d)?;
+        if s.eq_ignore_ascii_case("last") {
+            Ok(NormAxis::Last)
+        } else if let Some(h_str) = s.strip_prefix("head:") {
+            let h = h_str.parse::<u32>().map_err(de::Error::custom)?;
+            Ok(NormAxis::Head(h))
+        } else {
+            Err(de::Error::custom(format!("unknown NormAxis '{s}'")))
+        }
+    }
+}
+
+pub mod serde_activation_kind {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(act: &ActivationKind, s: S) -> Result<S::Ok, S::Error> {
+        match act {
+            ActivationKind::Silu => s.serialize_str("silu"),
+            ActivationKind::Gelu => s.serialize_str("gelu"),
+            ActivationKind::GeluTanh => s.serialize_str("gelu_tanh"),
+            ActivationKind::Relu2 => s.serialize_str("relu2"),
+            ActivationKind::Identity => s.serialize_str("identity"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ActivationKind, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "silu" => Ok(ActivationKind::Silu),
+            "gelu" => Ok(ActivationKind::Gelu),
+            "gelu_tanh" => Ok(ActivationKind::GeluTanh),
+            "relu2" => Ok(ActivationKind::Relu2),
+            "identity" => Ok(ActivationKind::Identity),
+            other => Err(de::Error::custom(format!(
+                "unknown ActivationKind '{other}'"
+            ))),
+        }
+    }
+}
+
+pub mod serde_rope_style {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(style: &RopeStyle, s: S) -> Result<S::Ok, S::Error> {
+        match style {
+            RopeStyle::Neox => s.serialize_str("neox"),
+            RopeStyle::Interleaved => s.serialize_str("interleaved"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RopeStyle, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "neox" => Ok(RopeStyle::Neox),
+            "interleaved" => Ok(RopeStyle::Interleaved),
+            other => Err(de::Error::custom(format!("unknown RopeStyle '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_smoothing {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(sm: &Smoothing, s: S) -> Result<S::Ok, S::Error> {
+        match sm {
+            Smoothing::None => s.serialize_str("none"),
+            Smoothing::Folded => s.serialize_str("folded"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Smoothing, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "none" => Ok(Smoothing::None),
+            "folded" => Ok(Smoothing::Folded),
+            other => Err(de::Error::custom(format!("unknown Smoothing '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_ngram_source {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(src: &NgramSource, s: S) -> Result<S::Ok, S::Error> {
+        match src {
+            NgramSource::Staged => s.serialize_str("staged"),
+            NgramSource::Device => s.serialize_str("device"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<NgramSource, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "staged" => Ok(NgramSource::Staged),
+            "device" => Ok(NgramSource::Device),
+            other => Err(de::Error::custom(format!("unknown NgramSource '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_ngram_combine {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(comb: &NgramCombine, s: S) -> Result<S::Ok, S::Error> {
+        match comb {
+            NgramCombine::Concat => s.serialize_str("concat"),
+            NgramCombine::Sum => s.serialize_str("sum"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<NgramCombine, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "concat" => Ok(NgramCombine::Concat),
+            "sum" => Ok(NgramCombine::Sum),
+            other => Err(de::Error::custom(format!("unknown NgramCombine '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_copy_kind {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(kind: &CopyKind, s: S) -> Result<S::Ok, S::Error> {
+        match kind {
+            CopyKind::Contiguize => s.serialize_str("contiguize"),
+            CopyKind::DeviceToDevice => s.serialize_str("device_to_device"),
+            CopyKind::HostToDevice => s.serialize_str("host_to_device"),
+            CopyKind::DeviceToHost => s.serialize_str("device_to_host"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<CopyKind, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "contiguize" => Ok(CopyKind::Contiguize),
+            "device_to_device" => Ok(CopyKind::DeviceToDevice),
+            "host_to_device" => Ok(CopyKind::HostToDevice),
+            "device_to_host" => Ok(CopyKind::DeviceToHost),
+            other => Err(de::Error::custom(format!("unknown CopyKind '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_opt_reduce_op {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(opt: &Option<ReduceOp>, s: S) -> Result<S::Ok, S::Error> {
+        match opt {
+            Some(ReduceOp::Sum) => s.serialize_str("sum"),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<ReduceOp>, D::Error> {
+        let opt = Option::<String>::deserialize(d)?;
+        match opt.as_deref() {
+            Some(s) if s.eq_ignore_ascii_case("sum") => Ok(Some(ReduceOp::Sum)),
+            None => Ok(None),
+            Some(other) => Err(de::Error::custom(format!("unknown ReduceOp '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_rng_algorithm {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(rng: &RngAlgorithm, s: S) -> Result<S::Ok, S::Error> {
+        match rng {
+            RngAlgorithm::Philox4x32 => s.serialize_str("philox4x32"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<RngAlgorithm, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "philox4x32" => Ok(RngAlgorithm::Philox4x32),
+            other => Err(de::Error::custom(format!("unknown RngAlgorithm '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_cache_scale_granularity {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(
+        granularity: &CacheScaleGranularity,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match granularity {
+            CacheScaleGranularity::PerTokenHead => s.serialize_str("per_token_head"),
+            CacheScaleGranularity::PerBlock => s.serialize_str("per_block"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<CacheScaleGranularity, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "per_token_head" => Ok(CacheScaleGranularity::PerTokenHead),
+            "per_block" => Ok(CacheScaleGranularity::PerBlock),
+            other => Err(de::Error::custom(format!(
+                "unknown CacheScaleGranularity '{other}'"
+            ))),
+        }
+    }
+}
+
+pub mod serde_reduce_op {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(op: &ReduceOp, s: S) -> Result<S::Ok, S::Error> {
+        match op {
+            ReduceOp::Sum => s.serialize_str("sum"),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ReduceOp, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "sum" => Ok(ReduceOp::Sum),
+            other => Err(de::Error::custom(format!("unknown ReduceOp '{other}'"))),
+        }
+    }
+}
+
+pub mod serde_hash_id {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(hash: &HashId, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u64(hash.as_u64())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<HashId, D::Error> {
+        let val = u64::deserialize(d)?;
+        Ok(HashId::new(val))
     }
 }

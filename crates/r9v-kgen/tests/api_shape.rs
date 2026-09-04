@@ -203,9 +203,10 @@ fn test_api_shape_closed_sets_exhaustive() {
         KgenError::MismatchedOpFamily { .. } => 7,
         KgenError::AmbiguousOpFamily { .. } => 8,
         KgenError::InconsistentVariantCollision { .. } => 9,
-        KgenError::Ir(_) => 10,
-        KgenError::Registry(_) => 11,
-        KgenError::Io(_) => 12,
+        KgenError::NestedOpMismatch { .. } => 10,
+        KgenError::Ir(_) => 11,
+        KgenError::Registry(_) => 12,
+        KgenError::Io(_) => 13,
     };
 }
 
@@ -223,4 +224,9 @@ fn test_api_shape_public_constructors_reachable() {
     // Direct abi(&OpStatic) works for unique family Matmul
     let direct_matmul = abi(&matmul_st).expect("unique family dispatches directly");
     assert_eq!(direct_matmul.op(), OpId::Matmul);
+
+    // Tree verify static is reachable and gates tree inputs
+    let tree_st = common::representative_verify_static(true);
+    let tree_abi = abi_for_op(OpId::Verify, &tree_st).expect("tree verify abi builds");
+    assert!(tree_abi.field("tree_parents").is_some());
 }

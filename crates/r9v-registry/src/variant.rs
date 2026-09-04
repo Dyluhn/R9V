@@ -76,10 +76,13 @@ pub fn static_hash(static_params: &OpStatic) -> u64 {
 mod tests {
     use super::*;
     use crate::types::*;
-    use r9v_ir::{AttentionMask, DType, Epilogue, LayoutId, LinearAttnKind, QuantScheme};
+    use r9v_ir::{
+        AttentionMask, CacheScaleGranularity, DType, Epilogue, LayoutId, LinearAttnKind,
+        QuantScheme,
+    };
 
     #[test]
-    fn test_all_8_op_static_families_hashing() {
+    fn test_all_10_op_static_families_hashing() {
         let arch = ArchName::from("gfx942");
 
         // 1. Matmul
@@ -87,11 +90,14 @@ mod tests {
             m_bucket: 64,
             n: 1024,
             k: 512,
+            w_dtype: DType::F16,
             w_scheme: QuantScheme::None,
             w_layout: LayoutId::CONTIGUOUS,
+            in_dtype: DType::F16,
             act_scheme: QuantScheme::None,
             out_dtype: DType::F16,
             epilogue: Epilogue::None,
+            transpose_w: false,
             interleave: false,
             sparse: false,
         });
@@ -113,7 +119,12 @@ mod tests {
             dm: 2048,
             dff: 5632,
             schemes: vec![QuantScheme::None, QuantScheme::None],
+            w_dtype: DType::F16,
+            in_dtype: DType::F16,
             act_scheme: QuantScheme::None,
+            act: r9v_ir::ActivationKind::Silu,
+            out_dtype: DType::F16,
+            shared_experts: 0,
             placement_kind: PlacementKind::Device,
         });
         let k2 = VariantKey::new(
@@ -136,9 +147,11 @@ mod tests {
             cache_dtype: DType::F16,
             attention_layout: LayoutId::CONTIGUOUS,
             mask_kind: AttentionMask::Causal,
-            latent: None,
+            softmax_scale_bits: (1.0f32 / 128.0f32.sqrt()).to_bits(),
+            out_dtype: DType::F16,
+            mla: None,
             softcap_bits: None,
-            sinks: None,
+            sinks: 0,
         });
         let k3 = VariantKey::new(
             OpId::Attention,
@@ -155,7 +168,9 @@ mod tests {
             hkv_local: 8,
             d: 128,
             dv: 128,
+            in_dtype: DType::F16,
             cache_dtype: DType::F16,
+            scale_granularity: CacheScaleGranularity::PerTokenHead,
             attention_layout: LayoutId::CONTIGUOUS,
             latent: None,
         });
@@ -177,6 +192,8 @@ mod tests {
             dv: 128,
             chunk: 64,
             mode: ScanMode::Chunked,
+            in_dtype: DType::F16,
+            out_dtype: DType::F16,
         });
         let k5 = VariantKey::new(
             OpId::LinearAttnScan,
@@ -188,15 +205,60 @@ mod tests {
         assert_eq!(variant_hash(&k5), variant_hash(&k5));
         assert_ne!(static_hash(&lin_s), 0);
 
-        // 6. Elementwise
+        // 6. MoeRoute
+        let moe_route_s = OpStatic::MoeRoute(MoeRouteStatic {
+            t_bucket: 16,
+            e_total: 8,
+            top_k: 2,
+            scoring: r9v_ir::MoeScoring::Softmax,
+            renormalize: true,
+            group: None,
+            scale_bits: 1.0f32.to_bits(),
+            has_bias: false,
+        });
+        let k_route = VariantKey::new(
+            OpId::MoeRoute,
+            arch.clone(),
+            1,
+            moe_route_s.clone(),
+            TileConfig::new(256, 1, 1),
+        );
+        assert_eq!(variant_hash(&k_route), variant_hash(&k_route));
+        assert_ne!(static_hash(&moe_route_s), 0);
+
+        // 7. CausalConv1d
+        let conv_s = OpStatic::CausalConv1d(CausalConv1dStatic {
+            t_bucket: 16,
+            channels: 2048,
+            kernel: 4,
+            act: r9v_ir::ConvActivation::Silu,
+            x_dtype: DType::F16,
+            w_dtype: DType::F16,
+            out_dtype: DType::F16,
+            has_bias: false,
+        });
+        let k_conv = VariantKey::new(
+            OpId::CausalConv1d,
+            arch.clone(),
+            1,
+            conv_s.clone(),
+            TileConfig::new(256, 1, 1),
+        );
+        assert_eq!(variant_hash(&k_conv), variant_hash(&k_conv));
+        assert_ne!(static_hash(&conv_s), 0);
+
+        // 8. Elementwise
         let elem_s = OpStatic::Elementwise(ElementwiseStatic {
             t_bucket: 128,
-            dims: vec![128, 4096],
-            dtypes: vec![DType::F16, DType::F16],
             fused_with: None,
+            op_params: ElementwiseParams::ResidualAdd(ResidualAddStatic {
+                out_dtype: DType::F16,
+                scale_bits: 1.0f32.to_bits(),
+                n: 4096,
+            }),
         });
         let k6 = VariantKey::new(
-            OpId::Norm,
+            OpId::ResidualAdd,
             arch.clone(),
             1,
             elem_s.clone(),
@@ -205,13 +267,12 @@ mod tests {
         assert_eq!(variant_hash(&k6), variant_hash(&k6));
         assert_ne!(static_hash(&elem_s), 0);
 
-        // 7. Sampling
-        let samp_s = OpStatic::Sampling(SamplingStatic {
+        // 9. Sampling
+        let samp_s = OpStatic::Sampling(SamplingStatic::Sample(SampleStatic {
             s_bucket: 1,
             v: 32000,
-            q_bucket: 1,
-            method: SamplingMethod::VerifyGreedy,
-        });
+            rng: r9v_ir::RngAlgorithm::Philox4x32,
+        }));
         let k7 = VariantKey::new(
             OpId::Sample,
             arch.clone(),
@@ -222,12 +283,17 @@ mod tests {
         assert_eq!(variant_hash(&k7), variant_hash(&k7));
         assert_ne!(static_hash(&samp_s), 0);
 
-        // 8. Collectives
-        let coll_s = OpStatic::Collectives(CollectivesStatic {
-            bytes_bucket: 1048576,
+        // 10. Collectives
+        let coll_s = OpStatic::Collectives(CollectivesStatic::AllReduce(AllReduceStatic {
+            group: 0,
+            rank: 0,
+            world: 1,
             dtype: DType::Bf16,
+            reduce_in: DType::F32,
+            reduction_op: r9v_ir::ReduceOp::Sum,
             transport: r9v_ir::P2pTransport::Direct,
-        });
+            bytes_bucket: 1048576,
+        }));
         let k8 = VariantKey::new(
             OpId::AllReduce,
             arch,
@@ -238,13 +304,15 @@ mod tests {
         assert_eq!(variant_hash(&k8), variant_hash(&k8));
         assert_ne!(static_hash(&coll_s), 0);
 
-        // All 8 hashes must be distinct
+        // All 10 hashes must be distinct
         let hashes = [
             k1.hash(),
             k2.hash(),
             k3.hash(),
             k4.hash(),
             k5.hash(),
+            k_route.hash(),
+            k_conv.hash(),
             k6.hash(),
             k7.hash(),
             k8.hash(),
@@ -258,12 +326,11 @@ mod tests {
 
     #[test]
     fn test_variant_key_serde_roundtrip() {
-        let op_s = OpStatic::Sampling(SamplingStatic {
+        let op_s = OpStatic::Sampling(SamplingStatic::Sample(SampleStatic {
             s_bucket: 4,
             v: 128000,
-            q_bucket: 4,
-            method: SamplingMethod::InverseCdfSample,
-        });
+            rng: r9v_ir::RngAlgorithm::Philox4x32,
+        }));
         let key = VariantKey::new(
             OpId::Sample,
             ArchName::from("gfx942"),
@@ -279,46 +346,109 @@ mod tests {
     }
 
     #[test]
-    fn test_sampling_method_closed_set_and_ieee_bit_preservation() {
+    fn test_new_statics_serde_roundtrip_and_hash_stable() {
+        let cases = [
+            OpStatic::MoeRoute(MoeRouteStatic {
+                t_bucket: 16,
+                e_total: 8,
+                top_k: 2,
+                scoring: r9v_ir::MoeScoring::Sigmoid,
+                renormalize: false,
+                group: Some(r9v_ir::MoeGroup {
+                    n_group: 2,
+                    topk_group: 1,
+                }),
+                scale_bits: 2.0f32.to_bits(),
+                has_bias: true,
+            }),
+            OpStatic::CausalConv1d(CausalConv1dStatic {
+                t_bucket: 8,
+                channels: 512,
+                kernel: 3,
+                act: r9v_ir::ConvActivation::Identity,
+                x_dtype: r9v_ir::DType::F32,
+                w_dtype: r9v_ir::DType::F32,
+                out_dtype: r9v_ir::DType::F32,
+                has_bias: true,
+            }),
+            OpStatic::Elementwise(ElementwiseStatic {
+                t_bucket: 8,
+                fused_with: None,
+                op_params: ElementwiseParams::Norm(NormStatic {
+                    kind: r9v_ir::NormKind::Layer,
+                    eps_bits: 1e-6f32.to_bits(),
+                    axis: r9v_ir::NormAxis::Head(8),
+                    weight_offset_bits: 1.0f32.to_bits(),
+                    in_dtype: r9v_ir::DType::F16,
+                    out_dtype: r9v_ir::DType::F16,
+                    n: 1024,
+                }),
+            }),
+            OpStatic::Sampling(SamplingStatic::Verify(VerifyStatic::typical(
+                2, 32000, 4, 0.05, 1.25, true,
+            ))),
+            OpStatic::Collectives(CollectivesStatic::Send(SendStatic {
+                group: 2,
+                rank: 1,
+                world: 4,
+                peer: 2,
+                dtype: r9v_ir::DType::F16,
+                transport: r9v_ir::P2pTransport::Direct,
+                bytes_bucket: 4096,
+            })),
+        ];
+
+        for op_s in cases {
+            let json = serde_json::to_string(&op_s).expect("static must serialize");
+            let back: OpStatic = serde_json::from_str(&json).expect("static must deserialize");
+            assert_eq!(op_s, back, "serde roundtrip must preserve {json}");
+            assert_eq!(
+                static_hash(&op_s),
+                static_hash(&back),
+                "hash must survive serde roundtrip"
+            );
+        }
+    }
+
+    #[test]
+    fn test_verify_method_closed_set_and_ieee_bit_preservation() {
         let eps = 0.05f32;
         let delta = 1.25f32;
-        let method = SamplingMethod::typical(eps, delta);
+        let method = VerifyMethodStatic::typical(eps, delta);
         assert_eq!(method.eps(), Some(eps));
         assert_eq!(method.delta(), Some(delta));
 
         // Slightly different delta must yield distinct static hash and variant hash
-        let method2 = SamplingMethod::typical(eps, 1.2500001f32);
+        let method2 = VerifyMethodStatic::typical(eps, 1.2500001f32);
         assert_ne!(method, method2);
 
-        let static1 = OpStatic::Sampling(SamplingStatic {
-            s_bucket: 2,
-            v: 32000,
-            q_bucket: 1,
-            method,
-        });
-        let static2 = OpStatic::Sampling(SamplingStatic {
-            s_bucket: 2,
-            v: 32000,
-            q_bucket: 1,
-            method: method2,
-        });
-        assert_ne!(static_hash(&static1), static_hash(&static2));
+        let mk = |m| {
+            OpStatic::Sampling(SamplingStatic::Verify(VerifyStatic {
+                s_bucket: 2,
+                v: 32000,
+                q_bucket: 1,
+                method: m,
+                tree: false,
+            }))
+        };
+        assert_ne!(static_hash(&mk(method)), static_hash(&mk(method2)));
 
-        // From VerifyMethod conversion
+        // From VerifyMethod conversion preserves bits
         let vm = r9v_ir::VerifyMethod::TypicalAcceptance { eps, delta };
-        let from_vm = SamplingMethod::from(&vm);
+        let from_vm = VerifyMethodStatic::from_ir(&vm);
         assert_eq!(from_vm, method);
+        assert_eq!(from_vm.to_ir(), vm);
 
         let vm_greedy = r9v_ir::VerifyMethod::Greedy;
         assert_eq!(
-            SamplingMethod::from(&vm_greedy),
-            SamplingMethod::VerifyGreedy
+            VerifyMethodStatic::from_ir(&vm_greedy),
+            VerifyMethodStatic::Greedy
         );
 
         let vm_rej = r9v_ir::VerifyMethod::Rejection;
         assert_eq!(
-            SamplingMethod::from(&vm_rej),
-            SamplingMethod::VerifyRejection
+            VerifyMethodStatic::from_ir(&vm_rej),
+            VerifyMethodStatic::Rejection
         );
     }
 }

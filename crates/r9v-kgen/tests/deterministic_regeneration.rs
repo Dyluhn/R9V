@@ -24,7 +24,7 @@ fn test_golden_variant_struct_names() {
         expected_matmul_name
     );
 
-    let moe_st = common::representative_moe_ffn_static();
+    let moe_st = common::representative_moe_route_static();
     let moe_hash = static_hash(&moe_st);
     let expected_moe_name = format!("moe_route_{:016x}_args", moe_hash);
     let moe_route_abi = abi_for_op(OpId::MoeRoute, &moe_st).expect("moe_route abi");
@@ -36,7 +36,7 @@ fn test_golden_variant_struct_names() {
     let attn_abi = abi_for_op(OpId::Attention, &attn_causal_st).expect("attention abi");
     assert_eq!(attn_abi.name(), expected_attn_name);
 
-    let rope_st = common::representative_elementwise_static();
+    let rope_st = common::representative_static_for_op(OpId::Rope);
     let rope_hash = static_hash(&rope_st);
     let expected_rope_name = format!("rope_{:016x}_args", rope_hash);
     let rope_abi = abi_for_op(OpId::Rope, &rope_st).expect("rope abi");
@@ -185,12 +185,32 @@ fn test_attention_batch_meta_exact_sets() {
         !tree_bm.contains(&BatchMetaField::WindowStart),
         "Tree attention must never contain WindowStart"
     );
+
+    // 4. Tree verify: SeqIds plus TreeParents, TreeAncestors; flat verify: SeqIds only.
+    let flat_st = common::representative_verify_static(false);
+    let flat_abi = abi_for_op(OpId::Verify, &flat_st).expect("flat verify");
+    assert_eq!(
+        flat_abi.batch_meta_fields(),
+        &[BatchMetaField::SeqIds],
+        "Flat verify must have exactly [SeqIds]"
+    );
+    let tree_verify_st = common::representative_verify_static(true);
+    let tree_verify_abi = abi_for_op(OpId::Verify, &tree_verify_st).expect("tree verify");
+    assert_eq!(
+        tree_verify_abi.batch_meta_fields(),
+        &[
+            BatchMetaField::SeqIds,
+            BatchMetaField::TreeParents,
+            BatchMetaField::TreeAncestors
+        ],
+        "Tree verify must have exactly [SeqIds, TreeParents, TreeAncestors]"
+    );
 }
 
 #[test]
 fn test_spec_dynamic_pointers_and_scalars() {
     // Rope: dynamic pointers are input, output, BatchMetaField::Positions. No sin_cos pointer!
-    let rope_st = common::representative_elementwise_static();
+    let rope_st = common::representative_static_for_op(OpId::Rope);
     let rope_abi = abi_for_op(OpId::Rope, &rope_st).expect("rope abi");
     assert!(
         rope_abi.field("sin_cos").is_none(),
@@ -208,7 +228,7 @@ fn test_spec_dynamic_pointers_and_scalars() {
 
     // MoeRoute: logits [T, E] f32, optional/nullable bias [E] f32, expert_ids [T, K] u32, weights [T, K] f32, scalar t.
     // No gate_weight pointer, no sort workspace.
-    let moe_st = common::representative_moe_ffn_static();
+    let moe_st = common::representative_moe_route_static();
     let route_abi = abi_for_op(OpId::MoeRoute, &moe_st).expect("moe_route abi");
     assert!(
         route_abi.field("gate_weight").is_none(),
@@ -229,13 +249,12 @@ fn test_spec_dynamic_pointers_and_scalars() {
     let route_t = route_abi.field("t").expect("MoeRoute scalar t");
     assert_eq!(route_t.role, FieldRole::DynamicScalar);
 
-    // Matmul: no runtime scalar dimensions in args (m_bucket, n, k are compile-time static constants).
+    // Matmul: M is dynamic (m <= m_bucket); N and K are compile-time static constants.
+    // Split-K partials workspace is part of the common matmul ABI.
     let matmul_st = common::representative_matmul_static();
     let matmul_abi = abi_for_op(OpId::Matmul, &matmul_st).expect("matmul abi");
-    assert!(
-        matmul_abi.field("m").is_none(),
-        "Matmul must not have runtime scalar m"
-    );
+    let matmul_m = matmul_abi.field("m").expect("Matmul dynamic scalar m");
+    assert_eq!(matmul_m.role, FieldRole::DynamicScalar);
     assert!(
         matmul_abi.field("n").is_none(),
         "Matmul must not have runtime scalar n"
@@ -243,6 +262,10 @@ fn test_spec_dynamic_pointers_and_scalars() {
     assert!(
         matmul_abi.field("k").is_none(),
         "Matmul must not have runtime scalar k"
+    );
+    assert!(
+        !matmul_abi.workspace_slots().is_empty(),
+        "Matmul must carry the common split-K partials workspace"
     );
 }
 
@@ -261,14 +284,26 @@ fn test_family_dispatch_and_adversarial_validation() {
     let kv_abi = abi(&kv_st).expect("state_write_kv dispatches directly");
     assert_eq!(kv_abi.op(), OpId::StateWriteKv);
 
+    let route_st = common::representative_moe_route_static();
+    let route_direct = abi(&route_st).expect("moe_route dispatches directly");
+    assert_eq!(route_direct.op(), OpId::MoeRoute);
+
+    let ffn_st = common::representative_moe_ffn_static();
+    let ffn_direct = abi(&ffn_st).expect("moe_ffn dispatches directly");
+    assert_eq!(ffn_direct.op(), OpId::MoeFfn);
+
+    let conv_st = common::representative_causal_conv1d_static();
+    let conv_direct = abi(&conv_st).expect("causal_conv1d dispatches directly");
+    assert_eq!(conv_direct.op(), OpId::CausalConv1d);
+
+    let scan_st = common::representative_linear_attn_scan_static();
+    let scan_direct = abi(&scan_st).expect("linear_attn_scan dispatches directly");
+    assert_eq!(scan_direct.op(), OpId::LinearAttnScan);
+
     // 2. Shared/ambiguous families fail closed with AmbiguousOpFamily
     let moe_st = common::representative_moe_ffn_static();
-    let err_moe = abi(&moe_st).unwrap_err();
-    assert!(
-        matches!(err_moe, KgenError::AmbiguousOpFamily { family, ref valid_ops } if family == "moe_ffn" && valid_ops.contains(&OpId::MoeRoute) && valid_ops.contains(&OpId::MoeFfn)),
-        "expected AmbiguousOpFamily for MoeFfn, got: {err_moe}"
-    );
-
+    // Exact 1:1 families (moe_ffn included) dispatch directly; only genuinely shared
+    // families (elementwise, sampling, collectives) stay ambiguous.
     let elem_st = common::representative_elementwise_static();
     let err_elem = abi(&elem_st).unwrap_err();
     assert!(
@@ -281,6 +316,23 @@ fn test_family_dispatch_and_adversarial_validation() {
     assert!(
         matches!(err_mismatch, KgenError::MismatchedOpFamily { op: OpId::Matmul, family } if family == "moe_ffn"),
         "expected MismatchedOpFamily, got: {err_mismatch}"
+    );
+
+    // 4. No family guessing: MoeRoute rejects MoeFfn statics and vice versa
+    let err_route_guess = abi_for_op(OpId::MoeRoute, &moe_st).unwrap_err();
+    assert!(
+        matches!(err_route_guess, KgenError::MismatchedOpFamily { op: OpId::MoeRoute, family } if family == "moe_ffn"),
+        "expected MismatchedOpFamily for guessed MoeRoute family, got: {err_route_guess}"
+    );
+    let err_ffn_guess = abi_for_op(OpId::MoeFfn, &route_st).unwrap_err();
+    assert!(
+        matches!(err_ffn_guess, KgenError::MismatchedOpFamily { op: OpId::MoeFfn, family } if family == "moe_route"),
+        "expected MismatchedOpFamily for guessed MoeFfn family, got: {err_ffn_guess}"
+    );
+    let err_conv_guess = abi_for_op(OpId::CausalConv1d, &scan_st).unwrap_err();
+    assert!(
+        matches!(err_conv_guess, KgenError::MismatchedOpFamily { op: OpId::CausalConv1d, family } if family == "linear_attn_scan"),
+        "expected MismatchedOpFamily for guessed CausalConv1d family, got: {err_conv_guess}"
     );
 }
 

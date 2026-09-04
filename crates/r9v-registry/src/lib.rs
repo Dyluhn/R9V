@@ -29,9 +29,16 @@ pub use r9v_ir::P2pTransport;
 pub use resolution::{JitProvider, Registry, RegistryConfig, ResolvedVariant};
 pub use tune::{TuneEntry, TuneFile, TuneMeasuredOn};
 pub use types::{
-    ArchName, ArtifactOrigin, AttentionStatic, CollectivesStatic, ElementwiseStatic,
-    LaunchGeometry, LinearAttnScanStatic, MatmulStatic, MoeFfnStatic, OpId, OpStatic,
-    PlacementKind, SamplingMethod, SamplingStatic, ScanMode, StateWriteKvStatic, Tier, TileConfig,
-    VariantHash,
+    ActMulStatic, ActivationStatic, AllGatherStatic, AllReduceStatic, AllToAllStatic, ArchName,
+    ArtifactOrigin, AttentionFacts, AttentionStatic, BarrierStatic, CastStatic, CausalConv1dFacts,
+    CausalConv1dStatic, CollectiveFacts, CollectivesStatic, ConcatStatic, CopyStatic,
+    ElementwiseFacts, ElementwiseParams, ElementwiseStatic, EmbedGatherStatic, GatherRowsStatic,
+    LaunchGeometry, LinearAttnScanFacts, LinearAttnScanStatic, LogitSoftcapStatic,
+    LogitsPostprocessStatic, MatmulFacts, MatmulStatic, MlaAttentionStatic, MlaLatentStatic,
+    MoeFfnFacts, MoeFfnStatic, MoeRouteFacts, MoeRouteStatic, NgramGatherStatic, NormStatic, OpId,
+    OpStatic, PlacementKind, QuantActStatic, RecvStatic, ReduceScatterStatic, ResidualAddStatic,
+    RopeScalingStatic, RopeStatic, SampleStatic, SamplingFacts, SamplingStatic, ScanMode,
+    ScatterAddRowsStatic, SendStatic, SplitStatic, StateWriteKvFacts, StateWriteKvStatic,
+    StaticFacts, Tier, TileConfig, VariantHash, VerifyMethodStatic, VerifyStatic,
 };
 pub use variant::{static_hash, variant_hash, VariantKey};

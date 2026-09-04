@@ -11,6 +11,20 @@ use serde::{Deserialize, Serialize};
 use crate::error::{RegistryError, Result};
 use crate::types::{ArchName, LaunchGeometry, OpId, Tier, VariantHash};
 
+impl ManifestVariantEntry {
+    /// Returns true when this entry may serve a request for `requested` (Spec 4 §9.2).
+    ///
+    /// Tagged entries match exactly; untagged entries (generic T1 fallbacks)
+    /// match any request. Lookup loops skip non-matching entries with this;
+    /// direct selection uses [`BundleManifest::check_entry_for`] for a typed error.
+    pub fn matches_request(&self, requested: OpId) -> bool {
+        match self.op {
+            Some(entry_op) => entry_op == requested,
+            None => true,
+        }
+    }
+}
+
 /// A single variant entry in the bundle manifest (Spec 4 §11).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 // DECISION(A3.1): ManifestVariantEntry explicitly stores typed target architecture arch: ArchName validated against manifest.archs and matched exactly during resolution; rejected implicit arch prefix inference from file path because path conventions are not globally constrained and per-variant hashes are irreversible xxh3_64 hashes. Spec 4 §9.2, §11.
@@ -368,6 +382,26 @@ impl BundleManifest {
     /// Looks up a variant entry by its [`VariantHash`].
     pub fn get_variant(&self, hash: VariantHash) -> Option<&ManifestVariantEntry> {
         self.variants.get(&hash.to_hex())
+    }
+
+    /// Checks a single manifest entry against a requested op with a typed error (Spec 4 §9.2).
+    ///
+    /// Entries carrying an op tag for a different op are rejected with
+    /// [`RegistryError::StaticOpMismatch`], never silently accepted. Untagged
+    /// entries (e.g. generic T1 fallbacks) pass. Lookup loops keep skipping
+    /// non-matching entries via [`ManifestVariantEntry::matches_request`];
+    /// this check guards direct single-entry selection paths.
+    pub fn check_entry_for(
+        entry: &ManifestVariantEntry,
+        requested: OpId,
+    ) -> Result<(), RegistryError> {
+        match entry.op {
+            Some(entry_op) if entry_op != requested => Err(RegistryError::StaticOpMismatch {
+                op: requested,
+                static_op: entry_op,
+            }),
+            _ => Ok(()),
+        }
     }
 
     /// Inserts or updates a variant entry in the manifest.

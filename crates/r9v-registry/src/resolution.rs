@@ -235,6 +235,10 @@ impl Registry {
         arch: &ArchName,
         op_static: &OpStatic,
     ) -> Result<ResolvedVariant> {
+        // Exact OpId-to-nested descriptor agreement: an OpId may never be paired
+        // with a wrong nested descriptor (Spec 4 §3). Typed error, never a panic.
+        op_static.check_pair(op)?;
+        op_static.validate()?;
         let shash = static_hash(op_static);
 
         // 1. Architecture validation (Spec 4 §9.2)
@@ -264,9 +268,11 @@ impl Registry {
             for (hash_str, entry) in &manifest.variants {
                 if entry.tier == Tier::T2
                     && entry.arch == *arch
-                    && entry.op == Some(op)
+                    && entry.matches_request(op)
                     && entry.static_hash == Some(shash)
                 {
+                    // Typed op-tag agreement on the selected entry (Spec 4 §3).
+                    BundleManifest::check_entry_for(entry, op)?;
                     // Spec 4 §9.3: An unvalidated variant is never selected.
                     if entry.validated {
                         let vhash = VariantHash::from_hex(hash_str).map_err(|e| {
@@ -357,6 +363,8 @@ impl Registry {
                     && (entry.static_hash == Some(shash) || entry.static_hash.is_none())
                     && entry.validated
                 {
+                    // Typed op-tag agreement on the selected entry (Spec 4 §3).
+                    BundleManifest::check_entry_for(entry, op)?;
                     let vhash = VariantHash::from_hex(hash_str).map_err(|e| {
                         RegistryError::ManifestParseError {
                             path: "variant_hash".to_owned(),

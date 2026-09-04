@@ -208,6 +208,149 @@ fn main() {
     Ok(out)
 }
 
+/// Collects the 32 closed-set ABI structs plus the tree verify variant shape.
+fn collect_abis() -> Vec<AbiStruct> {
+    let mut abis = Vec::new();
+    for op in common::ALL_32_OPS {
+        let st = common::representative_static_for_op(op);
+        abis.push(abi_for_op(op, &st).expect("representative ABI must construct"));
+    }
+    // The tree verify shape differs from flat verify; qualify its layout too.
+    let tree_st = common::representative_verify_static(true);
+    abis.push(
+        abi_for_op(r9v_registry::OpId::Verify, &tree_st).expect("tree verify ABI must construct"),
+    );
+    abis
+}
+
+fn scratch_dir() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("workspace root");
+    let dir = workspace_root.join("target/abi_test");
+    fs::create_dir_all(&dir).expect("failed to create scratch directory");
+    dir
+}
+
+/// Compiles the emitted Rust `#[repr(C)]` layout dump with rustc, runs it, and parses the JSON.
+fn rust_layout_dump(abis: &[AbiStruct], scratch_dir: &Path) -> LayoutDump {
+    let rust_source = generate_rust_dump_source(abis).expect("Rust dump generation");
+    let rust_file = scratch_dir.join("dump_rust_layout.rs");
+    fs::write(&rust_file, &rust_source).expect("failed to write dump_rust_layout.rs");
+
+    let rust_bin = scratch_dir.join("dump_rust_layout");
+    let rustc_status = Command::new("rustc")
+        .args([
+            "-O",
+            rust_file.to_str().unwrap(),
+            "-o",
+            rust_bin.to_str().unwrap(),
+        ])
+        .status()
+        .expect("failed to execute rustc");
+
+    assert!(rustc_status.success(), "rustc layout compilation failed");
+
+    let rust_out = Command::new(&rust_bin)
+        .output()
+        .expect("failed to run rust layout dump binary");
+    assert!(
+        rust_out.status.success(),
+        "rust layout dump binary failed: {}",
+        String::from_utf8_lossy(&rust_out.stderr)
+    );
+
+    let rust_stdout = String::from_utf8(rust_out.stdout).expect("valid utf8 rust dump");
+    let rust_dump: LayoutDump =
+        serde_json::from_str(&rust_stdout).expect("Rust dump binary must output valid JSON");
+
+    assert_eq!(
+        rust_dump.structs.len(),
+        33,
+        "Rust dump must contain all 32 closed-set operations plus tree verify"
+    );
+    rust_dump
+}
+
+/// Asserts exact layout equality between the AbiStruct oracle and one compiler dump.
+fn assert_oracle_matches_dump(abis: &[AbiStruct], dump: &LayoutDump, tag: &str) {
+    // 32 closed-set operations plus the tree verify variant (a 33rd struct shape).
+    assert_eq!(
+        dump.structs.len(),
+        33,
+        "{tag} dump must contain all 32 closed-set operations plus tree verify"
+    );
+    let structs_by_name: HashMap<&str, &StructDump> =
+        dump.structs.iter().map(|s| (s.name.as_str(), s)).collect();
+    for abi in abis {
+        let dumped = structs_by_name
+            .get(abi.name.as_str())
+            .unwrap_or_else(|| panic!("missing struct '{}' in {tag} dump", abi.name));
+
+        assert_eq!(
+            abi.size(),
+            dumped.size,
+            "Size mismatch for struct '{}': oracle = {}, {tag} = {}",
+            abi.name,
+            abi.size(),
+            dumped.size
+        );
+        assert_eq!(
+            abi.alignment(),
+            dumped.align,
+            "Alignment mismatch for struct '{}': oracle = {}, {tag} = {}",
+            abi.name,
+            abi.alignment(),
+            dumped.align
+        );
+        assert_eq!(
+            abi.fields().len(),
+            dumped.fields.len(),
+            "Field count mismatch for struct '{}': oracle = {}, {tag} = {}",
+            abi.name,
+            abi.fields().len(),
+            dumped.fields.len()
+        );
+        for (idx, field) in abi.fields().iter().enumerate() {
+            let dumped_field = &dumped.fields[idx];
+            assert_eq!(
+                field.name, dumped_field.name,
+                "Field name mismatch in struct '{}' at index {}: oracle = {}, {tag} = {}",
+                abi.name, idx, field.name, dumped_field.name
+            );
+            assert_eq!(
+                field.offset(),
+                dumped_field.offset,
+                "Field offset mismatch in struct '{}' for '{}': oracle = {}, {tag} = {}",
+                abi.name,
+                field.name,
+                field.offset(),
+                dumped_field.offset
+            );
+            assert_eq!(
+                field.size(),
+                dumped_field.size,
+                "Field size mismatch in struct '{}' for '{}': oracle = {}, {tag} = {}",
+                abi.name,
+                field.name,
+                field.size(),
+                dumped_field.size
+            );
+        }
+    }
+}
+
+/// Rust-side oracle/layout checks: always run, never skipped (Spec 4 §7).
+#[test]
+fn test_rust_oracle_layout_equality() {
+    let abis = collect_abis();
+    let dir = scratch_dir();
+    let rust_dump = rust_layout_dump(&abis, &dir);
+    assert_oracle_matches_dump(&abis, &rust_dump, "Rust");
+}
+
 #[test]
 fn test_pinned_rocm_compile_and_layout_equality() {
     let require_compile = std::env::var("R9V_REQUIRE_ROCM_COMPILE").as_deref() == Ok("1");
@@ -237,25 +380,20 @@ fn test_pinned_rocm_compile_and_layout_equality() {
         .and_then(|p| p.parent())
         .expect("workspace root");
 
-    let scratch_dir = workspace_root.join("target/abi_test");
-    fs::create_dir_all(&scratch_dir).expect("failed to create scratch directory");
+    let scratch = scratch_dir();
 
-    let mut abis = Vec::new();
-    for op in common::ALL_32_OPS {
-        let st = common::representative_static_for_op(op);
-        abis.push(abi_for_op(op, &st).expect("representative ABI must construct"));
-    }
+    let abis = collect_abis();
 
     // 1. Emit and compile HIP header
     let hip_header = emit_all_hip_header(&abis).expect("HIP header emission");
-    let header_path = scratch_dir.join("r9v_abi.h");
+    let header_path = scratch.join("r9v_abi.h");
     fs::write(&header_path, &hip_header).expect("failed to write r9v_abi.h");
 
     let cpp_source = generate_cpp_dump_source(&abis, &header_path);
-    let cpp_file = scratch_dir.join("dump_layout.cpp");
+    let cpp_file = scratch.join("dump_layout.cpp");
     fs::write(&cpp_file, &cpp_source).expect("failed to write dump_layout.cpp");
 
-    let bin_file = scratch_dir.join("dump_layout");
+    let bin_file = scratch.join("dump_layout");
 
     let hip_stdout = match toolchain {
         Toolchain::HostClang {
@@ -332,167 +470,7 @@ fn test_pinned_rocm_compile_and_layout_equality() {
     let hip_dump: LayoutDump =
         serde_json::from_str(&hip_stdout).expect("HIP dump binary must output valid JSON");
 
-    assert_eq!(
-        hip_dump.structs.len(),
-        32,
-        "HIP dump must contain all 32 closed-set operations"
-    );
-
-    // 2. Emit and compile Rust binary via rustc
-    let rust_source = generate_rust_dump_source(&abis).expect("Rust dump generation");
-    let rust_file = scratch_dir.join("dump_rust_layout.rs");
-    fs::write(&rust_file, &rust_source).expect("failed to write dump_rust_layout.rs");
-
-    let rust_bin = scratch_dir.join("dump_rust_layout");
-    let rustc_status = Command::new("rustc")
-        .args([
-            "-O",
-            rust_file.to_str().unwrap(),
-            "-o",
-            rust_bin.to_str().unwrap(),
-        ])
-        .status()
-        .expect("failed to execute rustc");
-
-    assert!(rustc_status.success(), "rustc layout compilation failed");
-
-    let rust_out = Command::new(&rust_bin)
-        .output()
-        .expect("failed to run rust layout dump binary");
-    assert!(
-        rust_out.status.success(),
-        "rust layout dump binary failed: {}",
-        String::from_utf8_lossy(&rust_out.stderr)
-    );
-
-    let rust_stdout = String::from_utf8(rust_out.stdout).expect("valid utf8 rust dump");
-    let rust_dump: LayoutDump =
-        serde_json::from_str(&rust_stdout).expect("Rust dump binary must output valid JSON");
-
-    assert_eq!(
-        rust_dump.structs.len(),
-        32,
-        "Rust dump must contain all 32 closed-set operations"
-    );
-
-    let hip_structs_by_name: HashMap<&str, &StructDump> = hip_dump
-        .structs
-        .iter()
-        .map(|s| (s.name.as_str(), s))
-        .collect();
-    let rust_structs_by_name: HashMap<&str, &StructDump> = rust_dump
-        .structs
-        .iter()
-        .map(|s| (s.name.as_str(), s))
-        .collect();
-
-    // 3. Assert exact 3-way layout equality: AbiStruct oracle == HIP compiler == Rust compiler
-    for abi in &abis {
-        let hip_struct = hip_structs_by_name
-            .get(abi.name.as_str())
-            .unwrap_or_else(|| panic!("missing struct '{}' in HIP dump", abi.name));
-        let rust_struct = rust_structs_by_name
-            .get(abi.name.as_str())
-            .unwrap_or_else(|| panic!("missing struct '{}' in Rust dump", abi.name));
-
-        // Size check across oracle, HIP, and Rust
-        assert_eq!(
-            abi.size(),
-            hip_struct.size,
-            "Size mismatch for struct '{}': oracle = {}, HIP = {}",
-            abi.name,
-            abi.size(),
-            hip_struct.size
-        );
-        assert_eq!(
-            abi.size(),
-            rust_struct.size,
-            "Size mismatch for struct '{}': oracle = {}, Rust = {}",
-            abi.name,
-            abi.size(),
-            rust_struct.size
-        );
-
-        // Alignment check across oracle, HIP, and Rust
-        assert_eq!(
-            abi.alignment(),
-            hip_struct.align,
-            "Alignment mismatch for struct '{}': oracle = {}, HIP = {}",
-            abi.name,
-            abi.alignment(),
-            hip_struct.align
-        );
-        assert_eq!(
-            abi.alignment(),
-            rust_struct.align,
-            "Alignment mismatch for struct '{}': oracle = {}, Rust = {}",
-            abi.name,
-            abi.alignment(),
-            rust_struct.align
-        );
-
-        // Field count check
-        assert_eq!(
-            abi.fields().len(),
-            hip_struct.fields.len(),
-            "Field count mismatch for struct '{}': oracle = {}, HIP = {}",
-            abi.name,
-            abi.fields().len(),
-            hip_struct.fields.len()
-        );
-        assert_eq!(
-            abi.fields().len(),
-            rust_struct.fields.len(),
-            "Field count mismatch for struct '{}': oracle = {}, Rust = {}",
-            abi.name,
-            abi.fields().len(),
-            rust_struct.fields.len()
-        );
-
-        // Per-field checks
-        for (idx, field) in abi.fields().iter().enumerate() {
-            let hip_field = &hip_struct.fields[idx];
-            let rust_field = &rust_struct.fields[idx];
-
-            assert_eq!(
-                field.name, hip_field.name,
-                "Field name mismatch in struct '{}' at index {}: oracle = {}, HIP = {}",
-                abi.name, idx, field.name, hip_field.name
-            );
-            assert_eq!(
-                field.name, rust_field.name,
-                "Field name mismatch in struct '{}' at index {}: oracle = {}, Rust = {}",
-                abi.name, idx, field.name, rust_field.name
-            );
-
-            assert_eq!(
-                field.offset(),
-                hip_field.offset,
-                "Field offset mismatch in struct '{}' for '{}': oracle = {}, HIP = {}",
-                abi.name,
-                field.name,
-                field.offset(),
-                hip_field.offset
-            );
-            assert_eq!(
-                field.offset(),
-                rust_field.offset,
-                "Field offset mismatch in struct '{}' for '{}': oracle = {}, Rust = {}",
-                abi.name,
-                field.name,
-                field.offset(),
-                rust_field.offset
-            );
-
-            assert_eq!(
-                field.size(),
-                hip_field.size,
-                "Field size mismatch in struct '{}' for '{}': oracle = {}, HIP = {}",
-                abi.name,
-                field.name,
-                field.size(),
-                hip_field.size
-            );
-        }
-    }
+    // Oracle vs HIP compiler equality (oracle vs Rust is covered without skipping
+    // by test_rust_oracle_layout_equality above).
+    assert_oracle_matches_dump(&abis, &hip_dump, "HIP");
 }

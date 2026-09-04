@@ -35,6 +35,15 @@ pub enum KgenError {
         family: &'static str,
     },
 
+    /// An operation was paired with a nested descriptor built for a different op (Spec 4 §3, §7).
+    #[error("operation '{op}' paired with nested descriptor built for '{static_op}': OpId-to-nested descriptor agreement violated")]
+    NestedOpMismatch {
+        /// Requested operation identifier.
+        op: OpId,
+        /// Operation identifier the nested descriptor was built for.
+        static_op: OpId,
+    },
+
     /// A shared static parameter family cannot determine OpId without explicit OpId (Spec 4 §4.1).
     #[error("ambiguous op family '{family}': cannot determine OpId without explicit OpId; valid ops are: {valid_ops:?}")]
     AmbiguousOpFamily {

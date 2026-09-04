@@ -10,8 +10,8 @@ use r9v_registry::{
     BundleManifest, CollectivesStatic, ElementwiseStatic, LaunchEntry, LaunchGeometry, LaunchList,
     LaunchRecord, LinearAttnScanStatic, ManifestVariantEntry, MatmulStatic, MoeFfnStatic, OpId,
     OpStatic, PlacementKind, Registry, RegistryConfig, RegistryError, ResolvedVariant,
-    SamplingMethod, SamplingStatic, ScanMode, StateWriteKvStatic, StubDevice, Tier, TileConfig,
-    TuneEntry, TuneFile, TuneMeasuredOn, VariantHash, VariantKey,
+    SamplingStatic, ScanMode, StateWriteKvStatic, StubDevice, Tier, TileConfig, TuneEntry,
+    TuneFile, TuneMeasuredOn, VariantHash, VariantKey, VerifyMethodStatic,
 };
 
 fn assert_send<T: Send>() {}
@@ -176,11 +176,11 @@ fn api_shape_trait_bounds() {
     assert_clone::<PlacementKind>();
     assert_hash::<PlacementKind>();
 
-    assert_send::<SamplingMethod>();
-    assert_sync::<SamplingMethod>();
-    assert_copy::<SamplingMethod>();
-    assert_clone::<SamplingMethod>();
-    assert_hash::<SamplingMethod>();
+    assert_send::<VerifyMethodStatic>();
+    assert_sync::<VerifyMethodStatic>();
+    assert_copy::<VerifyMethodStatic>();
+    assert_clone::<VerifyMethodStatic>();
+    assert_hash::<VerifyMethodStatic>();
 
     // Error
     assert_send::<RegistryError>();
@@ -195,11 +195,14 @@ fn api_function_signatures() {
         m_bucket: 128,
         n: 128,
         k: 64,
+        w_dtype: r9v_ir::DType::F16,
         w_scheme: r9v_ir::QuantScheme::None,
         w_layout: r9v_ir::LayoutId::CONTIGUOUS,
+        in_dtype: r9v_ir::DType::F16,
         act_scheme: r9v_ir::QuantScheme::None,
         out_dtype: r9v_ir::DType::F16,
         epilogue: r9v_ir::Epilogue::None,
+        transpose_w: false,
         interleave: false,
         sparse: false,
     });

@@ -122,6 +122,24 @@ pub enum RegistryError {
         problems: Vec<String>,
     },
 
+    /// An `OpId` was paired with a static descriptor built for a different op (Spec 4 §3).
+    #[error("operation '{op}' paired with static descriptor built for '{static_op}': OpId-to-nested descriptor agreement violated")]
+    StaticOpMismatch {
+        /// Requested operation identifier.
+        op: OpId,
+        /// Operation identifier the static descriptor was built for.
+        static_op: OpId,
+    },
+
+    /// Closed resolved facts do not match the `r9v_ir::Op` they were supplied with (Spec 4 §3).
+    #[error("resolved facts do not match op '{op}': {detail}")]
+    FactsOpMismatch {
+        /// Operation identifier of the IR op.
+        op: OpId,
+        /// What mismatched.
+        detail: String,
+    },
+
     /// Concurrency lock poisoned (CONVENTIONS.md §1.5).
     #[error("concurrency lock poisoned: {resource}")]
     LockPoisoned {
