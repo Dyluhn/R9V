@@ -4,9 +4,13 @@
 //! token file, runs one prefill step on the CPU T0 device, and writes the
 //! `[T, V]` f32 logits as a NumPy `.npy` file (v1.0, C order, `<f4`).
 //!
-//! The JSON model file is the interim A1.12 vehicle: the GGUF loader path
-//! (cards A2.5–A2.6) does not exist yet, so `eval` cannot consume real
-//! checkpoints. Recorded as SI-63; see module docs on the file format.
+//! The JSON model file is the interim SI-63 vehicle (cards A1.12/A1.13):
+//! A2.6 is not a card dependency, and metadata parsing alone, whenever
+//! integrated, is insufficient — payload materialization plus the
+//! loader-to-T0 executor bridge are A2.7/A2.8 seams — so `eval` cannot
+//! consume real GGUF checkpoints yet and SI-63 model.json remains the
+//! milestone vehicle. Direct GGUF engine execution supersedes this vehicle
+//! when those stages land.
 
 use std::fs;
 use std::path::{Path, PathBuf};

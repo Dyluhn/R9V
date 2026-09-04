@@ -1,2 +1,11 @@
 pytest==9.1.1
 ruff==0.16.5
+# A1.13 torch-match test (spec 8 §8, spec 13 §12): deterministic fixture
+# generation (numpy/gguf/xxhash) plus the torch reference forward. torch is
+# pinned to the CPU build (+cpu local version, CPU wheel index) so hosted CI
+# stays on a ~200 MB wheel instead of the CUDA bundle.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.4.6
+gguf==0.19.0
+xxhash==4.0.1
+torch==2.9.1+cpu

@@ -246,6 +246,14 @@ pub struct TinyModel {
     pub graph: Graph,
     /// `(edge, buffer)` weight and parameter bindings.
     pub weights: Vec<(EdgeId, TypedBuffer)>,
+    /// Canonical synthetic weight name per `(edge, buffer)` binding, in the
+    /// same order (Spec 8 §3, Card A1.12; A1.13 identity binding).
+    ///
+    /// Populated atomically with [`weights`](Self::weights) inside the
+    /// `add_weight`/`add_param` helpers below, so `weight_names[i].0` is
+    /// always the edge of `weights[i].0` and `weight_names[i].1` is its
+    /// canonical name (`"embed"`, `"l{layer}_wq"`, …, `"lm_head"`).
+    pub weight_names: Vec<(EdgeId, String)>,
     /// Per-step token-ids edge (`[T]` u32).
     pub token_edge: EdgeId,
     /// Per-step rope-positions edge (`[T]` u32, scalar projection).
@@ -265,6 +273,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
     let key = StepGraphKey::from_unbucketed(r9v_ir::graph::PlanId::new(0xA112), 0, 1, 1, 0, 0)?;
     let mut graph = Graph::new(key);
     let mut weights: Vec<(EdgeId, TypedBuffer)> = Vec::new();
+    let mut weight_names: Vec<(EdgeId, String)> = Vec::new();
     let mut handles = Vec::new();
 
     let token_edge = graph.add_external_input(
@@ -277,6 +286,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
     let embed_edge = add_weight(
         &mut graph,
         &mut weights,
+        &mut weight_names,
         "embed",
         spec.seed,
         vec![spec.vocab as usize, spec.dim as usize],
@@ -305,13 +315,14 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
     })?;
 
     for layer in 0..spec.layers {
-        x = build_layer(&mut graph, &mut weights, spec, layer, x)?;
+        x = build_layer(&mut graph, &mut weights, &mut weight_names, spec, layer, x)?;
         handles.push(StateHandle::new(layer, StateKind::KvPaged));
     }
 
     let norm_w = add_param(
         &mut graph,
         &mut weights,
+        &mut weight_names,
         "final_norm",
         spec.seed,
         vec![spec.dim as usize],
@@ -335,6 +346,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
     let head_w = add_weight(
         &mut graph,
         &mut weights,
+        &mut weight_names,
         "lm_head",
         spec.seed,
         vec![spec.vocab as usize, spec.dim as usize],
@@ -361,6 +373,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
         spec: *spec,
         graph,
         weights,
+        weight_names,
         token_edge,
         positions_edge,
         logits_edge,
@@ -373,6 +386,7 @@ pub fn build(spec: &SyntheticSpec) -> Result<TinyModel, ExecError> {
 fn build_layer(
     graph: &mut Graph,
     weights: &mut Vec<(EdgeId, TypedBuffer)>,
+    weight_names: &mut Vec<(EdgeId, String)>,
     spec: &SyntheticSpec,
     layer: u32,
     x: EdgeId,
@@ -401,6 +415,7 @@ fn build_layer(
     let norm_w = add_param(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_attn_norm"),
         spec.seed,
         vec![spec.dim as usize],
@@ -416,6 +431,7 @@ fn build_layer(
     let wq = add_weight(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_wq"),
         spec.seed,
         vec![hd as usize, spec.dim as usize],
@@ -423,6 +439,7 @@ fn build_layer(
     let wk = add_weight(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_wk"),
         spec.seed,
         vec![hkv_d as usize, spec.dim as usize],
@@ -430,6 +447,7 @@ fn build_layer(
     let wv = add_weight(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_wv"),
         spec.seed,
         vec![hkv_d as usize, spec.dim as usize],
@@ -541,6 +559,7 @@ fn build_layer(
     let wo = add_weight(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_wo"),
         spec.seed,
         vec![spec.dim as usize, hd as usize],
@@ -564,6 +583,7 @@ fn build_layer(
     let ffn_norm_w = add_param(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_ffn_norm"),
         spec.seed,
         vec![spec.dim as usize],
@@ -577,6 +597,7 @@ fn build_layer(
     let wg = add_weight(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_wg"),
         spec.seed,
         vec![spec.ff as usize, spec.dim as usize],
@@ -584,6 +605,7 @@ fn build_layer(
     let wu = add_weight(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_wu"),
         spec.seed,
         vec![spec.ff as usize, spec.dim as usize],
@@ -612,6 +634,7 @@ fn build_layer(
     let wd = add_weight(
         graph,
         weights,
+        weight_names,
         &format!("{tag}_wd"),
         spec.seed,
         vec![spec.dim as usize, spec.ff as usize],
@@ -720,10 +743,14 @@ fn reshape(graph: &mut Graph, edge: EdgeId, shape: Vec<Dim>) -> Result<EdgeId, E
 /// Adds a seeded F16 weight matrix and returns its edge.
 ///
 /// Tables are byte-backed LE (the T0 table convention: `embed_gather` and
-/// quantized GEMM paths read raw bytes, not typed slices).
+/// quantized GEMM paths read raw bytes, not typed slices). Records the
+/// canonical `(edge, name)` binding in `weight_names` atomically with the
+/// `(edge, buffer)` push, so production identity never depends on call order
+/// observed from outside.
 fn add_weight(
     graph: &mut Graph,
     weights: &mut Vec<(EdgeId, TypedBuffer)>,
+    weight_names: &mut Vec<(EdgeId, String)>,
     name: &str,
     seed: u64,
     shape: Vec<usize>,
@@ -751,13 +778,18 @@ fn add_weight(
     }
     let edge = graph.add_tensor(weight_tensor(&shape)?)?;
     weights.push((edge, TypedBuffer::from_bytes(&shape, DType::F16, &bytes)));
+    weight_names.push((edge, name.to_owned()));
     Ok(edge)
 }
 
 /// Adds a seeded F32 parameter vector (norm weights around 1.0).
+///
+/// Like [`add_weight`](self::add_weight), records the canonical
+/// `(edge, name)` binding atomically with the buffer push.
 fn add_param(
     graph: &mut Graph,
     weights: &mut Vec<(EdgeId, TypedBuffer)>,
+    weight_names: &mut Vec<(EdgeId, String)>,
     name: &str,
     seed: u64,
     shape: Vec<usize>,
@@ -781,6 +813,7 @@ fn add_param(
     let values = uniform_f32(&mut rng, len, 0.5, 1.5);
     let edge = graph.add_tensor(param_tensor(&shape)?)?;
     weights.push((edge, TypedBuffer::from_f32(&shape, &values)));
+    weight_names.push((edge, name.to_owned()));
     Ok(edge)
 }
 

@@ -13,3 +13,8 @@ r9v-format = { path = "../r9v-format" }
 r9v-ir = { path = "../r9v-ir" }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
+
+[dev-dependencies]
+# A1.13 standard-fixture fingerprint test only: reads the pytest-generated
+# model.json (already locked at serde_json 1.0.151 via the r9v crate).
+serde_json = "1.0"

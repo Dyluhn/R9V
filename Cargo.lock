@@ -245,6 +245,7 @@ dependencies = [
  "r9v-format",
  "r9v-ir",
  "serde",
+ "serde_json",
  "thiserror",
 ]
 
