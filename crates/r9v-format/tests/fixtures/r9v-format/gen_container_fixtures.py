@@ -7,13 +7,15 @@ network) via ``python3 gen_container_fixtures.py`` from this
 directory. Tensor payloads are seeded numpy bytes cut to the exact
 gguf-py ``GGML_QUANT_SIZES`` wire length, so the files exercise the
 reader/writer layout without claiming real quantized values. The
-``llama_vocab_bert_bge.gguf`` fixture alongside these is, in
-contrast, a genuine llama.cpp-produced file (see card.md).
+The ``llama_vocab_bert_bge.gguf`` and ``llama_tiny_q80.hex`` fixtures
+alongside these are, in contrast, genuine llama.cpp-produced files
+(the latter generated via ``llama-quantize`` with 4 tensors).
 
 Outputs (all small, committed as hex text; *.gguf binaries are git-ignored):
   a25_standard.hex           standard GGUF, 12 tensors, all 13 KV types
   a25_split-00001-of-00002.hex / a25_split-00002-of-00002.hex
                              two-shard split with split.* keys
+  llama_tiny_q80.hex         genuine llama.cpp llama-quantize model with 4 tensors
 """
 
 from __future__ import annotations

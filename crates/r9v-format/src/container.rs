@@ -1065,47 +1065,12 @@ impl GgufFile {
         // alignment itself failed, so one bad file reports everything.
         let mut spans: Vec<(u64, u64, usize)> = Vec::new();
         for (index, tensor) in self.tensors.iter().enumerate() {
-            let nbytes = match tensor.dtype.data_nbytes(&tensor.dims) {
-                Some(n) => n,
-                None => match tensor.dtype {
-                    // Native entries are sized by entry_regions from
-                    // the r9v.* metadata, not the wire table (Spec 2
-                    // §6); overlap checks for them belong to the
-                    // loader's region validation, so parsing skips
-                    // them here without complaint.
-                    TensorType::R9v(_) => continue,
-                    TensorType::Unknown(code) => {
-                        problems.push(FormatError::UnknownTensorType {
-                            code,
-                            tensor: tensor.name.clone(),
-                        });
-                        continue;
-                    }
-                    _ => {
-                        if tensor.dtype.quant_size().is_none() {
-                            problems.push(FormatError::Malformed {
-                                offset: 0,
-                                detail: format!(
-                                    "tensor {:?} ({}): no wire block size is known",
-                                    tensor.name,
-                                    tensor.dtype.name(),
-                                ),
-                            });
-                        } else {
-                            let elems = tensor.n_elems().unwrap_or(u64::MAX);
-                            problems.push(FormatError::Malformed {
-                                offset: 0,
-                                detail: format!(
-                                    "tensor {:?} ({}): {} element(s) are not a whole number of blocks",
-                                    tensor.name,
-                                    tensor.dtype.name(),
-                                    elems,
-                                ),
-                            });
-                        }
-                        continue;
-                    }
-                },
+            let nbytes = match self.tensor_nbytes(tensor) {
+                Ok(n) => n,
+                Err(e) => {
+                    problems.push(e);
+                    continue;
+                }
             };
             let start = match self.data_start.checked_add(tensor.offset) {
                 Some(s) => s,
@@ -1224,41 +1189,120 @@ impl GgufFile {
         self.ti_range
     }
 
+    // DECISION(A2.5): native R9V tensor entry sizes in the container are
+    // derived via entry_regions from the tensor's scheme, layout, and dims;
+    // rejected leaving R9V tensors unsized because per-entry xxh3 validation
+    // (Spec 2 §10) and container bounds/overlap checks require entry slicing.
+    // Spec 2 §6, §10; card A2.5.
+    /// Returns the byte length of one tensor entry (Spec 2 §6, §10; card A2.5).
+    ///
+    /// For standard wire types, size is derived from wire block size
+    /// and dimensions. For native R9V types, size is derived from
+    /// [`entry_regions`] using the tensor's scheme, layout, and shape.
+    pub fn tensor_nbytes(&self, info: &TensorInfo) -> Result<u64, FormatError> {
+        match info.dtype {
+            TensorType::Unknown(code) => Err(FormatError::UnknownTensorType {
+                code,
+                tensor: info.name.clone(),
+            }),
+            TensorType::R9v(r9v_type) => {
+                if info.dims.is_empty() {
+                    return Err(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!("tensor {:?} has zero dimensions", info.name),
+                    });
+                }
+                let k = u32::try_from(info.dims[0]).map_err(|_| FormatError::Overflow {
+                    what: "tensor k dim",
+                    detail: format!("tensor {:?} dim[0]={}", info.name, info.dims[0]),
+                })?;
+                let n = if info.dims.len() == 1 {
+                    1u32
+                } else {
+                    let mut prod: u64 = 1;
+                    for d in &info.dims[1..] {
+                        prod = prod.checked_mul(*d).ok_or_else(|| FormatError::Overflow {
+                            what: "tensor n dims product",
+                            detail: format!("tensor {:?}", info.name),
+                        })?;
+                    }
+                    u32::try_from(prod).map_err(|_| FormatError::Overflow {
+                        what: "tensor n dim",
+                        detail: format!("tensor {:?} product={prod}", info.name),
+                    })?
+                };
+
+                let sparse_key = format!("r9v.tensor.{}.sparse", info.name);
+                let is_sparse = matches!(self.kv(&sparse_key), Some(KvValue::Str(s)) if s == "s24");
+
+                let roles_key = format!("r9v.tensor.{}.roles", info.name);
+                let is_l0_role = matches!(
+                    self.kv(&roles_key),
+                    Some(KvValue::Array { items, .. })
+                        if items.iter().any(|it| {
+                            matches!(
+                                it,
+                                KvValue::Str(s)
+                                    if s == "vector" || s == "embed" || s == "ngram_table"
+                            )
+                        })
+                );
+
+                let layout = if is_sparse {
+                    crate::Layout::L1S
+                } else if is_l0_role {
+                    crate::Layout::L0
+                } else if let Some(KvValue::Str(s)) = self.kv("r9v.layout_id") {
+                    match s.to_ascii_lowercase().as_str() {
+                        "l0" => crate::Layout::L0,
+                        "l1s" => crate::Layout::L1S,
+                        _ => crate::Layout::L1,
+                    }
+                } else if info.dims.len() == 1 {
+                    crate::Layout::L0
+                } else {
+                    crate::Layout::L1
+                };
+
+                let regions = entry_regions(r9v_type.scheme(), layout, n, k)?;
+                Ok(regions.entry_bytes)
+            }
+            _ => {
+                if let Some(nbytes) = info.dtype.data_nbytes(&info.dims) {
+                    Ok(nbytes)
+                } else if info.dtype.quant_size().is_none() {
+                    Err(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!(
+                            "tensor {:?} ({}): no wire block size is known",
+                            info.name,
+                            info.dtype.name(),
+                        ),
+                    })
+                } else {
+                    let elems = info.n_elems().unwrap_or(u64::MAX);
+                    Err(FormatError::Malformed {
+                        offset: 0,
+                        detail: format!(
+                            "tensor {:?} ({}): {} element(s) are not a whole number of blocks",
+                            info.name,
+                            info.dtype.name(),
+                            elems,
+                        ),
+                    })
+                }
+            }
+        }
+    }
+
     /// Slices one tensor's data from `bytes` (the same buffer that
     /// was parsed) with checked bounds (Spec 2 §6; card A2.5).
-    ///
-    /// R9V-typed and unknown-typed tensors fail closed naming the
-    /// type, per [`TensorType::data_nbytes`].
     pub fn tensor_bytes<'a>(&self, name: &str, bytes: &'a [u8]) -> Result<&'a [u8], FormatError> {
         let info = self.tensor(name).ok_or_else(|| FormatError::Malformed {
             offset: 0,
             detail: format!("no tensor named {name:?} in this shard"),
         })?;
-        let nbytes = info
-            .dtype
-            .data_nbytes(&info.dims)
-            .ok_or_else(|| match info.dtype {
-                TensorType::Unknown(code) => FormatError::UnknownTensorType {
-                    code,
-                    tensor: info.name.clone(),
-                },
-                TensorType::R9v(_) => FormatError::Malformed {
-                    offset: 0,
-                    detail: format!(
-                        "tensor {:?} ({}): entry bytes come from entry_regions, not the wire table",
-                        info.name,
-                        info.dtype.name(),
-                    ),
-                },
-                _ => FormatError::Malformed {
-                    offset: 0,
-                    detail: format!(
-                        "tensor {:?} ({}): dims are not a whole number of wire blocks",
-                        info.name,
-                        info.dtype.name(),
-                    ),
-                },
-            })?;
+        let nbytes = self.tensor_nbytes(info)?;
         let start = self.data_start.checked_add(info.offset).ok_or_else(|| {
             FormatError::BadTensorRange {
                 name: info.name.clone(),

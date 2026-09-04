@@ -10,7 +10,9 @@
 //! - `llama_vocab_bert_bge.gguf`: genuine llama.cpp-produced vocab
 //!   file (llama.cpp `models/`, sha256
 //!   `fbcbe22278fb302694d5f4a41bfe48c5f90e8e3554eab1c0435387dff654a854`);
-//!   0 tensors, 23 metadata fields.
+//!   0 tensors, 20 metadata fields.
+//! - `llama_tiny_q80.hex`: genuine llama.cpp-produced quantized model
+//!   with tensor table (via `llama-quantize` Q8_0); 4 tensors, 15 metadata fields.
 
 use r9v_format::{
     accept_format_version, entry_regions, model_fp, parse_r9v_meta, r9v_tensor_type_id,
@@ -243,6 +245,83 @@ fn reads_real_llamacpp_vocab_metadata_and_empty_table() {
         }
         other => panic!("tokenizer.ggml.token_type: {other:?}"),
     }
+}
+
+#[test]
+fn reads_real_llamacpp_metadata_and_tensor_table() {
+    let bytes = fixture("llama_tiny_q80");
+    let file = GgufFile::parse(&bytes).expect("llama.cpp model with tensors parses");
+    assert_eq!(file.version(), 3);
+    assert_eq!(file.tensors().len(), 4);
+    assert!(file.is_standard_gguf());
+    assert_eq!(
+        file.kv("general.architecture"),
+        Some(&KvValue::Str("llama".to_owned()))
+    );
+    assert_eq!(
+        file.kv("general.name"),
+        Some(&KvValue::Str("tiny-llama".to_owned()))
+    );
+    assert_eq!(file.kv("llama.context_length"), Some(&KvValue::U32(32)));
+    assert_eq!(file.kv("llama.embedding_length"), Some(&KvValue::U32(32)));
+    assert_eq!(file.kv("llama.block_count"), Some(&KvValue::U32(1)));
+
+    assert_eq!(file.data_start(), 960);
+
+    // Verify all 4 tensors produced by llama-quantize
+    let out = file.tensor("output.weight").expect("output.weight");
+    assert_eq!(out.dtype, TensorType::Q8_0);
+    assert_eq!(out.dims, vec![32, 3]);
+    assert_eq!(out.offset, 0);
+    let out_bytes = file
+        .tensor_bytes("output.weight", &bytes)
+        .expect("output bytes");
+    assert_eq!(out_bytes.len(), 102);
+    let out_hash = file
+        .entry_xxh3("output.weight", &bytes)
+        .expect("output xxh3");
+    assert_eq!(out_hash, r9v_common::xxh3_64(out_bytes));
+
+    let embd = file.tensor("token_embd.weight").expect("token_embd.weight");
+    assert_eq!(embd.dtype, TensorType::Q8_0);
+    assert_eq!(embd.dims, vec![32, 3]);
+    assert_eq!(embd.offset, 128);
+    let embd_bytes = file
+        .tensor_bytes("token_embd.weight", &bytes)
+        .expect("embd bytes");
+    assert_eq!(embd_bytes.len(), 102);
+    let embd_hash = file
+        .entry_xxh3("token_embd.weight", &bytes)
+        .expect("embd xxh3");
+    assert_eq!(embd_hash, r9v_common::xxh3_64(embd_bytes));
+
+    let norm = file
+        .tensor("blk.0.attn_norm.weight")
+        .expect("attn_norm.weight");
+    assert_eq!(norm.dtype, TensorType::F32);
+    assert_eq!(norm.dims, vec![32]);
+    assert_eq!(norm.offset, 256);
+    let norm_bytes = file
+        .tensor_bytes("blk.0.attn_norm.weight", &bytes)
+        .expect("norm bytes");
+    assert_eq!(norm_bytes.len(), 128);
+    let norm_hash = file
+        .entry_xxh3("blk.0.attn_norm.weight", &bytes)
+        .expect("norm xxh3");
+    assert_eq!(norm_hash, r9v_common::xxh3_64(norm_bytes));
+
+    let q = file.tensor("blk.0.attn_q.weight").expect("attn_q.weight");
+    assert_eq!(q.dtype, TensorType::Q8_0);
+    assert_eq!(q.dims, vec![32, 32]);
+    assert_eq!(q.offset, 384);
+    let q_bytes = file
+        .tensor_bytes("blk.0.attn_q.weight", &bytes)
+        .expect("q bytes");
+    assert_eq!(q_bytes.len(), 1088);
+    let q_hash = file
+        .entry_xxh3("blk.0.attn_q.weight", &bytes)
+        .expect("q xxh3");
+    assert_eq!(q_hash, r9v_common::xxh3_64(q_bytes));
 }
 
 fn all_kv_values() -> Vec<(&'static str, KvValue)> {
@@ -512,10 +591,131 @@ fn native_file_round_trip_with_full_r9v_keys() {
     assert_eq!(tensor.eps_int4, Some(0.01));
 
     // Per-entry xxh3 in metadata matches the bytes on disk.
+    let entry_bytes = file
+        .tensor_bytes("blk.0.attn_q.weight", &bytes)
+        .expect("tensor bytes");
+    assert_eq!(entry_bytes.len(), 4096);
+    let computed_hash = file
+        .entry_xxh3("blk.0.attn_q.weight", &bytes)
+        .expect("entry xxh3");
+    assert_eq!(computed_hash, hashes[0]);
+    assert_eq!(Some(computed_hash), tensor.xxh3);
+
     let fp = file.file_fp(&bytes, 1);
     let model = model_fp(fp, &hashes);
     assert_eq!(model, model_fp(file.file_fp(&bytes, 1), &hashes));
     assert_ne!(model, fp);
+}
+
+#[test]
+fn writes_native_file_parsed_by_gguf_py_at_header_and_metadata_level() {
+    let (bytes, _) = native_test_bytes();
+    let temp_dir = std::env::temp_dir();
+    let file_path = temp_dir.join(format!("r9v_test_native_{}.gguf", std::process::id()));
+    std::fs::write(&file_path, &bytes).expect("write temp gguf");
+
+    let py_script = r#"
+import sys, gguf
+
+class NativeHeaderReader(gguf.GGUFReader):
+    def _build_tensors(self, start_offs: int, fields: list) -> None:
+        # Card A2.5: gguf-py parses native files at header and metadata level;
+        # R9V scheme type IDs (1000-1099) are outside gguf-py's GGML enum.
+        self.raw_tensor_fields = fields
+
+path = sys.argv[1]
+reader = NativeHeaderReader(path)
+arch = reader.fields['general.architecture'].parts[-1].tobytes().decode()
+assert arch == 'llama', f"unexpected arch: {arch}"
+align = reader.fields['general.alignment'].parts[-1][0]
+assert align == 4096, f"unexpected alignment: {align}"
+fmt_v = reader.fields['r9v.format_version'].parts[-1][0]
+assert fmt_v == 1, f"unexpected format_version: {fmt_v}"
+layout = reader.fields['r9v.layout_id'].parts[-1].tobytes().decode()
+assert layout == 'L1', f"unexpected layout: {layout}"
+scheme = reader.fields['r9v.tensor.blk.0.attn_q.weight.scheme'].parts[-1].tobytes().decode()
+assert scheme == 'i4_k', f"unexpected tensor scheme: {scheme}"
+assert len(reader.raw_tensor_fields) == 1, f"expected 1 tensor field, got {len(reader.raw_tensor_fields)}"
+tf = reader.raw_tensor_fields[0]
+name = str(bytes(tf.parts[1]), encoding='utf-8')
+assert name == 'blk.0.attn_q.weight', f"unexpected tensor name: {name}"
+dims = list(tf.parts[3])
+assert dims == [256, 16], f"unexpected tensor dims: {dims}"
+dtype = tf.parts[4][0]
+assert dtype == 1003, f"unexpected tensor dtype: {dtype}"
+"#;
+
+    let output = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(py_script)
+        .arg(&file_path)
+        .output();
+
+    let _ = std::fs::remove_file(&file_path);
+
+    let output = output.expect("python3 execution failed");
+    if !output.status.success() {
+        panic!(
+            "gguf-py reader validation failed:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn metadata_only_operations_do_not_read_tensor_payloads() {
+    let (orig_bytes, _) = native_test_bytes();
+    let orig_file = GgufFile::parse(&orig_bytes).expect("orig file parses");
+    let data_start = orig_file.data_start();
+    assert!(data_start < orig_bytes.len() as u64);
+
+    // Poison all tensor payload bytes in the data section
+    let mut poisoned = orig_bytes.clone();
+    for b in &mut poisoned[data_start as usize..] {
+        *b ^= 0xAA;
+    }
+
+    // Metadata parsing must succeed identically on the poisoned buffer
+    let poisoned_file = GgufFile::parse(&poisoned).expect("poisoned parse succeeds");
+    assert_eq!(poisoned_file.version(), orig_file.version());
+    assert_eq!(poisoned_file.alignment(), orig_file.alignment());
+    assert_eq!(poisoned_file.data_start(), orig_file.data_start());
+    assert_eq!(poisoned_file.kvs(), orig_file.kvs());
+    assert_eq!(poisoned_file.tensors(), orig_file.tensors());
+    assert_eq!(poisoned_file.header_range(), orig_file.header_range());
+    assert_eq!(poisoned_file.kv_range(), orig_file.kv_range());
+    assert_eq!(poisoned_file.ti_range(), orig_file.ti_range());
+
+    // File fingerprint (Spec 9 §3) covers header, table, metadata, size, shards;
+    // it never reads tensor payloads, so it must be identical.
+    assert_eq!(
+        poisoned_file.file_fp(&poisoned, 1),
+        orig_file.file_fp(&orig_bytes, 1)
+    );
+
+    // R9V metadata accessors never read tensor payloads
+    assert_eq!(
+        parse_r9v_meta(&poisoned_file).unwrap(),
+        parse_r9v_meta(&orig_file).unwrap()
+    );
+
+    // Conversely, payload-reading operations MUST observe the poisoned bytes
+    let orig_tensor_bytes = orig_file
+        .tensor_bytes("blk.0.attn_q.weight", &orig_bytes)
+        .expect("orig tensor bytes");
+    let poisoned_tensor_bytes = poisoned_file
+        .tensor_bytes("blk.0.attn_q.weight", &poisoned)
+        .expect("poisoned tensor bytes");
+    assert_ne!(orig_tensor_bytes, poisoned_tensor_bytes);
+    assert_ne!(
+        orig_file
+            .entry_xxh3("blk.0.attn_q.weight", &orig_bytes)
+            .unwrap(),
+        poisoned_file
+            .entry_xxh3("blk.0.attn_q.weight", &poisoned)
+            .unwrap()
+    );
 }
 
 #[test]
