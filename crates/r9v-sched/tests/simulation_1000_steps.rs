@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use r9v_common::{ReqId, SeqId};
+use r9v_common::{ReqId, SeqId, StepId};
 use r9v_ir::{AttentionMask, DType, Epilogue, LayoutId, PlanId, QuantScheme, SamplingParams};
 use r9v_registry::{
     ArchName, AttentionStatic, BundleManifest, ElementwiseStatic, LaunchGeometry, LaunchRecord,
@@ -191,6 +191,8 @@ struct SimStepExecutor<'d> {
     read_count: u32,
     last_seq: u64,
     last_prompt_len: u32,
+    last_step: u64,
+    last_prefill_is_intermediate: bool,
 }
 
 impl<'d> SimStepExecutor<'d> {
@@ -201,6 +203,8 @@ impl<'d> SimStepExecutor<'d> {
             read_count: 0,
             last_seq: 0,
             last_prompt_len: 0,
+            last_step: 0,
+            last_prefill_is_intermediate: false,
         }
     }
 }
@@ -209,6 +213,15 @@ impl StepExecutor for SimStepExecutor<'_> {
     fn upload_inputs(&mut self, input: &StepInputs<'_>) -> SchedResult<()> {
         self.last_seq = input.seq_id.as_u64();
         self.last_prompt_len = input.prompt_tokens.len() as u32;
+        self.last_step = input.step_id.as_u64();
+        // An intermediate prefill chunk leaves prompt tokens unprocessed, so
+        // the device reports no sampled token for it (Spec 6 §3.3 step 3).
+        self.last_prefill_is_intermediate = match input.prefill {
+            Some((done, chunk)) => {
+                (done as usize).saturating_add(chunk as usize) < input.prompt_tokens.len()
+            }
+            None => false,
+        };
         Ok(())
     }
     fn replay_graph(&mut self, graph: &CapturedGraph) -> SchedResult<()> {
@@ -218,13 +231,18 @@ impl StepExecutor for SimStepExecutor<'_> {
     fn readback_sample(&mut self) -> SchedResult<DeviceStepSample> {
         self.read_count = self.read_count.wrapping_add(1);
         Ok(DeviceStepSample {
+            step_id: StepId::new(self.last_step),
             token: sim_token(
                 self.last_seq,
                 self.last_prompt_len,
                 self.read_count,
                 self.vocab,
             ),
-            accept_len: 1,
+            accept_len: if self.last_prefill_is_intermediate {
+                0
+            } else {
+                1
+            },
         })
     }
 }

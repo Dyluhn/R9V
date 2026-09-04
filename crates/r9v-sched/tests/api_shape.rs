@@ -5,12 +5,13 @@ use std::error::Error;
 use std::fmt::Debug;
 
 use r9v_sched::{
-    ByteDetokenizer, CapturedGraph, CostTable, CostTableStub, Detokenizer, DeviceStepSample,
-    EventId, EventKind, FinishReason, GraphCache, GraphMode, InlineVec, ProfileMode, Request,
-    SchedError, ScheduleLogRing, ScheduleRecord, Scheduler, SchedulerConfig, Sequence,
-    SequencePhase, Step, StepBudgetConfig, StepEventChain, StepEventRecord, StepExecutor,
-    StepGraphProgram, StepInputs, StepProgramOp, StepResult, StopCriteria, StreamKind,
-    WorkspaceArena, DEFAULT_MAX_OUTSTANDING, SCHEDULE_LOG_CAPACITY, WORKSPACE_ALIGNMENT,
+    BatchWorkspace, ByteDetokenizer, CapturedGraph, CostTable, CostTableStub, Detokenizer,
+    DeviceStepSample, EventId, EventKind, FinishReason, GraphCache, GraphMode, InlineVec,
+    ProfileMode, Request, SchedError, ScheduleLogRing, ScheduleRecord, Scheduler, SchedulerConfig,
+    Sequence, SequencePhase, SlotRange, Step, StepBudgetConfig, StepEventChain, StepEventRecord,
+    StepExecutor, StepGraphProgram, StepInputs, StepProgramOp, StepResult, StopCriteria,
+    StreamKind, WorkspaceArena, DEFAULT_MAX_OUTSTANDING, SCHEDULE_LOG_CAPACITY,
+    WORKSPACE_ALIGNMENT,
 };
 
 fn assert_send<T: Send>() {}
@@ -171,6 +172,17 @@ fn api_shape_trait_bounds() {
     assert_sync::<StepInputs<'_>>();
     assert_clone::<StepInputs<'_>>();
     assert_debug::<StepInputs<'_>>();
+
+    // Reservation/batch types carried by StepInputs (Spec 3 §5, Spec 1 §2.5)
+    assert_send::<SlotRange>();
+    assert_sync::<SlotRange>();
+    assert_copy::<SlotRange>();
+    assert_clone::<SlotRange>();
+    assert_debug::<SlotRange>();
+
+    assert_send::<BatchWorkspace>();
+    assert_sync::<BatchWorkspace>();
+    assert_debug::<BatchWorkspace>();
     const {
         assert!(DEFAULT_MAX_OUTSTANDING >= 1);
     }
@@ -211,6 +223,7 @@ fn api_shape_trait_objects() {
         }
         fn readback_sample(&mut self) -> Result<DeviceStepSample, SchedError> {
             Ok(DeviceStepSample {
+                step_id: r9v_common::StepId::new(0),
                 token: 0,
                 accept_len: 1,
             })

@@ -128,7 +128,11 @@ impl StepExecutor for ScriptExecutor<'_> {
     fn readback_sample(&mut self) -> SchedResult<DeviceStepSample> {
         let (token, accept_len) = self.script[self.idx % self.script.len()];
         self.idx += 1;
-        Ok(DeviceStepSample { token, accept_len })
+        Ok(DeviceStepSample {
+            step_id: StepId::new(self.last_step),
+            token,
+            accept_len,
+        })
     }
 }
 
@@ -137,16 +141,31 @@ impl StepExecutor for ScriptExecutor<'_> {
 // so the measured step region performs no heap allocation through the executor.
 struct SilentStub {
     counter: u64,
+    last_step: u64,
+    last_prefill_is_intermediate: bool,
 }
 
 impl SilentStub {
     fn new() -> Self {
-        Self { counter: 0 }
+        Self {
+            counter: 0,
+            last_step: 0,
+            last_prefill_is_intermediate: false,
+        }
     }
 }
 
 impl StepExecutor for SilentStub {
-    fn upload_inputs(&mut self, _input: &StepInputs<'_>) -> SchedResult<()> {
+    fn upload_inputs(&mut self, input: &StepInputs<'_>) -> SchedResult<()> {
+        self.last_step = input.step_id.as_u64();
+        // An intermediate prefill chunk leaves prompt tokens unprocessed, so
+        // the device reports no sampled token for it (Spec 6 §3.3 step 3).
+        self.last_prefill_is_intermediate = match input.prefill {
+            Some((done, chunk)) => {
+                (done as usize).saturating_add(chunk as usize) < input.prompt_tokens.len()
+            }
+            None => false,
+        };
         Ok(())
     }
     fn replay_graph(&mut self, graph: &CapturedGraph) -> SchedResult<()> {
@@ -156,8 +175,13 @@ impl StepExecutor for SilentStub {
     fn readback_sample(&mut self) -> SchedResult<DeviceStepSample> {
         self.counter = self.counter.wrapping_add(1);
         Ok(DeviceStepSample {
+            step_id: StepId::new(self.last_step),
             token: ((self.counter % 96) + 32) as u32,
-            accept_len: 1,
+            accept_len: if self.last_prefill_is_intermediate {
+                0
+            } else {
+                1
+            },
         })
     }
 }
@@ -403,7 +427,9 @@ fn test_lifecycle_queued_to_prefill_to_decode_to_eos() {
     // Stub readback emits regular tokens then EOS token (77) on the 4th readback.
     // The EOS id is byte-domain so the default ByteDetokenizer accepts it; every
     // generated token passes through detokenization before the EOS check.
-    let mut exec = ScriptExecutor::new(&stub_device, vec![(42, 1), (42, 1), (42, 1), (77, 1)]);
+    // The first chunk is intermediate prefill (no token sampled yet), so it
+    // reports accept_len 0; later steps report 1 (Spec 6 §3.3).
+    let mut exec = ScriptExecutor::new(&stub_device, vec![(42, 0), (42, 1), (42, 1), (77, 1)]);
 
     // Step 1: Prefill chunk 1 (128 tokens)
     let res1 = scheduler
@@ -732,7 +758,9 @@ fn test_budget_forced_admission_after_max_wait_timeout() {
 
     scheduler.enqueue_request(req).expect("enqueue");
     let stub_device = StubDevice::new();
-    let mut exec = ScriptExecutor::new(&stub_device, ScriptExecutor::script_token(42));
+    // The forced 128-token chunk of a 256-token prompt is intermediate
+    // prefill, so the device reports accept_len 0 for it (Spec 6 §3.3).
+    let mut exec = ScriptExecutor::new(&stub_device, vec![(42, 0), (42, 1)]);
 
     for _ in 0..4 {
         let res = scheduler.step(&mut exec).expect("step wait");
@@ -1289,7 +1317,9 @@ fn test_adv_04_accept_len_derivation_and_timing_stubs() {
     )
     .expect("scheduler init");
     let stub_device = StubDevice::new();
-    let mut exec = ScriptExecutor::new(&stub_device, ScriptExecutor::script_token(42));
+    // Intermediate prefill reports accept_len 0, final prefill and decode
+    // report 1 (Spec 6 §3.3).
+    let mut exec = ScriptExecutor::new(&stub_device, vec![(42, 0), (42, 1), (42, 1)]);
 
     // 256 tokens prompt (two 128-token chunks)
     let req = Request::new(
@@ -2114,6 +2144,7 @@ fn test_step_executor_call_order_and_device_output() {
         fn readback_sample(&mut self) -> SchedResult<DeviceStepSample> {
             self.calls.push("readback");
             Ok(DeviceStepSample {
+                step_id: StepId::new(self.last_step),
                 token: self.next_token,
                 accept_len: 1,
             })
