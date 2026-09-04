@@ -107,9 +107,23 @@ cmd_policy_unsafe() {
     echo "Unsafe code check passed."
 }
 
+cmd_policy_t1_portable() {
+    echo "Checking that T1 reference kernels use only portable HIP (Spec 4 §8)..."
+    local illegal_builtin
+    illegal_builtin=$(git grep -En "__builtin_amdgcn|__builtin_gfx|__builtin_nv|amdgcn_|gfx1201|gfx12_|__AMDGCN__|__CUDA_ARCH__|__HIP_PLATFORM_NV__" -- \
+        'kernels/reference/*' 2>/dev/null || true)
+    if [[ -n $illegal_builtin ]]; then
+        echo "Found arch-specific builtins in T1 reference kernels (portable HIP only):"
+        echo "$illegal_builtin"
+        exit 1
+    fi
+    echo "T1 portability check passed."
+}
+
 cmd_policy() {
     cmd_policy_asm
     cmd_policy_unsafe
+    cmd_policy_t1_portable
 }
 
 cmd_gpu_smoke() {

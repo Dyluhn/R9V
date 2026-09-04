@@ -196,6 +196,8 @@ dependencies = [
  "r9v-common",
  "r9v-hip",
  "r9v-ir",
+ "r9v-kgen",
+ "r9v-t0",
  "serde",
  "serde_json",
  "thiserror",

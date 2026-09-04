@@ -376,3 +376,9 @@ What: Step 1 supports split shards and §3 fingerprints the shard count, but no 
 Why it blocks or misleads: Without a stated rule the loader could silently open shard 0 alone and bind a fraction of the model, or glob the directory nondeterministically.
 Option taken: A single path declaring `split.count = N > 1` derives siblings from the gguf `-NNNNN-of-MMMMM` file-name pattern (width-preserving, verified against `split.no`/`split.count`); a missing sibling fails as typed `MissingShard` with the exact expected path, and an explicit path set (`open_shard_set`) merges in declared `split.no` order. See `sibling_paths` in `crates/r9v-loader/src/open.rs`.
 Proposed resolution: State the sibling derivation and missing-shard failure in §2 step 1, or name a different discovery rule.
+
+## SI-78 — A3.6 — spec 4 §7 / spec 1 §4.F
+What: The A3.2 ABI types `sample`/`verify` `rng_state` as a mutable u64 pointer with an `[S]` doc note, but T0 `RngState` (spec 1 §4.F) is `{seed: u64, step: u64, draw_index: u32}` keyed by a separate u32 sequence id: one 64-bit word cannot hold the full (seed, step, draw) state, so the word count of the `[S]` array is undefined.
+Why it blocks or misleads: Any packing of seed, step, and draw into one u64 truncates valid T0 states (u64 seeds, steps above 2^32, draw indices near u32::MAX), silently breaking the counter-based Philox keying the op contract requires; assuming instead that the array holds wider records contradicts the `[S]` note read literally.
+Option taken: T1 defines `rng_state` as `[S]` records of 3xu64 `{seed, step, draw}` with the sequence word carried by the `seq_ids` BatchMeta buffer (same u32 Philox counter word as T0). See the `DECISION(A3.6)` in `kernels/reference/t1_sampling_common.hip`.
+Proposed resolution: State the per-sequence record width explicitly in §7 (3xu64 `{seed, step, draw}`), or name a different exact packing that preserves arbitrary seeds, full-64-bit steps, and u32 draw indices.

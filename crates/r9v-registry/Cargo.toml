@@ -12,6 +12,10 @@ autotests = true
 name = "a3_1_module_load"
 path = "../../tests/gpu/a3_1_module_load.rs"
 
+[[test]]
+name = "a3_6_t1_sampling"
+path = "../../tests/gpu/a3_6_t1_sampling.rs"
+
 [dependencies]
 r9v-common = { path = "../r9v-common" }
 r9v-ir = { path = "../r9v-ir" }
@@ -20,3 +24,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 toml = "0.8"
+
+[dev-dependencies]
+# A3.6 runner tests bind args through the A3.2 ABI and oracle against T0.
+r9v-kgen = { path = "../r9v-kgen" }
+r9v-t0 = { path = "../r9v-t0" }
