@@ -164,7 +164,16 @@ impl TemplateValue {
         }
     }
 
-    /// Full JSON encoding (verbatim minja `value_to_json_internal`).
+    /// Full JSON encoding (verbatim minja `value_to_json_internal`), with
+    /// hostile-input guards: nesting past [`MAX_DEPTH`], pads or separators
+    /// that would pass [`MAX_OUTPUT_BYTES`], and documents past it all fail
+    /// with [`LoaderError::Limit`] before the bytes materialize.
+    /// DECISION(A2.9): `tojson` nesting reuses `MAX_DEPTH` (the nesting
+    /// budget the parser already enforces for literals) and every pad and
+    /// separator is preflighted against the output budget; rejected a new
+    /// `MAX_JSON_*` family (the mandate forbids new ceilings) and unbounded
+    /// recursion (a hostile value nests deeper than any thread stack).
+    /// Spec 10 §3.1 is silent on resource behavior.
     pub(crate) fn write_json(
         &self,
         out: &mut String,
@@ -173,73 +182,103 @@ impl TemplateValue {
         item_sep: &str,
         key_sep: &str,
         sort_keys: bool,
-    ) {
-        let pad = |level: usize| -> String {
-            if indent > 0 {
-                " ".repeat(level * indent as usize)
-            } else {
-                String::new()
+    ) -> Result<(), LoaderError> {
+        use crate::template::builtins::{check_str_total, ensure_str_add};
+        if level > MAX_DEPTH {
+            return Err(LoaderError::Limit {
+                what: "tojson nesting depth",
+                limit: MAX_DEPTH,
+                got: level,
+            });
+        }
+        if out.len() > MAX_OUTPUT_BYTES {
+            return Err(LoaderError::Limit {
+                what: "template tojson bytes",
+                limit: MAX_OUTPUT_BYTES,
+                got: out.len(),
+            });
+        }
+        // One pad run: `level * indent` spaces, preflighted with checked
+        // arithmetic (a hostile `indent` must not allocate).
+        fn push_pad(out: &mut String, level: usize, indent: i64) -> Result<(), LoaderError> {
+            if indent <= 0 {
+                return Ok(());
             }
-        };
+            let width = (level as u64).saturating_mul(indent as u64);
+            let width = check_str_total(width, "tojson indent width")?;
+            ensure_str_add(out.len(), width, "template tojson bytes")?;
+            out.push_str(&" ".repeat(width));
+            Ok(())
+        }
+        // Short separator/literal push with a preflight.
+        fn push_lit(out: &mut String, lit: &str) -> Result<(), LoaderError> {
+            ensure_str_add(out.len(), lit.len(), "template tojson bytes")?;
+            out.push_str(lit);
+            Ok(())
+        }
         let newline = if indent >= 0 { "\n" } else { "" };
         match self {
-            TemplateValue::Undefined => out.push_str("null"),
-            TemplateValue::None => out.push_str("null"),
-            TemplateValue::Bool(true) => out.push_str("true"),
-            TemplateValue::Bool(false) => out.push_str("false"),
-            TemplateValue::Int(i) => out.push_str(&i.to_string()),
+            TemplateValue::Undefined => push_lit(out, "null")?,
+            TemplateValue::None => push_lit(out, "null")?,
+            TemplateValue::Bool(true) => push_lit(out, "true")?,
+            TemplateValue::Bool(false) => push_lit(out, "false")?,
+            TemplateValue::Int(i) => push_lit(out, &i.to_string())?,
             TemplateValue::Float(f) => {
-                out.push_str(&crate::template::builtins::format_float_json(*f));
+                push_lit(out, &crate::template::builtins::format_float_json(*f))?;
             }
-            TemplateValue::Str(s) | TemplateValue::SafeStr(s) => write_json_string(out, s),
+            TemplateValue::Str(s) | TemplateValue::SafeStr(s) => write_json_string(out, s)?,
             TemplateValue::List(items) => {
-                out.push('[');
+                push_lit(out, "[")?;
                 if !items.is_empty() {
-                    out.push_str(newline);
+                    push_lit(out, newline)?;
                     for (i, item) in items.iter().enumerate() {
-                        out.push_str(&pad(level));
-                        if indent > 0 {
-                            out.push_str(&" ".repeat(indent as usize));
-                        }
-                        item.write_json(out, level + 1, indent, item_sep, key_sep, sort_keys);
+                        push_pad(out, level, indent)?;
+                        push_pad(out, 1, indent)?;
+                        item.write_json(out, level + 1, indent, item_sep, key_sep, sort_keys)?;
                         if i + 1 < items.len() {
-                            out.push_str(item_sep);
+                            push_lit(out, item_sep)?;
                         }
-                        out.push_str(newline);
+                        push_lit(out, newline)?;
                     }
-                    out.push_str(&pad(level));
+                    push_pad(out, level, indent)?;
                 }
-                out.push(']');
+                push_lit(out, "]")?;
             }
             TemplateValue::Dict(entries) => {
-                out.push('{');
+                push_lit(out, "{")?;
                 if !entries.is_empty() {
-                    out.push_str(newline);
+                    push_lit(out, newline)?;
                     // Key order: insertion order, unless `sort_keys` (the
                     // Jinja2 `json.dumps_kwargs` policy default) is set.
+                    // The order vector is capped like every materialized
+                    // list before it is built.
+                    crate::template::builtins::ensure_list_add(
+                        0,
+                        entries.len(),
+                        "template object length",
+                    )?;
                     let mut order: Vec<usize> = (0..entries.len()).collect();
                     if sort_keys {
                         order.sort_by(|&a, &b| entries[a].0.cmp(&entries[b].0));
                     }
                     for (i, &idx) in order.iter().enumerate() {
                         let (k, v) = &entries[idx];
-                        out.push_str(&pad(level));
-                        if indent > 0 {
-                            out.push_str(&" ".repeat(indent as usize));
-                        }
-                        write_json_string(out, k);
-                        out.push_str(key_sep);
-                        v.write_json(out, level + 1, indent, item_sep, key_sep, sort_keys);
+                        push_pad(out, level, indent)?;
+                        push_pad(out, 1, indent)?;
+                        write_json_string(out, k)?;
+                        push_lit(out, key_sep)?;
+                        v.write_json(out, level + 1, indent, item_sep, key_sep, sort_keys)?;
                         if i + 1 < entries.len() {
-                            out.push_str(item_sep);
+                            push_lit(out, item_sep)?;
                         }
-                        out.push_str(newline);
+                        push_lit(out, newline)?;
                     }
-                    out.push_str(&pad(level));
+                    push_pad(out, level, indent)?;
                 }
-                out.push('}');
+                push_lit(out, "}")?;
             }
         }
+        Ok(())
     }
 }
 
@@ -259,10 +298,22 @@ pub fn render_vars(
 }
 
 /// JSON string quoting (verbatim minja escapes: `\"` `\\` `\b` `\f`
-/// `\n` `\r` `\t`, `\u00XX` for other controls).
-pub(crate) fn write_json_string(out: &mut String, s: &str) {
+/// `\n` `\r` `\t`, `\u00XX` for other controls). Each escape is preflighted
+/// exactly before it lands, so a hostile string fails at the output budget
+/// instead of quoting past it.
+pub(crate) fn write_json_string(out: &mut String, s: &str) -> Result<(), LoaderError> {
+    use crate::template::builtins::ensure_str_add;
+    const WHAT: &str = "template tojson bytes";
+    ensure_str_add(out.len(), 1, WHAT)?;
     out.push('"');
     for c in s.chars() {
+        // Exact encoded width of this char.
+        let add = match c {
+            '"' | '\\' | '\u{08}' | '\u{0C}' | '\n' | '\r' | '\t' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        };
+        ensure_str_add(out.len(), add, WHAT)?;
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -277,5 +328,7 @@ pub(crate) fn write_json_string(out: &mut String, s: &str) {
             c => out.push(c),
         }
     }
+    ensure_str_add(out.len(), 1, WHAT)?;
     out.push('"');
+    Ok(())
 }

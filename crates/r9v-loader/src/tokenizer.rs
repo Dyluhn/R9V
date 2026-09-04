@@ -158,8 +158,24 @@ impl Ord for ScoreKey {
     }
 }
 
+/// Refuses once `encode` output passes the token budget, so hostile inputs
+/// fail during emission instead of after a huge intermediate allocation.
+/// The final `encode` check is unchanged; this only trips earlier.
+fn check_output_len(output: &[u32]) -> Result<(), LoaderError> {
+    if output.len() > MAX_ENCODE_TOKENS {
+        return Err(LoaderError::Limit {
+            what: "encode output tokens",
+            limit: MAX_ENCODE_TOKENS,
+            got: output.len(),
+        });
+    }
+    Ok(())
+}
+
 /// Emits one merged SPM symbol (mirrors `resegment`): direct token hit,
-/// else recorded split, else per-byte `<0xXX>` fallback.
+/// else recorded split, else per-byte `<0xXX>` fallback. Iterative over an
+/// explicit stack, never recursive: a hostile merge table can chain splits
+/// deeper than the thread stack.
 fn spm_resegment(
     tok: &Tokenizer,
     symbols: &[SpmSymbol],
@@ -168,18 +184,22 @@ fn spm_resegment(
     rev_merge: &HashMap<Vec<u8>, (usize, usize)>,
     output: &mut Vec<u32>,
 ) -> Result<(), LoaderError> {
-    let text = &bytes[symbols[index].start..symbols[index].start + symbols[index].len];
-    if let Some(id) = tok.text_to_token(text) {
-        output.push(id);
-        return Ok(());
-    }
-    if let Some(&(first, second)) = rev_merge.get(text) {
-        spm_resegment(tok, symbols, first, bytes, rev_merge, output)?;
-        spm_resegment(tok, symbols, second, bytes, rev_merge, output)?;
-        return Ok(());
-    }
-    for &b in text {
-        output.push(tok.spm_byte_token(b)?);
+    let mut stack = vec![index];
+    while let Some(idx) = stack.pop() {
+        check_output_len(output)?;
+        let text = &bytes[symbols[idx].start..symbols[idx].start + symbols[idx].len];
+        if let Some(id) = tok.text_to_token(text) {
+            output.push(id);
+            continue;
+        }
+        if let Some(&(first, second)) = rev_merge.get(text) {
+            stack.push(second);
+            stack.push(first);
+            continue;
+        }
+        for &b in text {
+            output.push(tok.spm_byte_token(b)?);
+        }
     }
     Ok(())
 }
@@ -467,6 +487,7 @@ impl Tokenizer {
             is_prev_special = true;
         }
         for frag in fragments {
+            check_output_len(output)?;
             match frag {
                 Fragment::Token(id) => {
                     output.push(*id);
@@ -617,6 +638,7 @@ impl Tokenizer {
             output.push(self.require_bos()?);
         }
         for frag in fragments {
+            check_output_len(output)?;
             match frag {
                 Fragment::Token(id) => output.push(*id),
                 Fragment::Raw(raw) => {
@@ -659,6 +681,7 @@ impl Tokenizer {
             });
         }
         for word in &words {
+            check_output_len(output)?;
             // Byte-encode the word (mirrors `unicode_byte_encoding_process`).
             let encoded = byte_encode(word.as_bytes());
             // Symbols: one per UTF-8 char of the encoded word.
@@ -778,6 +801,7 @@ impl Tokenizer {
             output.push(self.require_bos()?);
         }
         for frag in fragments {
+            check_output_len(output)?;
             match frag {
                 Fragment::Token(id) => output.push(*id),
                 Fragment::Raw(raw) => {
@@ -803,6 +827,7 @@ impl Tokenizer {
         let words = wpm_preprocess(text, self.lowercase, self.strip_accents);
         let unk = self.require_unk()?;
         for word in &words {
+            check_output_len(output)?;
             if word.is_empty() {
                 continue;
             }

@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::error::LoaderError;
 use crate::template::builtins::{
-    apply_binary, apply_filter, apply_test, as_string, filter_tojson, slice_list, slice_str,
-    unsupported, CallArgs,
+    apply_binary, apply_filter, apply_test, as_string, ensure_list_add, filter_tojson, slice_list,
+    slice_str, try_reserve_list, unsupported, CallArgs,
 };
 use crate::template::lexer::lex;
 use crate::template::parser::{parse, Arg, AssignTarget, Expr, Param, Stmt};
@@ -30,7 +30,7 @@ pub fn render(source: &str, ctx: &ChatContext) -> Result<String, LoaderError> {
     let program = parse(&tokens)?;
     let mut interp = Interp::new();
     interp.push_scope();
-    interp.define_globals(ctx);
+    interp.define_globals(ctx)?;
     let mut out = String::new();
     let flow = interp.exec_body(&program.body, &mut out)?;
     debug_assert!(matches!(flow, Flow::Next));
@@ -61,6 +61,7 @@ pub(crate) fn render_vars(
     let mut interp = Interp::new();
     interp.push_scope();
     for (k, v) in vars {
+        Interp::check_value_depth(&v)?;
         interp.set(&k, v);
     }
     let mut out = String::new();
@@ -211,7 +212,14 @@ impl Interp {
     }
 
     fn step(&mut self) -> Result<(), LoaderError> {
-        self.steps += 1;
+        // Checked increment: hostile templates must trip the budget, never
+        // wrap the counter (the bound makes overflow unreachable, but the
+        // increment itself is still checked so no build mode can wrap it).
+        self.steps = self.steps.checked_add(1).ok_or(LoaderError::Limit {
+            what: "template interpreter steps",
+            limit: MAX_STEPS,
+            got: usize::MAX,
+        })?;
         if self.steps > MAX_STEPS {
             return Err(LoaderError::Limit {
                 what: "template interpreter steps",
@@ -223,7 +231,11 @@ impl Interp {
     }
 
     fn enter(&mut self) -> Result<(), LoaderError> {
-        self.depth += 1;
+        self.depth = self.depth.checked_add(1).ok_or(LoaderError::Limit {
+            what: "template evaluation depth",
+            limit: MAX_DEPTH,
+            got: usize::MAX,
+        })?;
         if self.depth > MAX_DEPTH {
             return Err(LoaderError::Limit {
                 what: "template evaluation depth",
@@ -234,12 +246,76 @@ impl Interp {
         Ok(())
     }
 
+    /// Charges one loop iteration against [`MAX_LOOP_ITERS`] with a checked
+    /// increment. Both the filter pass and the run pass of `for` loops
+    /// charge here, so unguarded materialization cannot bypass the budget.
+    fn charge_loop_iter(&mut self) -> Result<(), LoaderError> {
+        self.loop_iters = self.loop_iters.checked_add(1).ok_or(LoaderError::Limit {
+            what: "template loop iterations",
+            limit: MAX_LOOP_ITERS,
+            got: usize::MAX,
+        })?;
+        if self.loop_iters > MAX_LOOP_ITERS {
+            return Err(LoaderError::Limit {
+                what: "template loop iterations",
+                limit: MAX_LOOP_ITERS,
+                got: self.loop_iters,
+            });
+        }
+        Ok(())
+    }
+
     fn exit(&mut self) {
         self.depth -= 1;
     }
 
+    /// Validates one entry-point value's nesting with an explicit heap stack
+    /// (never recursion): hostile values nest deeper than the thread stack.
+    /// `write_json` recurses and relies on this bound; interpolation and
+    /// equality are iterative and additionally safe for loop-deepened
+    /// values. Reuses [`MAX_DEPTH`]; there is no new ceiling.
+    /// DECISION(A2.9): entry values deeper than `MAX_DEPTH` fail with
+    /// `Limit` (rejected trusting serving-layer shapes: tools and kwargs
+    /// are request data). Loop-built values are handled by making the
+    /// remaining consumers iterative or depth-capped, not by re-checking
+    /// every assignment. Spec 10 §3.1 is silent on value shapes.
+    fn check_value_depth(value: &TemplateValue) -> Result<(), LoaderError> {
+        let mut stack: Vec<(&TemplateValue, usize)> = vec![(value, 0)];
+        while let Some((v, depth)) = stack.pop() {
+            if depth > MAX_DEPTH {
+                return Err(LoaderError::Limit {
+                    what: "template value nesting depth",
+                    limit: MAX_DEPTH,
+                    got: depth,
+                });
+            }
+            match v {
+                TemplateValue::List(items) => {
+                    stack.extend(items.iter().map(|i| (i, depth + 1)));
+                }
+                TemplateValue::Dict(entries) => {
+                    stack.extend(entries.iter().map(|(_, i)| (i, depth + 1)));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// Defines the serving globals (Spec 10 §3.1).
-    fn define_globals(&mut self, ctx: &ChatContext) {
+    fn define_globals(&mut self, ctx: &ChatContext) -> Result<(), LoaderError> {
+        // The message list feeds `for` loops directly: cap its
+        // materialization like every other list.
+        ensure_list_add(0, ctx.messages.len(), "template messages length")?;
+        if let Some(tools) = &ctx.tools {
+            Self::check_value_depth(tools)?;
+        }
+        if let Some(choice) = &ctx.tool_choice {
+            Self::check_value_depth(choice)?;
+        }
+        for v in ctx.extra.values() {
+            Self::check_value_depth(v)?;
+        }
         let messages: Vec<TemplateValue> = ctx.messages.iter().map(message_value).collect();
         self.set("messages", TemplateValue::List(messages));
         self.set(
@@ -279,6 +355,7 @@ impl Interp {
         for (k, v) in &ctx.extra {
             self.set(k, v.clone());
         }
+        Ok(())
     }
 
     /// Executes a statement list, appending rendered text to `out`.
@@ -303,12 +380,20 @@ impl Interp {
     fn exec_stmt(&mut self, stmt: &Stmt, out: &mut String) -> Result<Flow, LoaderError> {
         match stmt {
             Stmt::Text(text) => {
+                // Literal text is source-bounded, but the running output
+                // still preflights so a hostile template fails here rather
+                // than past the budget.
+                crate::template::builtins::ensure_str_add(
+                    out.len(),
+                    text.len(),
+                    "rendered chat template bytes",
+                )?;
                 out.push_str(text);
                 Ok(Flow::Next)
             }
             Stmt::Expr(expr) => {
                 let value = self.eval_as_value(expr)?;
-                append_interpolation(&value, out);
+                append_interpolation(&value, out)?;
                 Ok(Flow::Next)
             }
             Stmt::If { branches, orelse } => {
@@ -366,7 +451,7 @@ impl Interp {
                     _depth: self.scopes.len(),
                 };
                 let returned = self.invoke_macro(&params, &macro_body, call_args, Some(caller))?;
-                append_interpolation(&returned, out);
+                append_interpolation(&returned, out)?;
                 Ok(Flow::Next)
             }
             Stmt::FilterBlock { name, args, body } => {
@@ -374,7 +459,7 @@ impl Interp {
                 let _ = self.exec_body(body, &mut buf)?;
                 let call_args = self.eval_args(args)?;
                 let value = apply_filter(name, &TemplateValue::Str(buf), &call_args)?;
-                append_interpolation(&value, out);
+                append_interpolation(&value, out)?;
                 Ok(Flow::Next)
             }
             Stmt::Break => Ok(Flow::Break),
@@ -455,11 +540,21 @@ impl Interp {
         // Undefined iterates as empty (mirror minja).
         let items: Vec<TemplateValue> = match &iter_value {
             TemplateValue::Undefined => Vec::new(),
-            TemplateValue::List(items) => items.clone(),
-            TemplateValue::Dict(entries) => entries
-                .iter()
-                .map(|(k, v)| TemplateValue::List(vec![TemplateValue::Str(k.clone()), v.clone()]))
-                .collect(),
+            TemplateValue::List(items) => {
+                ensure_list_add(0, items.len(), "template loop list length")?;
+                items.clone()
+            }
+            TemplateValue::Dict(entries) => {
+                // Pair expansion clones every entry: cap it before
+                // materializing, like every other list.
+                ensure_list_add(0, entries.len(), "template loop object length")?;
+                entries
+                    .iter()
+                    .map(|(k, v)| {
+                        TemplateValue::List(vec![TemplateValue::Str(k.clone()), v.clone()])
+                    })
+                    .collect()
+            }
             _ => {
                 return Err(LoaderError::TemplateRender {
                     detail: format!(
@@ -469,36 +564,38 @@ impl Interp {
                 });
             }
         };
-        // Filter pass with the guard (`for x in y if c`).
+        // Filter pass with the guard (`for x in y if c`). The pass charges
+        // loop iterations like the run pass: an unguarded 10M-item hostile
+        // list must trip the budget during filtering, not after cloning it
+        // all. Without a guard the pass is skipped (nothing to test).
         let iter_is_object = matches!(iter_value, TemplateValue::Dict(_));
         let saved_iter_object = std::mem::replace(&mut self.iter_object, iter_is_object);
-        self.push_scope();
-        let mut filtered: Vec<TemplateValue> = Vec::new();
-        for item in &items {
-            self.bind_target(targets, item.clone())?;
-            if let Some(test) = guard {
-                if !self.eval_as_value(test)?.is_truthy() {
-                    continue;
+        let filtered: Vec<TemplateValue> = if guard.is_none() {
+            items
+        } else {
+            self.push_scope();
+            let mut filtered: Vec<TemplateValue> = Vec::new();
+            for item in &items {
+                // Errors abort the render, so scope cleanup on this path is
+                // unnecessary; the success path below pops.
+                self.charge_loop_iter()?;
+                self.bind_target(targets, item.clone())?;
+                if let Some(test) = guard {
+                    if !self.eval_as_value(test)?.is_truthy() {
+                        continue;
+                    }
                 }
+                filtered.push(item.clone());
             }
-            filtered.push(item.clone());
-        }
-        // Drop the filter scope; the run scope binds per iteration below.
-        self.pop_scope();
+            // Drop the filter scope; the run scope binds per iteration below.
+            self.pop_scope();
+            filtered
+        };
 
         self.push_scope();
         let mut iterated = false;
         for (i, item) in filtered.iter().enumerate() {
-            self.loop_iters += 1;
-            if self.loop_iters > MAX_LOOP_ITERS {
-                self.iter_object = saved_iter_object;
-                self.pop_scope();
-                return Err(LoaderError::Limit {
-                    what: "template loop iterations",
-                    limit: MAX_LOOP_ITERS,
-                    got: self.loop_iters,
-                });
-            }
+            self.charge_loop_iter()?;
             self.bind_loop_object(&filtered, i);
             self.bind_target(targets, item.clone())?;
             match self.exec_body(body, out)? {
@@ -616,8 +713,22 @@ impl Interp {
                 Arg::Spread(expr) => {
                     let value = self.eval_as_value(expr)?;
                     match value {
-                        TemplateValue::List(items) => out.positional.extend(items),
+                        TemplateValue::List(items) => {
+                            // A hostile list must not blow up the argument
+                            // vector past the loop-iteration budget.
+                            ensure_list_add(
+                                out.positional.len(),
+                                items.len(),
+                                "template call arguments length",
+                            )?;
+                            out.positional.extend(items);
+                        }
                         TemplateValue::Dict(entries) => {
+                            ensure_list_add(
+                                out.keywords.len(),
+                                entries.len(),
+                                "template call arguments length",
+                            )?;
                             for (k, v) in entries {
                                 out.keywords.push((k, v));
                             }
@@ -639,7 +750,11 @@ impl Interp {
         // Bound flat-chain recursion (`a+a+…` nests one frame per term).
         // Errors abort the render, so a leaked count on the error path is
         // harmless; every success path below decrements.
-        self.eval_depth += 1;
+        self.eval_depth = self.eval_depth.checked_add(1).ok_or(LoaderError::Limit {
+            what: "template evaluation depth",
+            limit: MAX_EVAL_DEPTH,
+            got: usize::MAX,
+        })?;
         if self.eval_depth > MAX_EVAL_DEPTH {
             return Err(LoaderError::Limit {
                 what: "template evaluation depth",
@@ -675,46 +790,17 @@ impl Interp {
                 }
             }
             Expr::Attr(object, attr) => self.eval_attr(object, attr),
-            Expr::Index(object, key) => {
-                let obj = self.eval_as_value(object)?;
-                let key_value = self.eval_as_value(key)?;
-                self.eval_index(&obj, &key_value)
-            }
+            // Heavier arms live in helpers below so their locals stay out
+            // of `eval_inner`'s frame, which is live at every level of a
+            // hostile flat chain (129 deep) in debug builds.
+            Expr::Index(object, key) => self.eval_index_expr(object, key),
             Expr::Slice(object, start, stop, step) => {
-                let obj = self.eval_as_value(object)?;
-                let start_v = match start {
-                    Some(e) => self.eval_as_value(e)?,
-                    None => TemplateValue::Undefined,
-                };
-                let stop_v = match stop {
-                    Some(e) => self.eval_as_value(e)?,
-                    None => TemplateValue::Undefined,
-                };
-                let step_v = match step {
-                    Some(e) => self.eval_as_value(e)?,
-                    None => TemplateValue::Undefined,
-                };
-                Ok(Resolved::Val(self.slice(&obj, &start_v, &stop_v, &step_v)?))
+                self.eval_slice_expr(object, start, stop, step)
             }
-            Expr::Call(callee, args) => {
-                let target = self.eval(callee)?;
-                let call_args = self.eval_args(args)?;
-                Ok(Resolved::Val(self.invoke(target, call_args)?))
-            }
-            Expr::Filter(operand, name, args) => {
-                let input = self.eval_as_value(operand)?;
-                let call_args = self.eval_args(args)?;
-                Ok(Resolved::Val(apply_filter(name, &input, &call_args)?))
-            }
+            Expr::Call(callee, args) => self.eval_call_expr(callee, args),
+            Expr::Filter(operand, name, args) => self.eval_filter_expr(operand, name, args),
             Expr::Test(operand, name, args, negated) => {
-                let input = self.eval_as_value(operand)?;
-                let mut evaluated = Vec::with_capacity(args.len());
-                for arg in args {
-                    evaluated.push(self.eval_as_value(arg)?);
-                }
-                Ok(Resolved::Val(apply_test(
-                    name, &input, &evaluated, *negated,
-                )?))
+                self.eval_test_expr(operand, name, args, *negated)
             }
             Expr::BinOp(op, left, right) if op == "and" || op == "or" => {
                 let left_value = self.eval_as_value(left)?;
@@ -739,8 +825,15 @@ impl Interp {
                 let value = self.eval_as_value(operand)?;
                 match op.as_str() {
                     "not" => Ok(Resolved::Val(TemplateValue::Bool(!value.is_truthy()))),
+                    // `-i64::MIN` overflows: checked negation refuses with a
+                    // typed error instead of panicking (debug) or wrapping
+                    // (release).
                     "-" => match value {
-                        TemplateValue::Int(i) => Ok(Resolved::Val(TemplateValue::Int(-i))),
+                        TemplateValue::Int(i) => Ok(Resolved::Val(TemplateValue::Int(
+                            i.checked_neg().ok_or_else(|| LoaderError::TemplateRender {
+                                detail: "unary - integer overflow".to_owned(),
+                            })?,
+                        ))),
                         TemplateValue::Float(f) => Ok(Resolved::Val(TemplateValue::Float(-f))),
                         _ => Err(LoaderError::TemplateRender {
                             detail: "unary - operator requires numeric operand".to_owned(),
@@ -784,6 +877,74 @@ impl Interp {
                 Ok(Resolved::Val(TemplateValue::Dict(out)))
             }
         }
+    }
+
+    /// Outlined `Expr::Index` arm (see the note at the call site).
+    fn eval_index_expr(&mut self, object: &Expr, key: &Expr) -> Result<Resolved, LoaderError> {
+        let obj = self.eval_as_value(object)?;
+        let key_value = self.eval_as_value(key)?;
+        self.eval_index(&obj, &key_value)
+    }
+
+    /// Outlined `Expr::Slice` arm (see the note at the call site).
+    fn eval_slice_expr(
+        &mut self,
+        object: &Expr,
+        start: &Option<Box<Expr>>,
+        stop: &Option<Box<Expr>>,
+        step: &Option<Box<Expr>>,
+    ) -> Result<Resolved, LoaderError> {
+        let obj = self.eval_as_value(object)?;
+        let start_v = match start {
+            Some(e) => self.eval_as_value(e)?,
+            None => TemplateValue::Undefined,
+        };
+        let stop_v = match stop {
+            Some(e) => self.eval_as_value(e)?,
+            None => TemplateValue::Undefined,
+        };
+        let step_v = match step {
+            Some(e) => self.eval_as_value(e)?,
+            None => TemplateValue::Undefined,
+        };
+        Ok(Resolved::Val(self.slice(&obj, &start_v, &stop_v, &step_v)?))
+    }
+
+    /// Outlined `Expr::Call` arm (see the note at the call site).
+    fn eval_call_expr(&mut self, callee: &Expr, args: &[Arg]) -> Result<Resolved, LoaderError> {
+        let target = self.eval(callee)?;
+        let call_args = self.eval_args(args)?;
+        Ok(Resolved::Val(self.invoke(target, call_args)?))
+    }
+
+    /// Outlined `Expr::Filter` arm (see the note at the call site).
+    fn eval_filter_expr(
+        &mut self,
+        operand: &Expr,
+        name: &str,
+        args: &[Arg],
+    ) -> Result<Resolved, LoaderError> {
+        let input = self.eval_as_value(operand)?;
+        let call_args = self.eval_args(args)?;
+        Ok(Resolved::Val(apply_filter(name, &input, &call_args)?))
+    }
+
+    /// Outlined `Expr::Test` arm (see the note at the call site).
+    fn eval_test_expr(
+        &mut self,
+        operand: &Expr,
+        name: &str,
+        args: &[Expr],
+        negated: bool,
+    ) -> Result<Resolved, LoaderError> {
+        let input = self.eval_as_value(operand)?;
+        let mut evaluated = Vec::with_capacity(args.len());
+        for arg in args {
+            evaluated.push(self.eval_as_value(arg)?);
+        }
+        Ok(Resolved::Val(apply_test(
+            name, &input, &evaluated, negated,
+        )?))
     }
 
     /// Static `obj.prop`: builtin first (as a bound method value), then
@@ -848,9 +1009,11 @@ impl Interp {
             }
             TemplateValue::List(items) => match property {
                 TemplateValue::Int(i) => {
+                    // Checked wrap-around: a hostile index must saturate
+                    // into `undefined`, never wrap or panic.
                     let mut index = *i;
                     if index < 0 {
-                        index += items.len() as i64;
+                        index = index.saturating_add(items.len() as i64);
                     }
                     if index < 0 || index >= items.len() as i64 {
                         return Ok(Resolved::Val(TemplateValue::Undefined));
@@ -933,7 +1096,7 @@ impl Interp {
                 TemplateValue::Int(i) => {
                     let mut index = *i;
                     if index < 0 {
-                        index += items.len() as i64;
+                        index = index.saturating_add(items.len() as i64);
                     }
                     if index < 0 || index >= items.len() as i64 {
                         return Ok(TemplateValue::Undefined);
@@ -965,10 +1128,14 @@ impl Interp {
         match object {
             TemplateValue::List(items) => {
                 let len = items.len() as i64;
-                let (default_start, default_stop) = if step < 0 { (len - 1, -1) } else { (0, len) };
+                let (default_start, default_stop) = if step < 0 {
+                    (len.saturating_sub(1), -1)
+                } else {
+                    (0, len)
+                };
                 let start = opt_index(start)?.unwrap_or(default_start);
                 let stop = opt_index(stop)?.unwrap_or(default_stop);
-                Ok(slice_list(items, Some(start), Some(stop), Some(step)))
+                Ok(slice_list(items, Some(start), Some(stop), Some(step))?)
             }
             // Slicing a safe string preserves safety (mirrors markupsafe
             // `Markup.__getitem__` re-wrapping the slice).
@@ -1081,18 +1248,37 @@ impl Interp {
                         detail: "range() step argument must not be zero".to_owned(),
                     });
                 }
-                let mut out = Vec::new();
-                if step > 0 {
-                    let mut i = start;
-                    while i < stop {
-                        out.push(TemplateValue::Int(i));
-                        i += step;
+                // Cardinality preflight with overflow-proof arithmetic: a
+                // hostile range fails before materializing a single element.
+                // DECISION(A2.9): ranges longer than `MAX_LOOP_ITERS` fail
+                // with `Limit` at construction (rejected materializing up to
+                // the loop trip: `range(0, 2**62)` would allocate first).
+                // The stepping addition stays checked so hostile extremes
+                // cannot wrap the cursor on any build mode.
+                let count = range_len(start, stop, step);
+                let count = match count {
+                    Some(n) if n <= MAX_LOOP_ITERS as i128 => n as usize,
+                    _ => {
+                        return Err(LoaderError::Limit {
+                            what: "template range length",
+                            limit: MAX_LOOP_ITERS,
+                            got: count
+                                .map(|n| n.min(usize::MAX as i128) as usize)
+                                .unwrap_or(usize::MAX),
+                        });
                     }
-                } else {
-                    let mut i = start;
-                    while i > stop {
-                        out.push(TemplateValue::Int(i));
-                        i += step;
+                };
+                let mut out = Vec::new();
+                try_reserve_list(&mut out, count, "template range length")?;
+                let mut i = start;
+                for k in 0..count {
+                    out.push(TemplateValue::Int(i));
+                    if k + 1 < count {
+                        i = i
+                            .checked_add(step)
+                            .ok_or_else(|| LoaderError::TemplateRender {
+                                detail: "range() overflow".to_owned(),
+                            })?;
                     }
                 }
                 Ok(TemplateValue::List(out))
@@ -1150,6 +1336,25 @@ fn as_int_value(value: &TemplateValue) -> Result<i64, LoaderError> {
     }
 }
 
+/// Exact `range()` cardinality in 128-bit math (never overflows: the inputs
+/// are `i64`, so every difference and quotient fits). `None` is unreachable
+/// for valid steps and kept as a fail-closed shape.
+fn range_len(start: i64, stop: i64, step: i64) -> Option<i128> {
+    debug_assert!(step != 0);
+    let (start, stop, step) = (start as i128, stop as i128, step as i128);
+    if step > 0 {
+        if start >= stop {
+            return Some(0);
+        }
+        Some((stop - start + step - 1) / step)
+    } else {
+        if start <= stop {
+            return Some(0);
+        }
+        Some((start - stop - step - 1) / (-step))
+    }
+}
+
 /// Binds macro/call parameters (positional, keyword, defaults; missing
 /// without default is an error, mirroring minja `bind_parameters`).
 fn bind_params(params: &[Param], args: &CallArgs, interp: &mut Interp) -> Result<(), LoaderError> {
@@ -1198,23 +1403,47 @@ fn attr_key(property: &TemplateValue) -> Result<String, LoaderError> {
 
 /// Appends interpolation output (mirrors `gather_string_parts_recursive`:
 /// strings raw, int/float/bool via `as_string`, arrays flattened,
-/// none/undefined/dicts dropped).
-fn append_interpolation(value: &TemplateValue, out: &mut String) {
-    match value {
-        TemplateValue::Str(s) | TemplateValue::SafeStr(s) => out.push_str(s),
-        TemplateValue::Int(i) => out.push_str(&i.to_string()),
-        TemplateValue::Float(f) => {
-            out.push_str(&crate::template::builtins::format_float(*f));
-        }
-        TemplateValue::Bool(true) => out.push_str("True"),
-        TemplateValue::Bool(false) => out.push_str("False"),
-        TemplateValue::List(items) => {
-            for item in items {
-                append_interpolation(item, out);
+/// none/undefined/dicts dropped). Every piece is preflighted against the
+/// output budget before it lands, and flattening is iterative (explicit heap
+/// stack, never recursion): loop-accumulated values nest deeper than entry
+/// validation allows, and recursion there would overflow the thread stack.
+fn append_interpolation(value: &TemplateValue, out: &mut String) -> Result<(), LoaderError> {
+    use crate::template::builtins::{ensure_str_add, format_float};
+    const WHAT: &str = "rendered chat template bytes";
+    let mut stack: Vec<&TemplateValue> = vec![value];
+    while let Some(next) = stack.pop() {
+        match next {
+            TemplateValue::Str(s) | TemplateValue::SafeStr(s) => {
+                ensure_str_add(out.len(), s.len(), WHAT)?;
+                out.push_str(s);
             }
+            TemplateValue::Int(i) => {
+                let text = i.to_string();
+                ensure_str_add(out.len(), text.len(), WHAT)?;
+                out.push_str(&text);
+            }
+            TemplateValue::Float(f) => {
+                let text = format_float(*f);
+                ensure_str_add(out.len(), text.len(), WHAT)?;
+                out.push_str(&text);
+            }
+            TemplateValue::Bool(true) => {
+                ensure_str_add(out.len(), 4, WHAT)?;
+                out.push_str("True");
+            }
+            TemplateValue::Bool(false) => {
+                ensure_str_add(out.len(), 5, WHAT)?;
+                out.push_str("False");
+            }
+            TemplateValue::List(items) => {
+                for item in items.iter().rev() {
+                    stack.push(item);
+                }
+            }
+            TemplateValue::Undefined | TemplateValue::None | TemplateValue::Dict(_) => {}
         }
-        TemplateValue::Undefined | TemplateValue::None | TemplateValue::Dict(_) => {}
     }
+    Ok(())
 }
 
 /// Converts a chat message to a template object (Spec 10 §3.1).

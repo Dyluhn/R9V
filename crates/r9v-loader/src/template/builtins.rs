@@ -5,7 +5,99 @@
 use std::cmp::Ordering;
 
 use crate::error::LoaderError;
-use crate::template::TemplateValue;
+use crate::template::{TemplateValue, MAX_LOOP_ITERS, MAX_OUTPUT_BYTES};
+
+/// Refusal for an intermediate string that would exceed the rendered-output
+/// budget. All string growth is capped by [`MAX_OUTPUT_BYTES`] (the 4 MiB
+/// rendered-output contract): no new ceiling is introduced for strings.
+pub(crate) fn limit_str_bytes(what: &'static str, got: usize) -> LoaderError {
+    LoaderError::Limit {
+        what,
+        limit: MAX_OUTPUT_BYTES,
+        got,
+    }
+}
+
+/// Refusal for a materialized list that would exceed the loop-iteration
+/// budget. Lists feed `for` loops directly, so [`MAX_LOOP_ITERS`] is the
+/// proportional ceiling: no new ceiling is introduced for lists.
+pub(crate) fn limit_list_len(what: &'static str, got: usize) -> LoaderError {
+    LoaderError::Limit {
+        what,
+        limit: MAX_LOOP_ITERS,
+        got,
+    }
+}
+
+/// Preflight `current + add` string bytes with checked arithmetic: hostile
+/// lengths must saturate into a refusal, never wrap or panic. Returns the
+/// total on success so callers can pre-reserve exactly.
+pub(crate) fn ensure_str_add(
+    current: usize,
+    add: usize,
+    what: &'static str,
+) -> Result<usize, LoaderError> {
+    match current.checked_add(add) {
+        Some(total) if total <= MAX_OUTPUT_BYTES => Ok(total),
+        _ => Err(limit_str_bytes(what, current.saturating_add(add))),
+    }
+}
+
+/// Preflight `current + add` list length with checked arithmetic.
+pub(crate) fn ensure_list_add(
+    current: usize,
+    add: usize,
+    what: &'static str,
+) -> Result<usize, LoaderError> {
+    match current.checked_add(add) {
+        Some(total) if total <= MAX_LOOP_ITERS => Ok(total),
+        _ => Err(limit_list_len(what, current.saturating_add(add))),
+    }
+}
+
+/// Refuses when a computed byte size exceeds the string budget (for sizes
+/// derived by multiplication, where the sum form above does not apply).
+pub(crate) fn check_str_total(total: u64, what: &'static str) -> Result<usize, LoaderError> {
+    if total <= MAX_OUTPUT_BYTES as u64 {
+        Ok(total as usize)
+    } else {
+        Err(limit_str_bytes(what, total.min(usize::MAX as u64) as usize))
+    }
+}
+
+/// Fallible vector reserve: attacker-controlled growth maps allocation
+/// failure to a typed refusal instead of aborting the process.
+pub(crate) fn try_reserve_list<T>(
+    vec: &mut Vec<T>,
+    additional: usize,
+    what: &'static str,
+) -> Result<(), LoaderError> {
+    ensure_list_add(vec.len(), additional, what)?;
+    vec.try_reserve(additional)
+        .map_err(|_| limit_list_len(what, vec.len().saturating_add(additional)))
+}
+
+/// Refuses an already-sized string result that exceeds the output budget
+/// (for same-length transforms and shrinks, where preflight-by-sum does
+/// not apply but the uniform intermediate-string cap still does).
+pub(crate) fn check_str_result(len: usize, what: &'static str) -> Result<(), LoaderError> {
+    if len <= MAX_OUTPUT_BYTES {
+        Ok(())
+    } else {
+        Err(limit_str_bytes(what, len))
+    }
+}
+
+/// Fallible string reserve against the output budget.
+pub(crate) fn try_reserve_str(
+    buf: &mut String,
+    additional: usize,
+    what: &'static str,
+) -> Result<(), LoaderError> {
+    ensure_str_add(buf.len(), additional, what)?;
+    buf.try_reserve(additional)
+        .map_err(|_| limit_str_bytes(what, buf.len().saturating_add(additional)))
+}
 
 /// `as_string` coercion (mirrors minja): strings raw, ints plain, floats
 /// trimmed to one decimal minimum, bools `True`/`False`.
@@ -120,35 +212,101 @@ fn as_number(value: &TemplateValue) -> Option<f64> {
     }
 }
 
+/// True for exact-integer operands (ints and bools-as-0/1).
+fn is_int_like(value: &TemplateValue) -> bool {
+    matches!(value, TemplateValue::Int(_) | TemplateValue::Bool(_))
+}
+
+/// Exact integer value of an int-like operand (checked by [`is_int_like`]).
+fn int_value(value: &TemplateValue) -> i64 {
+    match value {
+        TemplateValue::Int(i) => *i,
+        TemplateValue::Bool(true) => 1,
+        TemplateValue::Bool(false) => 0,
+        _ => 0,
+    }
+}
+
+/// Checked integer binary operator: no wrap, no panic on `i64::MIN`, typed
+/// refusal on overflow and on division/remainder by zero.
+fn int_binary(op: &str, a: i64, b: i64) -> Result<TemplateValue, LoaderError> {
+    let overflow = || render_error(format!("integer {op} overflow"));
+    match op {
+        "+" => Ok(TemplateValue::Int(a.checked_add(b).ok_or_else(overflow)?)),
+        "-" => Ok(TemplateValue::Int(a.checked_sub(b).ok_or_else(overflow)?)),
+        "*" => Ok(TemplateValue::Int(a.checked_mul(b).ok_or_else(overflow)?)),
+        "/" => {
+            if b == 0 {
+                return Err(render_error("integer division by zero".to_owned()));
+            }
+            if a == i64::MIN && b == -1 {
+                return Err(render_error("integer division overflow".to_owned()));
+            }
+            // `/` always yields a float (mirrors the numeric path above).
+            Ok(TemplateValue::Float(a as f64 / b as f64))
+        }
+        "%" => {
+            if b == 0 {
+                return Err(render_error("integer modulo by zero".to_owned()));
+            }
+            Ok(TemplateValue::Int(a.checked_rem(b).ok_or_else(overflow)?))
+        }
+        "<" => Ok(TemplateValue::Bool(a < b)),
+        ">" => Ok(TemplateValue::Bool(a > b)),
+        ">=" => Ok(TemplateValue::Bool(a >= b)),
+        "<=" => Ok(TemplateValue::Bool(a <= b)),
+        _ => Err(render_error(format!("unknown operator {op:?}"))),
+    }
+}
+
 /// `==` (mirrors minja `equivalent`: numerics cross-compare, containers
-/// compare deeply, undefined only equals undefined).
+/// compare deeply, undefined only equals undefined). Iterative over an
+/// explicit heap stack, never recursive: loop-accumulated values nest deeper
+/// than entry validation allows, and the old recursion overflowed the thread
+/// stack on them.
 pub(crate) fn values_equal(left: &TemplateValue, right: &TemplateValue) -> bool {
-    if let (Some(a), Some(b)) = (as_number(left), as_number(right)) {
-        // Bool vs number: minja compares val_int/val_flt pairs; treat via
-        // the numeric values (bool true == 1).
-        return a == b;
-    }
-    match (left, right) {
-        (TemplateValue::Undefined, TemplateValue::Undefined) => true,
-        (TemplateValue::None, TemplateValue::None) => true,
-        (TemplateValue::Str(a), TemplateValue::Str(b))
-        | (TemplateValue::Str(a), TemplateValue::SafeStr(b))
-        | (TemplateValue::SafeStr(a), TemplateValue::Str(b))
-        | (TemplateValue::SafeStr(a), TemplateValue::SafeStr(b)) => a == b,
-        (TemplateValue::List(a), TemplateValue::List(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| values_equal(x, y))
+    let mut stack: Vec<(&TemplateValue, &TemplateValue)> = vec![(left, right)];
+    while let Some((l, r)) = stack.pop() {
+        if let (Some(a), Some(b)) = (as_number(l), as_number(r)) {
+            // Bool vs number: minja compares val_int/val_flt pairs; treat via
+            // the numeric values (bool true == 1).
+            if a != b {
+                return false;
+            }
+            continue;
         }
-        (TemplateValue::Dict(a), TemplateValue::Dict(b)) => {
-            a.len() == b.len()
-                && a.iter().all(|(k, v)| {
-                    b.iter()
-                        .find(|(k2, _)| k == k2)
-                        .map(|(_, v2)| values_equal(v, v2))
-                        .unwrap_or(false)
-                })
+        match (l, r) {
+            (TemplateValue::Undefined, TemplateValue::Undefined) => {}
+            (TemplateValue::None, TemplateValue::None) => {}
+            (TemplateValue::Str(a), TemplateValue::Str(b))
+            | (TemplateValue::Str(a), TemplateValue::SafeStr(b))
+            | (TemplateValue::SafeStr(a), TemplateValue::Str(b))
+            | (TemplateValue::SafeStr(a), TemplateValue::SafeStr(b)) => {
+                if a != b {
+                    return false;
+                }
+            }
+            (TemplateValue::List(a), TemplateValue::List(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                stack.extend(a.iter().zip(b.iter()));
+            }
+            (TemplateValue::Dict(a), TemplateValue::Dict(b)) => {
+                if a.len() != b.len() {
+                    return false;
+                }
+                for (k, v) in a {
+                    match b.iter().find(|(k2, _)| k == k2) {
+                        Some((_, v2)) => stack.push((v, v2)),
+                        None => return false,
+                    }
+                }
+            }
+            _ => return false,
         }
-        _ => false,
     }
+    true
 }
 
 /// Total ordering for `sort`/`min`/`max` (mirrors minja `value_compare`:
@@ -244,36 +402,27 @@ pub(crate) fn apply_binary(
             "cannot perform operation on null values".to_owned(),
         ));
     }
-    // Numeric operations.
+    // Exact integer arithmetic for int/bool operands (bools count as 0/1,
+    // mirroring minja numerics): checked ops refuse overflow, division by
+    // zero, and the `i64::MIN / -1` case with a typed error instead of
+    // panicking, wrapping, or losing precision through f64.
+    // DECISION(A2.9): integer overflow and division/remainder by zero fail
+    // with `TemplateRender` (an operation error, not a resource breach);
+    // rejected saturating to `i64::MAX` via `as` casts (silently wrong) and
+    // float `inf` for integer division by zero (unactionable). Spec 10 §3.1
+    // names the feature set, not edge semantics.
+    if is_int_like(left) && is_int_like(right) {
+        return int_binary(op, int_value(left), int_value(right));
+    }
+    // Numeric operations with at least one float side (floats cannot wrap
+    // or panic; `%`/`/` by zero yield NaN/inf like the reference).
     if let (Some(a), Some(b)) = (as_number(left), as_number(right)) {
-        // (The old third clause — bool beside float — was subsumed: it
-        // required a float side, which already sets this flag.)
-        let is_float =
-            matches!(left, TemplateValue::Float(_)) || matches!(right, TemplateValue::Float(_));
         return match op {
-            "+" | "-" | "*" => {
-                let result = if op == "+" {
-                    a + b
-                } else if op == "-" {
-                    a - b
-                } else {
-                    a * b
-                };
-                Ok(if is_float {
-                    TemplateValue::Float(result)
-                } else {
-                    TemplateValue::Int(result as i64)
-                })
-            }
+            "+" => Ok(TemplateValue::Float(a + b)),
+            "-" => Ok(TemplateValue::Float(a - b)),
+            "*" => Ok(TemplateValue::Float(a * b)),
             "/" => Ok(TemplateValue::Float(a / b)),
-            "%" => {
-                let result = a % b;
-                Ok(if is_float {
-                    TemplateValue::Float(result)
-                } else {
-                    TemplateValue::Int(result as i64)
-                })
-            }
+            "%" => Ok(TemplateValue::Float(a % b)),
             "<" => Ok(TemplateValue::Bool(a < b)),
             ">" => Ok(TemplateValue::Bool(a > b)),
             ">=" => Ok(TemplateValue::Bool(a >= b)),
@@ -284,7 +433,12 @@ pub(crate) fn apply_binary(
     // Array operations.
     if let (TemplateValue::List(a), TemplateValue::List(b)) = (left, right) {
         if op == "+" {
-            let mut out = a.clone();
+            // Preflight the combined length: hostile lists must not
+            // materialize past the loop-iteration budget.
+            let total = ensure_list_add(a.len(), b.len(), "template array concat length")?;
+            let mut out = Vec::new();
+            try_reserve_list(&mut out, total, "template array concat length")?;
+            out.extend(a.iter().cloned());
             out.extend(b.iter().cloned());
             return Ok(TemplateValue::List(out));
         }
@@ -333,9 +487,9 @@ pub(crate) fn apply_binary(
         // `~` stringifies and concatenates raw (safety decays, mirroring
         // CPython `str()` on the operands).
         if op == "~" {
-            let mut out = as_string(left)?;
-            out.push_str(&as_string(right)?);
-            return Ok(TemplateValue::Str(out));
+            let left_str = as_string(left)?;
+            let right_str = as_string(right)?;
+            return concat_str(&left_str, &right_str, false);
         }
         // `+` follows markupsafe: when a safe side is present, the other
         // side is HTML-escaped and the result stays safe; two plain
@@ -344,36 +498,41 @@ pub(crate) fn apply_binary(
         let left_safe = matches!(left, TemplateValue::SafeStr(_));
         let right_safe = matches!(right, TemplateValue::SafeStr(_));
         if !left_safe && !right_safe {
-            let mut out = as_string(left)?;
-            out.push_str(&as_string(right)?);
-            return Ok(TemplateValue::Str(out));
+            let left_str = as_string(left)?;
+            let right_str = as_string(right)?;
+            return concat_str(&left_str, &right_str, false);
         }
         let left_str = string_operand(left)?;
         let right_str = string_operand(right)?;
-        let mut out = if left_safe {
+        let left_escaped = if left_safe {
             left_str
         } else {
-            html_escape(&left_str)
+            html_escape(&left_str)?
         };
-        if right_safe {
-            out.push_str(&right_str);
+        let right_escaped = if right_safe {
+            right_str
         } else {
-            out.push_str(&html_escape(&right_str));
-        }
-        return Ok(TemplateValue::SafeStr(out));
+            html_escape(&right_str)?
+        };
+        return concat_str(&left_escaped, &right_escaped, true);
     }
     // Python-style string repetition (`str.__mul__` returns a plain `str`,
-    // so safety decays here too).
+    // so safety decays here too). Both operand orders preflight the product
+    // against the output budget before allocating anything.
+    // DECISION(A2.9): repetition past [`MAX_OUTPUT_BYTES`] fails with
+    // `Limit`; rejected allocating first and relying on the output check
+    // (an exabyte `repeat` aborts before any check runs). Spec 10 §3.1 is
+    // silent on resource behavior.
     if op == "*" {
         if let (TemplateValue::Str(s) | TemplateValue::SafeStr(s), TemplateValue::Int(n)) =
             (left, right)
         {
-            return Ok(TemplateValue::Str(s.repeat((*n).max(0) as usize)));
+            return repeat_str(s, *n);
         }
         if let (TemplateValue::Int(n), TemplateValue::Str(s) | TemplateValue::SafeStr(s)) =
             (left, right)
         {
-            return Ok(TemplateValue::Str(s.repeat((*n).max(0) as usize)));
+            return repeat_str(s, *n);
         }
     }
     Err(render_error(format!(
@@ -675,9 +834,25 @@ fn filter_on_string(
         }
     };
     match name {
-        "upper" => Ok(wrap(ascii_upper(s))),
-        "lower" => Ok(wrap(ascii_lower(s))),
+        // Same-length transforms: the result is as long as the input, so a
+        // result past the output budget is refused rather than materialized.
+        // DECISION(A2.9): every intermediate string is capped by
+        // `MAX_OUTPUT_BYTES`, even non-amplifying transforms of large
+        // inputs (only `|length`-style uses on multi-MiB inputs change
+        // outcome, from late output refusal to early filter refusal — both
+        // are errors). Rejected capping only amplifying ops (inconsistent:
+        // `split` halves and `upper` copies would disagree on the same
+        // input). Spec 10 §3.1 is silent on intermediate budgets.
+        "upper" => {
+            check_str_result(s.len(), "template upper bytes")?;
+            Ok(wrap(ascii_upper(s)))
+        }
+        "lower" => {
+            check_str_result(s.len(), "template lower bytes")?;
+            Ok(wrap(ascii_lower(s)))
+        }
         "capitalize" => {
+            check_str_result(s.len(), "template capitalize bytes")?;
             let mut out = ascii_lower(s);
             if let Some(first) = out.get_mut(0..1) {
                 first.make_ascii_uppercase();
@@ -685,7 +860,9 @@ fn filter_on_string(
             Ok(wrap(out))
         }
         "title" => {
-            let mut out = String::with_capacity(s.len());
+            check_str_result(s.len(), "template title bytes")?;
+            let mut out = String::new();
+            try_reserve_str(&mut out, s.len(), "template title bytes")?;
             let mut new_word = true;
             for b in s.bytes() {
                 if b.is_ascii_alphabetic() {
@@ -730,6 +907,7 @@ fn filter_on_string(
                     end -= s[..end].chars().next_back().unwrap_or(' ').len_utf8();
                 }
             }
+            check_str_result(end - start, "template strip bytes")?;
             Ok(wrap(s[start..end].to_owned()))
         }
         "length" => Ok(TemplateValue::Int(s.chars().count() as i64)),
@@ -756,6 +934,10 @@ fn filter_on_string(
                 .map(as_int_arg)
                 .transpose()?
                 .unwrap_or(-1);
+            // Part count is capped by the loop-iteration budget and each part
+            // by the output budget: `maxsplit` is bounded by occurrences
+            // (each consumes input), so the loops below cannot spin past
+            // the input size, and the caps refuse before materializing more.
             let mut parts: Vec<TemplateValue> = Vec::new();
             let mut rest = s.as_str();
             let mut remaining = maxsplit;
@@ -763,7 +945,7 @@ fn filter_on_string(
                 while remaining != 0 {
                     match rest.find(delim.as_str()) {
                         Some(pos) => {
-                            parts.push(TemplateValue::Str(rest[..pos].to_owned()));
+                            push_split_part(&mut parts, &rest[..pos])?;
                             rest = &rest[pos + delim.len()..];
                             if remaining > 0 {
                                 remaining -= 1;
@@ -772,12 +954,12 @@ fn filter_on_string(
                         None => break,
                     }
                 }
-                parts.push(TemplateValue::Str(rest.to_owned()));
+                push_split_part(&mut parts, rest)?;
             } else {
                 while remaining != 0 {
                     match rest.rfind(delim.as_str()) {
                         Some(pos) => {
-                            parts.push(TemplateValue::Str(rest[pos + delim.len()..].to_owned()));
+                            push_split_part(&mut parts, &rest[pos + delim.len()..])?;
                             rest = &rest[..pos];
                             if remaining > 0 {
                                 remaining -= 1;
@@ -786,7 +968,7 @@ fn filter_on_string(
                         None => break,
                     }
                 }
-                parts.push(TemplateValue::Str(rest.to_owned()));
+                push_split_part(&mut parts, rest)?;
                 parts.reverse();
             }
             Ok(TemplateValue::List(parts))
@@ -803,25 +985,15 @@ fn filter_on_string(
                 .map(as_int_arg)
                 .transpose()?
                 .unwrap_or(-1);
-            if count < 0 {
-                Ok(wrap(s.replace(old.as_str(), new.as_str())))
-            } else {
-                let mut out = s.clone();
-                for _ in 0..count {
-                    match out.find(old.as_str()) {
-                        Some(pos) => {
-                            out.replace_range(pos..pos + old.len(), &new);
-                        }
-                        None => break,
-                    }
-                }
-                Ok(wrap(out))
-            }
+            Ok(wrap(filter_replace(s, &old, &new, count)?))
         }
         "format" => {
-            // Only `{}` placeholders (mirror minja).
+            // Only `{}` placeholders (mirror minja). Every push is
+            // preflighted: hostile placeholder/argument counts fail before
+            // the result passes the output budget.
+            const WHAT: &str = "template format bytes";
             let mut out = String::new();
-            let mut arg_idx = 0;
+            let mut arg_idx = 0usize;
             let mut chars = s.chars().peekable();
             while let Some(c) = chars.next() {
                 if c == '{' {
@@ -832,8 +1004,12 @@ fn filter_on_string(
                                 .get(arg_idx)
                                 .cloned()
                                 .unwrap_or(TemplateValue::Undefined);
-                            out.push_str(&as_string(&value)?);
-                            arg_idx += 1;
+                            let text = as_string(&value)?;
+                            ensure_str_add(out.len(), text.len(), WHAT)?;
+                            out.push_str(&text);
+                            arg_idx = arg_idx.checked_add(1).ok_or_else(|| {
+                                render_error("format() too many placeholders".to_owned())
+                            })?;
                         }
                         _ => {
                             return Err(unsupported(
@@ -842,6 +1018,7 @@ fn filter_on_string(
                         }
                     }
                 } else {
+                    ensure_str_add(out.len(), c.len_utf8(), WHAT)?;
                     out.push(c);
                 }
             }
@@ -851,17 +1028,44 @@ fn filter_on_string(
             let width = args.kwarg_or_pos("width", 0);
             let first = args.kwarg_or_pos("first", 1).is_truthy();
             let blank = args.kwarg_or_pos("blank", 2).is_truthy();
+            // Both the pad width and the per-line growth are preflighted:
+            // a hostile width (or a hostile pad string) fails before the
+            // first pad is built, and line growth is bounded exactly.
+            const WHAT: &str = "template indent bytes";
             let pad = match &width {
                 TemplateValue::Undefined => "    ".to_owned(),
-                TemplateValue::Int(n) => " ".repeat((*n).max(0) as usize),
-                TemplateValue::Str(p) => p.clone(),
+                TemplateValue::Int(n) => {
+                    if *n <= 0 {
+                        String::new()
+                    } else {
+                        check_str_total(*n as u64, WHAT)?;
+                        " ".repeat(*n as usize)
+                    }
+                }
+                TemplateValue::Str(p) => {
+                    check_str_result(p.len(), WHAT)?;
+                    p.clone()
+                }
                 _ => {
                     return Err(render_error(
                         "indent() width must be int or string".to_owned(),
                     ));
                 }
             };
+            // Exact size: subject plus one pad per indented line. Line
+            // count is input-bounded (split on one subject).
+            let mut pad_lines = 0u64;
+            let mut first_line = true;
+            for line in s.split('\n') {
+                if (first_line && first) || (!first_line && (!line.is_empty() || blank)) {
+                    pad_lines += 1;
+                }
+                first_line = false;
+            }
+            let total = (s.len() as u64).saturating_add(pad_lines.saturating_mul(pad.len() as u64));
+            let total = check_str_total(total, WHAT)?;
             let mut out = String::new();
+            try_reserve_str(&mut out, total, WHAT)?;
             for (i, line) in s.split('\n').enumerate() {
                 if i > 0 {
                     out.push('\n');
@@ -878,8 +1082,11 @@ fn filter_on_string(
         )),
         "tojson" => Ok(TemplateValue::SafeStr(filter_tojson(input, args)?)),
         "string" => Ok(TemplateValue::Str(filter_tojson(input, args)?)),
-        "safe" => Ok(TemplateValue::SafeStr(s.clone())),
-        "escape" => Ok(TemplateValue::SafeStr(html_escape(s))),
+        "safe" => {
+            check_str_result(s.len(), "template safe bytes")?;
+            Ok(TemplateValue::SafeStr(s.clone()))
+        }
+        "escape" => Ok(TemplateValue::SafeStr(html_escape(s)?)),
         "int" => filter_int(input, args),
         "float" => filter_float(input, args),
         "abs" => Err(render_error("abs() needs a number".to_owned())),
@@ -902,20 +1109,159 @@ fn filter_on_string(
     }
 }
 
-/// Minimal HTML escaping for the `escape`/`e` filter.
-fn html_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+/// Concatenates two string pieces with a preflight against the output
+/// budget. `safe` selects the `SafeStr` (markupsafe) result form.
+fn concat_str(left: &str, right: &str, safe: bool) -> Result<TemplateValue, LoaderError> {
+    let total = ensure_str_add(left.len(), right.len(), "template concat bytes")?;
+    let mut out = String::new();
+    try_reserve_str(&mut out, total, "template concat bytes")?;
+    out.push_str(left);
+    out.push_str(right);
+    if safe {
+        Ok(TemplateValue::SafeStr(out))
+    } else {
+        Ok(TemplateValue::Str(out))
+    }
+}
+
+/// String repetition with a preflight of `s.len() * max(n, 0)` against the
+/// output budget: enormous counts fail before any allocation.
+fn repeat_str(s: &str, n: i64) -> Result<TemplateValue, LoaderError> {
+    if n <= 0 || s.is_empty() {
+        return Ok(TemplateValue::Str(String::new()));
+    }
+    let total = (s.len() as u64).saturating_mul(n as u64);
+    let total = check_str_total(total, "template string repeat bytes")?;
+    let mut out = String::new();
+    try_reserve_str(&mut out, total, "template string repeat bytes")?;
+    out.push_str(&s.repeat(n as usize));
+    Ok(TemplateValue::Str(out))
+}
+
+/// Minimal HTML escaping for the `escape`/`e` filter, capped at the output
+/// budget: each entity is preflighted before it is pushed.
+fn html_escape(s: &str) -> Result<String, LoaderError> {
+    const WHAT: &str = "template escape bytes";
+    let mut out = String::new();
+    try_reserve_str(&mut out, s.len().min(MAX_OUTPUT_BYTES), WHAT)?;
     for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&#34;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(c),
+        let entity = match c {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&#34;",
+            '\'' => "&#39;",
+            _ => {
+                ensure_str_add(out.len(), c.len_utf8(), WHAT)?;
+                out.push(c);
+                continue;
+            }
+        };
+        ensure_str_add(out.len(), entity.len(), WHAT)?;
+        out.push_str(entity);
+    }
+    Ok(out)
+}
+
+/// Bounded `replace(old, new, count)`: single-pass left-to-right
+/// non-overlapping replacement. For `count < 0` the result matches
+/// `str::replace` exactly; otherwise at most `count` replacements run, as
+/// the old loop did. The exact result size is preflighted with checked
+/// arithmetic before anything is built, so huge counts fail fast.
+/// Empty needles insert `new` at every char boundary (`str::replace`
+/// semantics); the boundary count is input-bounded and huge `count` values
+/// clamp to it before the size preflight, so neither spins.
+/// DECISION(A2.9): empty-needle replacement keeps Rust `str::replace`
+/// semantics under the same output cap (rejected erroring on empty needles:
+/// small cases behave like the reference string ops); result sizes past
+/// `MAX_OUTPUT_BYTES` fail with `Limit`. Spec 10 §3.1 is silent here.
+fn filter_replace(s: &str, old: &str, new: &str, count: i64) -> Result<String, LoaderError> {
+    const WHAT: &str = "template replace bytes";
+    if count == 0 {
+        check_str_result(s.len(), WHAT)?;
+        return Ok(s.to_owned());
+    }
+    if old.is_empty() {
+        if new.is_empty() {
+            // Inserting empties changes nothing (verified against
+            // `str::replace`: `"abc".replace("", "") == "abc"`).
+            check_str_result(s.len(), WHAT)?;
+            return Ok(s.to_owned());
+        }
+        if count >= 0 {
+            // `find("")` hits at position 0 every time, so the old loop
+            // inserted `new` at the front exactly `count` times: `new`
+            // repeated `count` times plus the subject. Preflight first so
+            // enormous counts fail instead of spinning.
+            let total =
+                (s.len() as u64).saturating_add((count as u64).saturating_mul(new.len() as u64));
+            let total = check_str_total(total, WHAT)?;
+            let mut out = String::new();
+            try_reserve_str(&mut out, total, WHAT)?;
+            out.push_str(&new.repeat(count as usize));
+            out.push_str(s);
+            return Ok(out);
+        }
+        // `count < 0`: interleave at every char boundary, matching
+        // `str::replace` exactly (verified: `"".replace("", "x") == "x"`,
+        // `"abc".replace("", "x") == "xaxbxcx"`). The boundary count is
+        // input-bounded and preflighted.
+        let boundaries = s.chars().count().saturating_add(1) as u64;
+        let total = (s.len() as u64).saturating_add(boundaries.saturating_mul(new.len() as u64));
+        let total = check_str_total(total, WHAT)?;
+        let mut out = String::new();
+        try_reserve_str(&mut out, total, WHAT)?;
+        for ch in s.chars() {
+            out.push_str(new);
+            out.push(ch);
+        }
+        out.push_str(new);
+        return Ok(out);
+    }
+    // Non-empty needle: one bounded scan counts occurrences, the
+    // replacements clamp to `count`, the exact size is preflighted, and a
+    // single pass builds the result (no quadratic re-scan).
+    let occurrences = s.match_indices(old).count();
+    let reps = if count < 0 {
+        occurrences
+    } else {
+        (count as usize).min(occurrences)
+    };
+    let total = if new.len() >= old.len() {
+        (s.len() as u64)
+            .saturating_add((reps as u64).saturating_mul((new.len() - old.len()) as u64))
+    } else {
+        // Each replacement consumes `old.len()` subject bytes, so the total
+        // shrink cannot exceed the subject length: saturating is exact here.
+        (s.len() as u64)
+            .saturating_sub((reps as u64).saturating_mul((old.len() - new.len()) as u64))
+    };
+    let total = check_str_total(total, WHAT)?;
+    let mut out = String::new();
+    try_reserve_str(&mut out, total, WHAT)?;
+    let mut rest = s;
+    let mut done = 0usize;
+    while done < reps {
+        match rest.find(old) {
+            Some(pos) => {
+                out.push_str(&rest[..pos]);
+                out.push_str(new);
+                rest = &rest[pos + old.len()..];
+                done += 1;
+            }
+            None => break,
         }
     }
-    out
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Pushes one `split`/`rsplit` piece with count and size caps.
+fn push_split_part(parts: &mut Vec<TemplateValue>, piece: &str) -> Result<(), LoaderError> {
+    ensure_list_add(parts.len(), 1, "template split parts")?;
+    check_str_result(piece.len(), "template split bytes")?;
+    parts.push(TemplateValue::Str(piece.to_owned()));
+    Ok(())
 }
 
 fn as_int_arg(value: &TemplateValue) -> Result<i64, LoaderError> {
@@ -967,32 +1313,43 @@ pub(crate) fn filter_tojson(input: &TemplateValue, args: &CallArgs) -> Result<St
         other => other.is_truthy(),
     };
     let mut json = String::new();
-    input.write_json(&mut json, 0, indent, &item_sep, &key_sep, sort_keys);
+    input.write_json(&mut json, 0, indent, &item_sep, &key_sep, sort_keys)?;
+    // The encoded document is itself an intermediate string: cap it like
+    // every other one (a hostile indent or value fails here, not later).
+    check_str_result(json.len(), "template tojson bytes")?;
     if ensure_ascii {
-        json = ascii_escape_json(&json);
+        json = ascii_escape_json(&json)?;
     }
     Ok(json)
 }
 
 /// Escapes non-ASCII chars as `\uXXXX` outside string quoting structure.
 /// Operates on the already-quoted JSON: only bare (non-escaped) chars
-/// above 0x7F are rewritten.
-fn ascii_escape_json(json: &str) -> String {
-    let mut out = String::with_capacity(json.len());
+/// above 0x7F are rewritten. Expansion is preflighted per escape so a
+/// hostile document fails at the output budget instead of trebling it.
+fn ascii_escape_json(json: &str) -> Result<String, LoaderError> {
+    const WHAT: &str = "template tojson bytes";
+    let mut out = String::new();
+    try_reserve_str(&mut out, json.len().min(MAX_OUTPUT_BYTES), WHAT)?;
     let mut in_string = false;
     let mut escaped = false;
     for c in json.chars() {
         if in_string {
             if escaped {
+                ensure_str_add(out.len(), c.len_utf8(), WHAT)?;
                 out.push(c);
                 escaped = false;
             } else if c == '\\' {
+                ensure_str_add(out.len(), 1, WHAT)?;
                 out.push(c);
                 escaped = true;
             } else if c == '"' {
+                ensure_str_add(out.len(), 1, WHAT)?;
                 out.push(c);
                 in_string = false;
             } else if (c as u32) > 0x7F {
+                // Longest expansion is 12 bytes (a surrogate pair).
+                ensure_str_add(out.len(), 12, WHAT)?;
                 if (c as u32) > 0xFFFF {
                     let v = c as u32 - 0x1_0000;
                     out.push_str(&format!(
@@ -1004,16 +1361,18 @@ fn ascii_escape_json(json: &str) -> String {
                     out.push_str(&format!("\\u{:04x}", c as u32));
                 }
             } else {
+                ensure_str_add(out.len(), c.len_utf8(), WHAT)?;
                 out.push(c);
             }
         } else {
+            ensure_str_add(out.len(), c.len_utf8(), WHAT)?;
             out.push(c);
             if c == '"' {
                 in_string = true;
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// `int(value, default=0, base=10)`.
@@ -1054,7 +1413,10 @@ pub(crate) fn filter_on_array(
         unreachable!("caller guarantees arrays")
     };
     match name {
-        "list" => Ok(TemplateValue::List(items.clone())),
+        "list" => Ok(TemplateValue::List(clone_list(
+            items,
+            "template list length",
+        )?)),
         "first" => Ok(items.first().cloned().unwrap_or(TemplateValue::Undefined)),
         "last" => Ok(items.last().cloned().unwrap_or(TemplateValue::Undefined)),
         "length" => Ok(TemplateValue::Int(items.len() as i64)),
@@ -1073,6 +1435,10 @@ pub(crate) fn filter_on_array(
                     "join() attribute must be string or integer".to_owned(),
                 ));
             }
+            // Every piece and delimiter is preflighted before it lands: a
+            // hostile delimiter or element fails before the result passes
+            // the output budget.
+            const WHAT: &str = "template join bytes";
             let mut out = String::new();
             for (i, item) in items.iter().enumerate() {
                 let mut value = item.clone();
@@ -1097,8 +1463,11 @@ pub(crate) fn filter_on_array(
                         ));
                     }
                 }
-                out.push_str(&as_string(&value)?);
+                let text = as_string(&value)?;
+                ensure_str_add(out.len(), text.len(), WHAT)?;
+                out.push_str(&text);
                 if i + 1 < items.len() {
+                    ensure_str_add(out.len(), delim.len(), WHAT)?;
                     out.push_str(&delim);
                 }
             }
@@ -1115,7 +1484,8 @@ pub(crate) fn filter_on_array(
                 ));
             }
             let default = args.kwarg("default");
-            let mut out = Vec::with_capacity(items.len());
+            let mut out = Vec::new();
+            try_reserve_list(&mut out, items.len(), "template map length")?;
             for item in items {
                 let value = if attr_is_int {
                     let TemplateValue::Int(n) = attribute else {
@@ -1164,6 +1534,7 @@ pub(crate) fn filter_on_array(
             for item in items {
                 let selected = eval_select_test(&test_name, item, &test_arg)?;
                 if selected != (name == "reject") {
+                    ensure_list_add(out.len(), 1, "template select length")?;
                     out.push(item.clone());
                 }
             }
@@ -1188,6 +1559,7 @@ pub(crate) fn filter_on_array(
                     };
                     let selected = item.get_key(&attribute).is_truthy();
                     if selected != reject {
+                        ensure_list_add(out.len(), 1, "template select length")?;
                         out.push(item.clone());
                     }
                 }
@@ -1222,6 +1594,7 @@ pub(crate) fn filter_on_array(
                 };
                 let selected = eval_select_test(&test_name, &subject, &test_value)?;
                 if selected != reject {
+                    ensure_list_add(out.len(), 1, "template select length")?;
                     out.push(item.clone());
                 }
             }
@@ -1230,7 +1603,7 @@ pub(crate) fn filter_on_array(
         "sort" => {
             let reverse = args.kwarg_or_pos("reverse", 0).is_truthy();
             let attribute = args.kwarg_or_pos("attribute", 2);
-            let mut sorted = items.clone();
+            let mut sorted = clone_list(items, "template sort length")?;
             sorted.sort_by(|a, b| {
                 let (mut x, mut y) = (a.clone(), b.clone());
                 if !matches!(attribute, TemplateValue::Undefined) {
@@ -1260,7 +1633,7 @@ pub(crate) fn filter_on_array(
             Ok(TemplateValue::List(sorted))
         }
         "reverse" => {
-            let mut out = items.clone();
+            let mut out = clone_list(items, "template reverse length")?;
             out.reverse();
             Ok(TemplateValue::List(out))
         }
@@ -1285,21 +1658,17 @@ pub(crate) fn filter_on_array(
             let start = args.kwarg_or_pos("start", 0);
             let stop = args.kwarg_or_pos("stop", 1);
             let step = args.kwarg_or_pos("step", 2);
-            Ok(slice_list(
-                items,
-                opt_int(&start)?,
-                opt_int(&stop)?,
-                opt_int(&step)?,
-            ))
+            slice_list(items, opt_int(&start)?, opt_int(&stop)?, opt_int(&step)?)
         }
         "append" => {
             let value = args.positional_first();
-            let mut out = items.clone();
+            ensure_list_add(items.len(), 1, "template append length")?;
+            let mut out = clone_list(items, "template append length")?;
             out.push(value);
             Ok(TemplateValue::List(out))
         }
         "pop" => {
-            let mut out = items.clone();
+            let mut out = clone_list(items, "template pop length")?;
             out.pop();
             Ok(TemplateValue::List(out))
         }
@@ -1321,13 +1690,27 @@ pub(crate) fn filter_on_array(
     }
 }
 
-/// Array index with negative wrap (mirror minja `at`).
+/// Capped list clone with a fallible reserve: attacker-controlled lists
+/// refuse past the loop-iteration budget instead of over-allocating.
+fn clone_list(
+    items: &[TemplateValue],
+    what: &'static str,
+) -> Result<Vec<TemplateValue>, LoaderError> {
+    let mut out = Vec::new();
+    try_reserve_list(&mut out, items.len(), what)?;
+    out.extend(items.iter().cloned());
+    Ok(out)
+}
+
+/// Array index with negative wrap (mirror minja `at`). The wrap-around
+/// addition is checked: a hostile index near `i64::MAX` saturates into the
+/// out-of-range error instead of wrapping or panicking.
 fn index_array(value: &TemplateValue, index: i64) -> Result<TemplateValue, LoaderError> {
     match value {
         TemplateValue::List(items) => {
             let mut i = index;
             if i < 0 {
-                i += items.len() as i64;
+                i = i.saturating_add(items.len() as i64);
             }
             if i < 0 || i >= items.len() as i64 {
                 return Err(render_error("array index out of range".to_owned()));
@@ -1358,18 +1741,22 @@ pub(crate) fn opt_int_or_none(value: &TemplateValue) -> Result<Option<i64>, Load
     }
 }
 
-/// Python-style slicing with step (verbatim port of minja `slice<T>`).
+/// Python-style slicing with step (verbatim port of minja `slice<T>`, with
+/// checked index math). `len` is a real container length (small); the
+/// clamping additions cannot overflow it, and the stepping addition is
+/// checked so a hostile step (e.g. `i64::MIN`) ends the walk instead of
+/// wrapping or panicking.
 fn slice_indexed(len: i64, start: i64, stop: i64, step: i64) -> Vec<i64> {
-    let direction = if step > 0 { 1 } else { -1 };
+    let direction: i64 = if step > 0 { 1 } else { -1 };
     let (start_val, stop_val) = if direction >= 0 {
         (
             if start < 0 {
-                (len + start).max(0)
+                len.saturating_add(start).max(0)
             } else {
                 start.min(len)
             },
             if stop < 0 {
-                (len + stop).max(0)
+                len.saturating_add(stop).max(0)
             } else {
                 stop.min(len)
             },
@@ -1377,39 +1764,45 @@ fn slice_indexed(len: i64, start: i64, stop: i64, step: i64) -> Vec<i64> {
     } else {
         (
             if start < 0 {
-                (len + start).max(0)
+                len.saturating_add(start).max(0)
             } else {
-                start.min(len - 1)
+                start.min(len.saturating_sub(1))
             },
             if stop < -1 {
-                (len + stop).max(-1)
+                len.saturating_add(stop).max(-1)
             } else {
-                stop.min(len - 1)
+                stop.min(len.saturating_sub(1))
             },
         )
     };
     let mut out = Vec::new();
     let mut i = start_val;
-    while direction * i < direction * stop_val {
+    while direction.saturating_mul(i) < direction.saturating_mul(stop_val) {
         if i >= 0 && i < len {
             out.push(i);
         }
-        i += step;
+        match i.checked_add(step) {
+            Some(next) => i = next,
+            // A hostile step that would carry the cursor out of range ends
+            // the walk: at most one more element could have been visited.
+            None => break,
+        }
     }
     out
 }
 
-/// Python-style list slicing with step (mirror minja `slice<T>`).
+/// Python-style list slicing with step (mirror minja `slice<T>`). The result
+/// is capped by the loop-iteration budget like every other materialized list.
 pub(crate) fn slice_list(
     items: &[TemplateValue],
     start: Option<i64>,
     stop: Option<i64>,
     step: Option<i64>,
-) -> TemplateValue {
+) -> Result<TemplateValue, LoaderError> {
     let len = items.len() as i64;
     let step = step.unwrap_or(1);
     if step == 0 {
-        return TemplateValue::List(Vec::new());
+        return Ok(TemplateValue::List(Vec::new()));
     }
     // The member translation always passes all three; the `slice` filter
     // allows 1-3 args (missing stop/step default per the builtin).
@@ -1418,15 +1811,18 @@ pub(crate) fn slice_list(
         (Some(a), None) => (0, a),
         (None, _) => (0, len),
     };
-    TemplateValue::List(
-        slice_indexed(len, start, stop, step)
-            .into_iter()
-            .map(|i| items[i as usize].clone())
-            .collect(),
-    )
+    let indices = slice_indexed(len, start, stop, step);
+    let mut out = Vec::new();
+    try_reserve_list(&mut out, indices.len(), "template slice length")?;
+    for i in indices {
+        out.push(items[i as usize].clone());
+    }
+    Ok(TemplateValue::List(out))
 }
 
-/// Byte-based string slicing (mirror minja slicing `std::string`).
+/// Byte-based string slicing (mirror minja slicing `std::string`). The walk
+/// is output-proportioned (indices plus pushed bytes), so the result cap is
+/// enforced after the build: shrinks of large inputs still succeed.
 pub(crate) fn slice_str(
     s: &str,
     start: &TemplateValue,
@@ -1443,7 +1839,9 @@ pub(crate) fn slice_str(
     }
     // Byte slices can split UTF-8 (mirror minja keeping raw bytes);
     // lossy conversion is the closest total approximation.
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    let out = String::from_utf8_lossy(&out).into_owned();
+    check_str_result(out.len(), "template slice bytes")?;
+    Ok(out)
 }
 
 /// `select`/`selectattr` test evaluation against the known test names.
@@ -1498,26 +1896,38 @@ pub(crate) fn filter_on_object(
                 .map(|(_, v)| v.clone())
                 .unwrap_or(default))
         }
-        "keys" => Ok(TemplateValue::List(
-            entries
-                .iter()
-                .map(|(k, _)| TemplateValue::Str(k.clone()))
-                .collect(),
-        )),
-        "values" => Ok(TemplateValue::List(
-            entries.iter().map(|(_, v)| v.clone()).collect(),
-        )),
-        "items" => Ok(TemplateValue::List(
-            entries
-                .iter()
-                .map(|(k, v)| TemplateValue::List(vec![TemplateValue::Str(k.clone()), v.clone()]))
-                .collect(),
-        )),
+        "keys" => {
+            ensure_list_add(0, entries.len(), "template keys length")?;
+            Ok(TemplateValue::List(
+                entries
+                    .iter()
+                    .map(|(k, _)| TemplateValue::Str(k.clone()))
+                    .collect(),
+            ))
+        }
+        "values" => {
+            ensure_list_add(0, entries.len(), "template values length")?;
+            Ok(TemplateValue::List(
+                entries.iter().map(|(_, v)| v.clone()).collect(),
+            ))
+        }
+        "items" => {
+            ensure_list_add(0, entries.len(), "template items length")?;
+            Ok(TemplateValue::List(
+                entries
+                    .iter()
+                    .map(|(k, v)| {
+                        TemplateValue::List(vec![TemplateValue::Str(k.clone()), v.clone()])
+                    })
+                    .collect(),
+            ))
+        }
         "length" => Ok(TemplateValue::Int(entries.len() as i64)),
         "dictsort" => {
             let by_value =
                 matches!(args.kwarg_or_pos("by", 1), TemplateValue::Str(ref s) if s == "value");
             let reverse = args.kwarg_or_pos("reverse", 2).is_truthy();
+            ensure_list_add(0, entries.len(), "template dictsort length")?;
             let mut sorted = entries.clone();
             sorted.sort_by(|a, b| {
                 let ord = if by_value {
@@ -1553,7 +1963,13 @@ pub(crate) fn filter_on_number(
         "int" => filter_int(input, args),
         "float" => filter_float(input, args),
         "abs" => match input {
-            TemplateValue::Int(i) => Ok(TemplateValue::Int(i.abs())),
+            // `i64::MIN.abs()` overflows: refuse with a typed error rather
+            // than panicking (debug) or wrapping (release).
+            TemplateValue::Int(i) => {
+                Ok(TemplateValue::Int(i.checked_abs().ok_or_else(|| {
+                    render_error("abs() integer overflow".to_owned())
+                })?))
+            }
             TemplateValue::Float(f) => Ok(TemplateValue::Float(f.abs())),
             _ => unreachable!("caller guarantees numbers"),
         },
