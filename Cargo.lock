@@ -130,6 +130,11 @@ name = "r9v-kgen"
 version = "0.1.0"
 dependencies = [
  "r9v-common",
+ "r9v-ir",
+ "r9v-registry",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
