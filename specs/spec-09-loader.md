@@ -71,7 +71,7 @@ pinned = [ staging ring for I/O (io.chunk_mb × io.queue_depth) ]
 
 A budget failure reports, per device and for host: required, available, shortfall, and the largest contributors (top five tensors or pools). It suggests the smallest single change that would fit (`state.max_ctx`, `state.max_seqs`, `experts.hot_set_vram`, or a smaller quant) with the resulting numbers. It never silently lowers a setting.
 
-Under a spoof-constrained plan (spec 1 App. A), per-device budgets run against the `EffectiveDeviceView` VRAM bound, not physical VRAM: a plan that fits the physical card but exceeds the spoof target refuses here, before I/O, with the spoof shortfall. The spoof VRAM bound is planning-only — the CU mask narrows CU visibility and enforces nothing about allocation — so this refusal is the VRAM enforcement.
+Under a spoof-constrained plan (spec 1 App. A), per-device budgets run against the `EffectiveDeviceView` VRAM bound, not physical VRAM: a plan that fits the physical card but exceeds the spoof target refuses here, before I/O, with the spoof shortfall. Before the first device allocation, the loader also creates exactly one shared `r9v_hip::AllocationBudget` per constrained physical identity with that same byte limit; every engine-owned allocation for that identity uses `BudgetedDeviceBuffer`. Its atomic reservation happens before `hipMalloc`, rolls back on HIP failure, and releases only after `hipFree`, so concurrent allocations cannot exceed the spoof cap. Direct unbudgeted `DeviceBuffer` allocation is forbidden on a constrained execution path. The CU mask independently narrows CU visibility and enforces nothing about allocation.
 
 ## 5. Materialization
 

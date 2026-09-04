@@ -283,7 +283,8 @@ cmd_up() {
             -netdev "user,id=net0,hostfwd=tcp::${R9V_VM_SSH_PORT}-:22" \
             -device virtio-net-pci,netdev=net0 \
             -serial "file:$SERIAL_LOG" \
-            -nographic \
+            -display none \
+            -monitor none \
             -daemonize \
             -pidfile "$PIDFILE"
     fi
@@ -309,7 +310,7 @@ cmd_sync() {
     local snapshot
     snapshot=$("$REPO_ROOT/scripts/make-source-snapshot.sh" "$REPO_ROOT")
     ssh "${SSH_OPTS[@]}" "${R9V_VM_GUEST_USER}@127.0.0.1" \
-        "mkdir -p '$R9V_VM_GUEST_SRC'"
+        mkdir -p -- "$R9V_VM_GUEST_SRC"
     rsync -az --delete \
         -e "ssh -i $SSH_KEY -p $R9V_VM_SSH_PORT -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$KNOWN_HOSTS" \
         --exclude /target \
@@ -347,7 +348,7 @@ docker run --rm \
   -v '$R9V_VM_GUEST_SRC:/source:ro' \
   -e CARGO_TARGET_DIR=/tmp/r9v-guest-target \
   -e CARGO_INCREMENTAL=0 \
-  r9v-ci:guest bash -lc 'cp -a /source/. /workspace/ && ./scripts/ci-gates.sh all'"
+  r9v-ci:guest bash -lc 'cp -a --no-preserve=ownership /source/. /workspace/ && ./scripts/ci-gates.sh all'"
 }
 
 # Canonicalize the state directory and refuse every dangerous value before

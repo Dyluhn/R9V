@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# shellcheck shell=bash
+# shellcheck disable=SC2034
 # Fixed topology for the hardware-blind R9V development VM.
 # Sourced by r9v-vm.sh; never executed directly.
 #

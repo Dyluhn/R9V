@@ -82,7 +82,8 @@ run_hw() {
         -e CARGO_TARGET_DIR=/tmp/r9v-hw-target \
         -e CARGO_INCREMENTAL=0 \
         -e XDG_CACHE_HOME=/tmp/r9v-hw-cache \
-        "$IMAGE_TAG" bash -lc 'cp -a /source/. /workspace/ && exec "$@"' bash "$@"
+        "$IMAGE_TAG" bash -lc \
+        'cp -a --no-preserve=ownership /source/. /workspace/ && exec "$@"' bash "$@"
 }
 
 if (($# == 0)); then

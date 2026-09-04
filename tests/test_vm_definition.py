@@ -131,6 +131,8 @@ def test_pid_validation_rejects_stale_pids() -> None:
 def test_up_captures_serial_and_waits_for_readiness() -> None:
     control = read(CONTROL)
     assert "-serial" in control and "serial.log" in control
+    assert "-display none" in control and "-daemonize" in control
+    assert "-nographic" not in control, "QEMU forbids -nographic with -daemonize"
     assert "cloud-init" in control
     assert re.search(r"wait_for_guest_ssh|SSH_WAIT", control), "up must wait for SSH"
     assert "mkdir -p" in control, "sync must pre-create the guest destination"
@@ -139,7 +141,7 @@ def test_up_captures_serial_and_waits_for_readiness() -> None:
 def test_guest_test_mounts_source_with_isolated_target() -> None:
     control = read(CONTROL)
     assert ":/source:ro" in control, "guest test must bind the source read-only"
-    assert "cp -a /source/. /workspace/" in control
+    assert "cp -a --no-preserve=ownership /source/. /workspace/" in control
     assert "CARGO_TARGET_DIR" in control
     assert "approximately 30 GiB" in control
 
@@ -214,7 +216,7 @@ def test_hw_container_requires_explicit_nodes() -> None:
     assert "SC2206" not in hw, "hw container must not use unsafe word splitting"
     assert "read -r -a" in hw
     assert ":/source:ro" in hw, "hardware runs mount the source snapshot read-only"
-    assert "cp -a /source/. /workspace/" in hw
+    assert "cp -a --no-preserve=ownership /source/. /workspace/" in hw
     assert "CARGO_TARGET_DIR" in hw and "XDG_CACHE_HOME" in hw
     assert "hardware" in hw, "hardware default must include all gates plus GPU smoke"
 

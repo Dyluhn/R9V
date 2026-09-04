@@ -25,13 +25,13 @@
 //! and validates a caller-supplied value before HIP queue creation; library
 //! code never writes the process environment.
 //!
-//! Cross-crate contract (spec 14 §3): this crate supplies planning data and
-//! validation only. It performs no hard allocation enforcement: the CU mask
-//! narrows CU *visibility* for a queue, never VRAM (the VRAM bound is a
-//! planning budget the loader enforces by refusing oversized plans), and the
-//! separate `r9v-hip` integration owns applying the assignment and calling
-//! [`PreQueueLaunchContract::validate_process_env`] before queue creation.
-//! That integration is not in this branch; nothing here claims otherwise.
+//! Cross-crate contract (spec 14 §3): this crate supplies the effective VRAM
+//! bound and pre-queue validation. The top-level load path creates one
+//! `r9v_hip::AllocationBudget` per constrained device from that bound and uses
+//! `r9v_hip::BudgetedDeviceBuffer` exclusively; the launcher applies the CU
+//! assignment before the engine process starts, and the engine validates it
+//! before HIP initialization. The mask narrows CU visibility, while the
+//! allocation ledger independently enforces the VRAM cap.
 //!
 //! Initial catalog (data, not branches): the only profiles are the two
 //! gfx1201 spoof targets. Execution dispatches on [`SpoofProfileId`], never
@@ -637,12 +637,12 @@ impl FromStr for CuMask {
 /// ([`CuMask::for_cu_count`]): the same CU count always yields the same mask
 /// string across runs and tiers.
 ///
-/// What this contract does **not** do: it never enforces VRAM allocation (the
-/// mask narrows CU visibility only; the VRAM bound is a planning budget the
-/// loader enforces by refusing oversized plans), and it never creates the HIP
-/// queue itself. The separate `r9v-hip` integration must apply the assignment
-/// and call [`Self::validate_process_env`] before queue creation; that
-/// integration is not in this branch.
+/// What this contract does **not** do: the CU mask does not enforce VRAM and
+/// this type never creates a HIP queue. The top-level load path feeds
+/// [`Self::effective_vram_bytes`] into `r9v_hip::AllocationBudget` and uses
+/// budgeted buffers exclusively. The launcher applies the assignment before
+/// the engine process starts; the engine calls
+/// [`Self::validate_process_env`] before HIP initialization.
 // DECISION(spoof-foundation): `Option` assignment rather than an empty-string
 // sentinel; rejected a `""`-means-unset convention because an empty value is
 // itself a malformed mask the runtime would misread, while `None` forces the
@@ -835,8 +835,8 @@ impl PreQueueLaunchContract {
 
     /// Reads the live `ROC_GLOBAL_CU_MASK` process value and validates it via
     /// [`Self::validate_env_value`]. Reads only: this method never writes the
-    /// environment. The `r9v-hip` integration calls this before HIP queue
-    /// creation on the spoof path; a non-UTF-8 value is a typed
+    /// environment. The engine integration calls this before HIP initialization
+    /// on the spoof path; a non-UTF-8 value is a typed
     /// [`IrError::InvalidCuMask`] refusal, never a panic.
     pub fn validate_process_env(&self) -> Result<(), IrError> {
         match std::env::var(CU_MASK_ENV_NAME) {
