@@ -1151,3 +1151,705 @@ fn r9v_meta_typing_collects_all_failures() {
         other => panic!("expected Multiple, got {other:?}"),
     }
 }
+
+#[test]
+fn native_tied_embed_lm_head_derives_l1_entry_length() {
+    // Spec 2 §4: "a tensor with both embed and lm_head roles is tied.
+    // It is stored once, in L1 at the scheme the tool chose for the head role."
+    let expected_l1 = entry_regions(SchemeId::I4K, Layout::L1, 16, 256).expect("l1 regions");
+    assert_eq!(expected_l1.entry_bytes, 4096);
+
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    let name = "tied.weight";
+    writer
+        .add_kv(
+            &format!("r9v.tensor.{name}.roles"),
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![
+                    KvValue::Str("embed".to_owned()),
+                    KvValue::Str("lm_head".to_owned()),
+                ],
+            },
+        )
+        .unwrap();
+    let entry = vec![0u8; expected_l1.entry_bytes as usize];
+    writer
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            entry,
+        )
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("tied embed/lm_head parses in L1");
+    let info = file.tensor(name).unwrap();
+    assert_eq!(file.tensor_nbytes(info).unwrap(), expected_l1.entry_bytes);
+
+    // Reversed role order [lm_head, embed] must also be recognized as tied L1
+    let mut writer2 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer2
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer2
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer2
+        .add_kv(
+            &format!("r9v.tensor.{name}.roles"),
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![
+                    KvValue::Str("lm_head".to_owned()),
+                    KvValue::Str("embed".to_owned()),
+                ],
+            },
+        )
+        .unwrap();
+    writer2
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; expected_l1.entry_bytes as usize],
+        )
+        .unwrap();
+    let bytes2 = writer2.emit().unwrap();
+    let file2 = GgufFile::parse(&bytes2).expect("reversed tied embed/lm_head parses");
+    assert_eq!(
+        file2.tensor_nbytes(file2.tensor(name).unwrap()).unwrap(),
+        expected_l1.entry_bytes
+    );
+
+    // Conversely, untied embed alone is L0 (for a scheme supporting L0 like I8_B128)
+    let expected_l0 = entry_regions(SchemeId::I8B128, Layout::L0, 32, 128).expect("l0");
+    let mut writer3 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer3
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer3
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    let embed_name = "untied_embed.weight";
+    writer3
+        .add_kv(
+            &format!("r9v.tensor.{embed_name}.roles"),
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![KvValue::Str("embed".to_owned())],
+            },
+        )
+        .unwrap();
+    writer3
+        .add_tensor(
+            embed_name,
+            &[32, 128],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I8B128)),
+            vec![0u8; expected_l0.entry_bytes as usize],
+        )
+        .unwrap();
+    let bytes3 = writer3.emit().unwrap();
+    let file3 = GgufFile::parse(&bytes3).expect("untied embed parses in L0");
+    assert_eq!(
+        file3
+            .tensor_nbytes(file3.tensor(embed_name).unwrap())
+            .unwrap(),
+        expected_l0.entry_bytes
+    );
+}
+
+#[test]
+fn native_1d_vectors_derive_l0_entry_length_even_with_l1_file_layout() {
+    // Spec 2 §5: vectors are L0; Spec 2 §7: vectors -> L0.
+    // A 1D tensor [K] without an explicit roles key in a file whose r9v.layout_id is "L1"
+    // must derive Layout::L0, not Layout::L1.
+    let expected_l0 = entry_regions(SchemeId::I8B128, Layout::L0, 1, 256).expect("1d l0");
+    assert_eq!(expected_l0.entry_bytes, 4096);
+
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    let vec_name = "blk.0.attn_norm.weight";
+    writer
+        .add_tensor(
+            vec_name,
+            &[256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I8B128)),
+            vec![0u8; expected_l0.entry_bytes as usize],
+        )
+        .unwrap();
+    // Add a second tensor sequentially at offset 4096 to ensure no false overlap occurs.
+    let matmul_name = "blk.0.attn_q.weight";
+    let matmul_regions = entry_regions(SchemeId::I4K, Layout::L1, 16, 256).unwrap();
+    writer
+        .add_tensor(
+            matmul_name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; matmul_regions.entry_bytes as usize],
+        )
+        .unwrap();
+
+    let bytes = writer.emit().unwrap();
+    let file =
+        GgufFile::parse(&bytes).expect("1D vector + 2D matmul cleanly parses without overlap");
+    let vec_info = file.tensor(vec_name).unwrap();
+    assert_eq!(
+        file.tensor_nbytes(vec_info).unwrap(),
+        expected_l0.entry_bytes
+    );
+
+    // 1D tensor cannot be sparse
+    let mut writer_sparse_1d = GgufWriter::new().with_alignment(4096).unwrap();
+    writer_sparse_1d
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer_sparse_1d
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer_sparse_1d
+        .add_kv(
+            &format!("r9v.tensor.{vec_name}.sparse"),
+            KvValue::Str("s24".to_owned()),
+        )
+        .unwrap();
+    writer_sparse_1d
+        .add_tensor(
+            vec_name,
+            &[256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I8B128)),
+            vec![0u8; expected_l0.entry_bytes as usize],
+        )
+        .unwrap();
+    let bytes_sparse_1d = writer_sparse_1d.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes_sparse_1d),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 1D tensor with non-vector role (e.g. matmul) is rejected
+    let mut writer_bad_role = GgufWriter::new().with_alignment(4096).unwrap();
+    writer_bad_role
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer_bad_role
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer_bad_role
+        .add_kv(
+            &format!("r9v.tensor.{vec_name}.roles"),
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![KvValue::Str("matmul".to_owned())],
+            },
+        )
+        .unwrap();
+    writer_bad_role
+        .add_tensor(
+            vec_name,
+            &[256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I8B128)),
+            vec![0u8; expected_l0.entry_bytes as usize],
+        )
+        .unwrap();
+    let bytes_bad_role = writer_bad_role.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes_bad_role),
+        Err(FormatError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn native_l1s_sparse_entry_length_and_scheme_restrictions() {
+    let sparse_regions =
+        entry_regions(SchemeId::I4K, Layout::L1S, 16, 256).expect("sparse regions");
+    assert_eq!(sparse_regions.entry_bytes, 4096);
+
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    let name = "sparse.weight";
+    writer
+        .add_kv(
+            &format!("r9v.tensor.{name}.sparse"),
+            KvValue::Str("s24".to_owned()),
+        )
+        .unwrap();
+    writer
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; sparse_regions.entry_bytes as usize],
+        )
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("l1s parses cleanly");
+    let info = file.tensor(name).unwrap();
+    assert_eq!(
+        file.tensor_nbytes(info).unwrap(),
+        sparse_regions.entry_bytes
+    );
+
+    // Spec 2 §4: L1S requires a scheme in {I8_R, I8_B128, I4_K, E4M3_B128}.
+    // Other schemes (like I8_B32F) fail.
+    assert!(matches!(
+        entry_regions(SchemeId::I8B32F, Layout::L1S, 16, 256),
+        Err(FormatError::UnsupportedLayout { .. })
+    ));
+
+    // A file with s24 on an unsupported scheme is rejected
+    let mut writer_bad_scheme = GgufWriter::new().with_alignment(4096).unwrap();
+    writer_bad_scheme
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer_bad_scheme
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer_bad_scheme
+        .add_kv(
+            &format!("r9v.tensor.{name}.sparse"),
+            KvValue::Str("s24".to_owned()),
+        )
+        .unwrap();
+    writer_bad_scheme
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I8B32F)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes_bad_scheme = writer_bad_scheme.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes_bad_scheme),
+        Err(FormatError::UnsupportedLayout { .. })
+    ));
+}
+
+#[test]
+fn native_metadata_closed_set_adversarial_validation() {
+    let name = "test.weight";
+
+    // 1. Invalid sparse flag string
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer
+        .add_kv(
+            &format!("r9v.tensor.{name}.sparse"),
+            KvValue::Str("dense".to_owned()),
+        )
+        .unwrap();
+    writer
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 2. Sparse flag wrong type
+    let mut writer2 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer2
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer2
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer2
+        .add_kv(&format!("r9v.tensor.{name}.sparse"), KvValue::U32(1))
+        .unwrap();
+    writer2
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes2 = writer2.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes2),
+        Err(FormatError::KvTypeMismatch { .. })
+    ));
+
+    // 3. Roles array empty
+    let mut writer3 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer3
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer3
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer3
+        .add_kv(
+            &format!("r9v.tensor.{name}.roles"),
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![],
+            },
+        )
+        .unwrap();
+    writer3
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes3 = writer3.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes3),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 4. Invalid roles combination [matmul, embed]
+    let mut writer4 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer4
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer4
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer4
+        .add_kv(
+            &format!("r9v.tensor.{name}.roles"),
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![
+                    KvValue::Str("matmul".to_owned()),
+                    KvValue::Str("embed".to_owned()),
+                ],
+            },
+        )
+        .unwrap();
+    writer4
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes4 = writer4.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes4),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 5. Unknown role string
+    let mut writer5 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer5
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer5
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer5
+        .add_kv(
+            &format!("r9v.tensor.{name}.roles"),
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![KvValue::Str("unknown_role".to_owned())],
+            },
+        )
+        .unwrap();
+    writer5
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes5 = writer5.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes5),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 6. Unknown layout_id
+    let mut writer6 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer6
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer6
+        .add_kv("r9v.layout_id", KvValue::Str("L99".to_owned()))
+        .unwrap();
+    writer6
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes6 = writer6.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes6),
+        Err(FormatError::UnknownLayout { .. })
+    ));
+}
+
+#[test]
+fn explicit_regions_metadata_adversarial_validation() {
+    let name = "blk.0.attn_q.weight";
+    let expected_regions = entry_regions(SchemeId::I4K, Layout::L1, 16, 256).unwrap();
+    assert_eq!(expected_regions.offsets(), [0, 2048, 4096]);
+
+    // 1. Forged offsets disagreeing with geometry [0, 2048, 8192]
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer
+        .add_kv(
+            &format!("r9v.tensor.{name}.regions"),
+            KvValue::Array {
+                elem: KvType::U64,
+                items: vec![KvValue::U64(0), KvValue::U64(2048), KvValue::U64(8192)],
+            },
+        )
+        .unwrap();
+    writer
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes = writer.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 2. Non-zero values_offset [16, 2048, 4096]
+    let mut writer2 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer2
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer2
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer2
+        .add_kv(
+            &format!("r9v.tensor.{name}.regions"),
+            KvValue::Array {
+                elem: KvType::U64,
+                items: vec![KvValue::U64(16), KvValue::U64(2048), KvValue::U64(4096)],
+            },
+        )
+        .unwrap();
+    writer2
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes2 = writer2.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes2),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 3. Unaligned scale offset [0, 2000, 4096] (2000 % 256 != 0)
+    let mut writer3 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer3
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer3
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer3
+        .add_kv(
+            &format!("r9v.tensor.{name}.regions"),
+            KvValue::Array {
+                elem: KvType::U64,
+                items: vec![KvValue::U64(0), KvValue::U64(2000), KvValue::U64(4096)],
+            },
+        )
+        .unwrap();
+    writer3
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes3 = writer3.emit().unwrap();
+    assert!(matches!(
+        GgufFile::parse(&bytes3),
+        Err(FormatError::Malformed { .. })
+    ));
+
+    // 4. Exact matching regions succeed
+    let mut writer4 = GgufWriter::new().with_alignment(4096).unwrap();
+    writer4
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer4
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+    writer4
+        .add_kv(
+            &format!("r9v.tensor.{name}.regions"),
+            KvValue::Array {
+                elem: KvType::U64,
+                items: expected_regions
+                    .offsets()
+                    .iter()
+                    .map(|o| KvValue::U64(*o))
+                    .collect(),
+            },
+        )
+        .unwrap();
+    writer4
+        .add_tensor(
+            name,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            vec![0u8; 4096],
+        )
+        .unwrap();
+    let bytes4 = writer4.emit().unwrap();
+    let file4 = GgufFile::parse(&bytes4).expect("matching explicit regions parse");
+    assert_eq!(
+        file4.tensor_nbytes(file4.tensor(name).unwrap()).unwrap(),
+        4096
+    );
+}
+
+#[test]
+fn native_multi_tensor_table_order_and_offsets_validation() {
+    let mut writer = GgufWriter::new().with_alignment(4096).unwrap();
+    writer
+        .add_kv("general.alignment", KvValue::U32(4096))
+        .unwrap();
+    writer
+        .add_kv("r9v.format_version", KvValue::U32(1))
+        .unwrap();
+    writer
+        .add_kv("r9v.layout_id", KvValue::Str("L1".to_owned()))
+        .unwrap();
+
+    // 1. 1D vector at offset 0 (size 4096 in L0)
+    let t0 = "blk.0.attn_norm.weight";
+    let reg0 = entry_regions(SchemeId::I8B128, Layout::L0, 1, 256).unwrap();
+    assert_eq!(reg0.entry_bytes, 4096);
+    let mut data0 = vec![0u8; 4096];
+    data0[0] = 0x11;
+    writer
+        .add_tensor(
+            t0,
+            &[256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I8B128)),
+            data0,
+        )
+        .unwrap();
+
+    // 2. 2D matmul at offset 4096 (size 4096 in L1)
+    let t1 = "blk.0.attn_q.weight";
+    let reg1 = entry_regions(SchemeId::I4K, Layout::L1, 16, 256).unwrap();
+    assert_eq!(reg1.entry_bytes, 4096);
+    let mut data1 = vec![0u8; 4096];
+    data1[0] = 0x22;
+    writer
+        .add_tensor(
+            t1,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            data1,
+        )
+        .unwrap();
+
+    // 3. Tied embed/lm_head at offset 8192 (size 4096 in L1)
+    let t2 = "token_embd.weight";
+    writer
+        .add_kv(
+            &format!("r9v.tensor.{t2}.roles"),
+            KvValue::Array {
+                elem: KvType::Str,
+                items: vec![
+                    KvValue::Str("embed".to_owned()),
+                    KvValue::Str("lm_head".to_owned()),
+                ],
+            },
+        )
+        .unwrap();
+    let reg2 = entry_regions(SchemeId::I4K, Layout::L1, 16, 256).unwrap();
+    assert_eq!(reg2.entry_bytes, 4096);
+    let mut data2 = vec![0u8; 4096];
+    data2[0] = 0x33;
+    writer
+        .add_tensor(
+            t2,
+            &[16, 256],
+            TensorType::R9v(R9vTensorType::new(SchemeId::I4K)),
+            data2,
+        )
+        .unwrap();
+
+    let bytes = writer.emit().unwrap();
+    let file = GgufFile::parse(&bytes).expect("multi-tensor native file parses cleanly");
+    assert_eq!(file.tensors().len(), 3);
+
+    // Verify slicing and distinct byte content
+    let b0 = file.tensor_bytes(t0, &bytes).unwrap();
+    let b1 = file.tensor_bytes(t1, &bytes).unwrap();
+    let b2 = file.tensor_bytes(t2, &bytes).unwrap();
+    assert_eq!(b0.len(), 4096);
+    assert_eq!(b1.len(), 4096);
+    assert_eq!(b2.len(), 4096);
+    assert_eq!(b0[0], 0x11);
+    assert_eq!(b1[0], 0x22);
+    assert_eq!(b2[0], 0x33);
+
+    // Verify per-entry xxh3
+    assert_eq!(
+        file.entry_xxh3(t0, &bytes).unwrap(),
+        r9v_common::xxh3_64(b0)
+    );
+    assert_eq!(
+        file.entry_xxh3(t1, &bytes).unwrap(),
+        r9v_common::xxh3_64(b1)
+    );
+    assert_eq!(
+        file.entry_xxh3(t2, &bytes).unwrap(),
+        r9v_common::xxh3_64(b2)
+    );
+}

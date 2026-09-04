@@ -696,18 +696,54 @@ pub fn parse_r9v_meta(file: &GgufFile) -> Result<Option<R9vMeta>, FormatError> {
                             found: elem.name(),
                             expected: "STRING",
                         });
+                    } else if items.is_empty() {
+                        problems.push(FormatError::Malformed {
+                            offset: 0,
+                            detail: format!("metadata key {:?}: roles array is empty", kv.key),
+                        });
                     } else {
+                        let mut parsed_roles = Vec::with_capacity(items.len());
+                        let mut ok = true;
                         for item in items {
                             match item {
                                 KvValue::Str(s) => match Role::parse(s) {
-                                    Ok(role) => meta.roles.push(role),
-                                    Err(e) => problems.push(e),
+                                    Ok(role) => parsed_roles.push(role),
+                                    Err(e) => {
+                                        problems.push(e);
+                                        ok = false;
+                                    }
                                 },
-                                other => problems.push(FormatError::KvTypeMismatch {
-                                    key: kv.key.clone(),
-                                    found: other.kv_type().name(),
-                                    expected: "STRING",
-                                }),
+                                other => {
+                                    problems.push(FormatError::KvTypeMismatch {
+                                        key: kv.key.clone(),
+                                        found: other.kv_type().name(),
+                                        expected: "STRING",
+                                    });
+                                    ok = false;
+                                }
+                            }
+                        }
+                        if ok {
+                            let is_valid_combo = matches!(
+                                parsed_roles.as_slice(),
+                                [Role::Matmul]
+                                    | [Role::Embed]
+                                    | [Role::LmHead]
+                                    | [Role::NgramTable]
+                                    | [Role::Vector]
+                                    | [Role::Embed, Role::LmHead]
+                                    | [Role::LmHead, Role::Embed]
+                            );
+                            if !is_valid_combo {
+                                problems.push(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "metadata key {:?}: invalid roles combination {:?}",
+                                        kv.key, parsed_roles
+                                    ),
+                                });
+                            } else {
+                                meta.roles = parsed_roles;
                             }
                         }
                     }
@@ -796,7 +832,21 @@ pub fn parse_r9v_meta(file: &GgufFile) -> Result<Option<R9vMeta>, FormatError> {
                             }
                         }
                         if ok {
-                            meta.regions = Some(offsets);
+                            if offsets[0] != 0
+                                || offsets[0] > offsets[1]
+                                || offsets[1] > offsets[2]
+                                || offsets[1] % 256 != 0
+                            {
+                                problems.push(FormatError::Malformed {
+                                    offset: 0,
+                                    detail: format!(
+                                        "metadata key {:?}: invalid region offsets {:?}",
+                                        kv.key, offsets
+                                    ),
+                                });
+                            } else {
+                                meta.regions = Some(offsets);
+                            }
                         }
                     }
                 }
