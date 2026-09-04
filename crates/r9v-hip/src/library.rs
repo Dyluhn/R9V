@@ -5,8 +5,11 @@ use std::ffi::{c_char, c_int, c_uint, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use crate::device::{parse_fixed_c_string, DeviceProperties};
+use crate::device::{
+    parse_fixed_c_string, DeviceProperties, DiscoveredDevice, HipOrdinal, HipUuid, PciBdf,
+};
 use crate::error::{HipError, Result};
+use crate::pcie::PciPathDiscovery;
 use crate::raw::*;
 use crate::symbol::{DynamicLibrary, SymbolCache};
 use crate::{EventFlags, MemcpyKind, StreamCaptureMode, StreamFlags};
@@ -38,6 +41,7 @@ impl HipLibrary {
     /// Loads the system HIP library from standard candidate locations (Spec 14 §3).
     pub fn load_system() -> Result<Arc<Self>> {
         let mut searched = Vec::new();
+        let mut load_failures = Vec::new();
 
         // 1. Explicit R9V_HIP_PATH environment variable
         if let Ok(path_str) = std::env::var("R9V_HIP_PATH") {
@@ -45,14 +49,14 @@ impl HipLibrary {
             if p.is_file() {
                 match Self::load_from_path(&p) {
                     Ok(lib) => return Ok(Arc::new(lib)),
-                    Err(e) => searched.push(format!("{}: {e}", p.display())),
+                    Err(e) => load_failures.push(format!("{}: {e}", p.display())),
                 }
             } else if p.is_dir() {
                 let cand1 = p.join("lib/libamdhip64.so.7");
                 if cand1.is_file() {
                     match Self::load_from_path(&cand1) {
                         Ok(lib) => return Ok(Arc::new(lib)),
-                        Err(e) => searched.push(format!("{}: {e}", cand1.display())),
+                        Err(e) => load_failures.push(format!("{}: {e}", cand1.display())),
                     }
                 } else {
                     searched.push(format!("{}: file not found", cand1.display()));
@@ -62,7 +66,7 @@ impl HipLibrary {
                 if cand2.is_file() {
                     match Self::load_from_path(&cand2) {
                         Ok(lib) => return Ok(Arc::new(lib)),
-                        Err(e) => searched.push(format!("{}: {e}", cand2.display())),
+                        Err(e) => load_failures.push(format!("{}: {e}", cand2.display())),
                     }
                 } else {
                     searched.push(format!("{}: file not found", cand2.display()));
@@ -80,7 +84,7 @@ impl HipLibrary {
                 if cand.is_file() {
                     match Self::load_from_path(&cand) {
                         Ok(lib) => return Ok(Arc::new(lib)),
-                        Err(e) => searched.push(format!("{}: {e}", cand.display())),
+                        Err(e) => load_failures.push(format!("{}: {e}", cand.display())),
                     }
                 } else {
                     searched.push(format!("{}: file not found", cand.display()));
@@ -98,7 +102,7 @@ impl HipLibrary {
             if p.is_file() {
                 match Self::load_from_path(p) {
                     Ok(lib) => return Ok(Arc::new(lib)),
-                    Err(e) => searched.push(format!("{cand}: {e}")),
+                    Err(e) => load_failures.push(format!("{cand}: {e}")),
                 }
             } else {
                 searched.push(format!("{cand}: file not found"));
@@ -110,11 +114,20 @@ impl HipLibrary {
         for name in system_names {
             match Self::load_from_path(Path::new(name)) {
                 Ok(lib) => return Ok(Arc::new(lib)),
-                Err(e) => searched.push(format!("{name}: {e}")),
+                Err(HipError::LibraryNotFound { .. }) => {
+                    searched.push(format!("{name}: not found in dynamic linker search paths"));
+                }
+                Err(e) => load_failures.push(format!("{name}: {e}")),
             }
         }
 
-        Err(HipError::LibraryNotFound { searched })
+        if load_failures.is_empty() {
+            Err(HipError::LibraryNotFound { searched })
+        } else {
+            Err(HipError::LibraryLoadFailed {
+                attempts: load_failures,
+            })
+        }
     }
 
     /// Loads a HIP shared library from an explicit path (Spec 14 §3).
@@ -180,7 +193,14 @@ impl HipLibrary {
             unsafe { std::mem::transmute(sym) };
         let mut count: c_int = 0;
         // SAFETY: count is a valid local stack allocation.
-        self.check("hipGetDeviceCount", unsafe { func(&mut count) })?;
+        let code = unsafe { func(&mut count) };
+        // ROCm returns hipErrorNoDevice rather than hipSuccess with count=0 on
+        // a valid runtime installation that has no visible GPU. That is an
+        // ordinary CPU-only inventory, not a broken runtime.
+        if code == HIP_ERROR_NO_DEVICE {
+            return Ok(0);
+        }
+        self.check("hipGetDeviceCount", code)?;
         if count < 0 {
             return Err(HipError::InvalidDeviceCount { count });
         }
@@ -214,6 +234,12 @@ impl HipLibrary {
 
     /// Queries hardware properties and capabilities of a HIP device (Spec 14 §3).
     pub fn get_device_properties(&self, device_id: i32) -> Result<DeviceProperties> {
+        if device_id < 0 {
+            return Err(HipError::InvalidDeviceOrdinal {
+                ordinal: i64::from(device_id),
+            });
+        }
+        let ordinal = HipOrdinal::new(device_id as u32);
         let sym = self.symbols.resolve_device_properties(&self.lib)?;
         // SAFETY: hipGetDevicePropertiesR0600 takes a pointer to RawDeviceProp (1472 bytes) and device ID.
         let func: unsafe extern "C" fn(*mut RawDeviceProp, c_int) -> HipErrorT =
@@ -227,6 +253,25 @@ impl HipLibrary {
 
         let name = parse_fixed_c_string(&raw.name);
         let gcn_arch_name = parse_fixed_c_string(&raw.gcn_arch_name);
+
+        let uuid = if raw.uuid.iter().all(|&b| b == 0) {
+            None
+        } else {
+            Some(HipUuid::from_bytes(raw.uuid))
+        };
+        let properties_bdf =
+            PciBdf::from_hip_fields(raw.pci_domain_id, raw.pci_bus_id, raw.pci_device_id)?;
+        let pci_bdf = self.get_device_pci_bdf(ordinal)?;
+        if properties_bdf.domain() != pci_bdf.domain()
+            || properties_bdf.bus() != pci_bdf.bus()
+            || properties_bdf.device() != pci_bdf.device()
+        {
+            return Err(HipError::InconsistentPciIdentity {
+                ordinal: ordinal.as_u32(),
+                properties_bdf: properties_bdf.to_string(),
+                bus_id_bdf: pci_bdf.to_string(),
+            });
+        }
 
         Ok(DeviceProperties {
             name,
@@ -250,7 +295,77 @@ impl HipLibrary {
             concurrent_kernels: raw.concurrent_kernels != 0,
             ecc_enabled: raw.ecc_enabled != 0,
             cooperative_launch: raw.cooperative_launch != 0,
+            uuid,
+            pci_bdf,
         })
+    }
+
+    /// Returns HIP's canonical PCI BDF for an ephemeral device ordinal.
+    ///
+    /// Unlike `hipDeviceProp_t`, this API includes the PCI function number.
+    pub fn get_device_pci_bdf(&self, ordinal: HipOrdinal) -> Result<PciBdf> {
+        let sym = self.symbols.resolve(
+            &self.symbols.hip_device_get_pci_bus_id,
+            &self.lib,
+            "hipDeviceGetPCIBusId",
+        )?;
+        let func: unsafe extern "C" fn(*mut c_char, c_int, c_int) -> HipErrorT =
+            unsafe { std::mem::transmute(sym) };
+        let mut buffer = [0 as c_char; 32];
+        let buffer_len = i32::try_from(buffer.len()).expect("fixed PCI BDF buffer fits i32");
+        let device_id = ordinal.as_i32()?;
+        // SAFETY: `buffer` is writable for `buffer_len` bytes and both integer
+        // parameters are validated representations of their C ABI types.
+        self.check("hipDeviceGetPCIBusId", unsafe {
+            func(buffer.as_mut_ptr(), buffer_len, device_id)
+        })?;
+        PciBdf::parse(&parse_fixed_c_string(&buffer))
+    }
+
+    /// Sets the active HIP device using an ephemeral ordinal handle (Spec 14 §3).
+    pub fn set_device_ordinal(&self, ordinal: HipOrdinal) -> Result<()> {
+        self.set_device(ordinal.as_i32()?)
+    }
+
+    /// Queries the currently active HIP device as an ephemeral ordinal handle (Spec 14 §3).
+    pub fn get_device_ordinal(&self) -> Result<HipOrdinal> {
+        let dev = self.get_device()?;
+        if dev < 0 {
+            return Err(HipError::InvalidDeviceOrdinal {
+                ordinal: i64::from(dev),
+            });
+        }
+        Ok(HipOrdinal::new(dev as u32))
+    }
+
+    /// Enumerates all available HIP devices using default `/sys` path for PCIe topology (Spec 14 §2, §3).
+    pub fn enumerate_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+        self.enumerate_devices_with_sys_root(Path::new("/sys"))
+    }
+
+    /// Enumerates all available HIP devices with a custom sysfs root directory (Spec 14 §2, §3).
+    pub fn enumerate_devices_with_sys_root(
+        &self,
+        sys_root: &Path,
+    ) -> Result<Vec<DiscoveredDevice>> {
+        let count = self.device_count()?;
+        let mut devices = Vec::with_capacity(count as usize);
+
+        for ordinal_idx in 0..count {
+            let ordinal = HipOrdinal::new(ordinal_idx);
+            let props = self.get_device_properties(ordinal.as_i32()?)?;
+            let identity = props.identity();
+            let pcie_path = PciPathDiscovery::discover(sys_root, props.pci_bdf)?;
+
+            devices.push(DiscoveredDevice {
+                ordinal,
+                identity,
+                properties: props,
+                pcie_path,
+            });
+        }
+
+        Ok(devices)
     }
 
     // --- Memory Operations ---

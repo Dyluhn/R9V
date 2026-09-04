@@ -658,22 +658,13 @@ fn gfx1201_initial_values_match_spec() {
     let a = ArchDescriptor::gfx1201();
     assert_eq!(a.family, ArchFamily::Rdna4);
     assert_eq!(a.wave_size, 32);
-    assert_eq!(a.cu_count, 64);
     assert_eq!(a.lds_bytes_per_wg, 64 * 1024);
     assert_eq!(a.vgprs_per_lane, 256);
-    assert_eq!(a.l2_bytes, 8 * 1024 * 1024);
-    assert_eq!(a.l3_bytes, 64 * 1024 * 1024);
-    assert_eq!(a.vram_bytes, 32 * 1024 * 1024 * 1024);
-    assert_eq!(a.mem_bw_gbps, 640.0);
-    assert_eq!(a.clock_mhz, 2350.0);
     assert_eq!(a.max_wg_size, 1024);
     assert!(a.fp8_convert);
     assert!(a.sparse_matrix);
-    assert_eq!(a.graph_capture, GraphCapture::Supported);
     assert_eq!(a.valu_dot, vec![ValuDot::Dot4I32I8]);
     assert_eq!(a.fragment_layout, LayoutId::L1);
-    assert!(a.measured.is_empty());
-    assert!(a.p2p.is_empty());
     // f16/bf16 at 1x, fp8/iu8/iu4 at 2x nominal (Spec 1 App. A).
     let rates: Vec<f32> = a.matrix_ops.iter().map(|m| m.rate.as_f32()).collect();
     assert_eq!(rates, vec![1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
@@ -688,13 +679,17 @@ fn cpu_reports_reference_identity() {
     let c = ArchDescriptor::cpu();
     assert_eq!(c.family, ArchFamily::Cpu);
     assert_eq!(c.name, "cpu");
-    assert_eq!(c.graph_capture, GraphCapture::None);
     assert!(c.matrix_ops.is_empty());
     assert!(c.valu_dot.is_empty());
     assert!(!c.fp8_convert);
     assert!(!c.sparse_matrix);
-    assert!(c.measured.is_empty());
-    assert!(c.p2p.is_empty());
+
+    let device = r9v_ir::DeviceDescriptor::cpu();
+    assert_eq!(device.arch, c);
+    assert_eq!(device.facts.identity, r9v_ir::DeviceIdentity::Cpu);
+    assert_eq!(device.facts.graph_capture, GraphCapture::None);
+    assert!(device.measured.is_empty());
+    assert!(device.p2p.is_empty());
 }
 
 #[test]

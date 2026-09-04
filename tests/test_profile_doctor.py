@@ -17,6 +17,7 @@ from tools.profile_doctor import (
     parse_expected_pcie_links,
     parse_prometheus_metrics,
     pcie_payload_gbps,
+    pcie_upstream_links,
 )
 
 # A stand-in for the 26.8 GiB derived PLE table. Tests never hash the real one.
@@ -120,6 +121,24 @@ def test_pcie_payload_estimate_matches_gen4_x4() -> None:
     assert abs(pcie_payload_gbps(16.0, 4) - 7.876923) < 1e-5
 
 
+def test_pcie_path_rejects_partial_link_bearing_ancestor(tmp_path: Path) -> None:
+    bridge = tmp_path / "devices/pci0000:00/0000:00:02.2"
+    device = bridge / "0000:13:00.0"
+    device.mkdir(parents=True)
+    (bridge / "max_link_speed").write_text("16.0 GT/s", encoding="utf-8")
+    by_bus = tmp_path / "bus/pci/devices"
+    by_bus.mkdir(parents=True)
+    (by_bus / "0000:13:00.0").symlink_to(device)
+
+    try:
+        pcie_upstream_links(tmp_path, "0000:13:00.0")
+    except ValueError as error:
+        assert "0000:00:02.2" in str(error)
+        assert "complete positive speed/width" in str(error)
+    else:
+        raise AssertionError("partial upstream PCIe hop was silently omitted")
+
+
 def test_expected_pcie_links_accept_generation_and_numeric_forms() -> None:
     links = parse_expected_pcie_links("Gen5x16, 16 GT/s x4", 2)
 
@@ -173,15 +192,16 @@ def test_selected_gpu_check_rejects_mismatched_exact_link(
     ]
     assert [check.status for check in exact] == ["PASS", "FAIL"]
     assert exact[1].remediation is not None
-    assert "cannot change a negotiated PCIe link" in exact[1].remediation
+    assert "cannot change a PCIe path capacity" in exact[1].remediation
 
 
-def test_pcie_floor_scores_the_slowest_upstream_hop(
+def test_pcie_floor_scores_the_slowest_upstream_capacity(
     tmp_path: Path, monkeypatch
 ) -> None:
     # Endpoint sysfs on both cards reads Gen5x16, but rank 1 sits behind a
-    # bridge that negotiated Gen4x4. The floor must score the bridge, not the
-    # endpoint.
+    # bridge physically capped at Gen4x4. Its current speed is power-managed
+    # down to Gen1, but the stable capacity floor must score Gen4x4 rather than
+    # either the endpoint or the transient idle speed.
     for bridge, bdf, hop_speed, hop_width in (
         ("0000:00:01.0", "0000:03:00.0", "32.0 GT/s", "16"),
         ("0000:00:01.1", "0000:13:00.0", "16.0 GT/s", "4"),
@@ -189,10 +209,14 @@ def test_pcie_floor_scores_the_slowest_upstream_hop(
         bridge_dir = tmp_path / "devices/pci0000:00" / bridge
         device_dir = bridge_dir / bdf
         device_dir.mkdir(parents=True)
-        (bridge_dir / "current_link_speed").write_text(hop_speed, encoding="utf-8")
+        (bridge_dir / "current_link_speed").write_text("2.5 GT/s", encoding="utf-8")
         (bridge_dir / "current_link_width").write_text(hop_width, encoding="utf-8")
+        (bridge_dir / "max_link_speed").write_text(hop_speed, encoding="utf-8")
+        (bridge_dir / "max_link_width").write_text(hop_width, encoding="utf-8")
         (device_dir / "current_link_speed").write_text("32.0 GT/s", encoding="utf-8")
         (device_dir / "current_link_width").write_text("16", encoding="utf-8")
+        (device_dir / "max_link_speed").write_text("32.0 GT/s", encoding="utf-8")
+        (device_dir / "max_link_width").write_text("16", encoding="utf-8")
         by_bus = tmp_path / "bus/pci/devices"
         by_bus.mkdir(parents=True, exist_ok=True)
         (by_bus / bdf).symlink_to(device_dir)
@@ -226,6 +250,48 @@ def test_pcie_floor_scores_the_slowest_upstream_hop(
     assert "upstream hop 0000:00:01.1" in links[1].message
     assert "16 GT/s x4" in links[1].message
     assert abs(selected[1][4] - 7.876923) < 1e-5
+
+
+def test_exact_link_expectation_uses_path_capacity_not_endpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bridge = tmp_path / "devices/pci0000:00/0000:00:02.2"
+    device = bridge / "0000:13:00.0"
+    device.mkdir(parents=True)
+    for node, current_speed, current_width, max_speed, max_width in (
+        (bridge, "2.5 GT/s", "4", "16.0 GT/s", "4"),
+        (device, "32.0 GT/s", "16", "32.0 GT/s", "16"),
+    ):
+        (node / "current_link_speed").write_text(current_speed, encoding="utf-8")
+        (node / "current_link_width").write_text(current_width, encoding="utf-8")
+        (node / "max_link_speed").write_text(max_speed, encoding="utf-8")
+        (node / "max_link_width").write_text(max_width, encoding="utf-8")
+    by_bus = tmp_path / "bus/pci/devices"
+    by_bus.mkdir(parents=True)
+    (by_bus / "0000:13:00.0").symlink_to(device)
+    monkeypatch.setattr(doctor.shutil, "which", lambda _name: "/usr/bin/amd-smi")
+    monkeypatch.setattr(
+        doctor,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [], 0, "GPU: 0\n BDF: 0000:13:00.0\n", ""
+        ),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "discover_kfd_gpus",
+        lambda _root: [KfdGpu("0000:13:00.0", 120001, 128)],
+    )
+    monkeypatch.setenv("R9V_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("R9V_EXPECTED_PCIE_LINKS", "Gen4x4")
+    monkeypatch.setenv("R9V_MIN_PCIE_BANDWIDTH_GBPS", "7")
+
+    reporter = Reporter()
+    doctor._selected_gpus(reporter, 1, tmp_path)
+
+    exact = [check for check in reporter.checks if check.name == "pcie-link-expectation"]
+    assert [check.status for check in exact] == ["PASS"]
+    assert exact[0].details == {"expected_speed_gts": 16.0, "expected_width": 4}
 
 
 def test_visible_devices_rejects_duplicate_selection(

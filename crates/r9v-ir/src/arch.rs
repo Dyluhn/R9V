@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Arch descriptor (Spec 1 App. A).
 //!
-//! One instance per device, consumed by the kernel generator (Spec 4), the
-//! partitioner (Spec 5), the loader (Spec 9) and the scheduler (Spec 6). It is
-//! the only source of hardware facts in the engine: wave size, LDS size,
-//! instruction availability and bandwidth all come from here, never from
-//! literals in kernel-adjacent code (r9v-card-work §2).
+//! Architecture capabilities are deliberately separate from physical-device
+//! facts. A gfx1201 ISA profile is shared by every gfx1201 device; CU count,
+//! memory size, clocks, caches and runtime capabilities are discovered for
+//! each physical device. This prevents a board used during development from
+//! silently becoming the definition of an ISA family.
 //!
-//! Fields are public: the spec states no cross-field invariants, and validity
-//! is established by measurement (the doctor's pass, Spec 11 §7), not by
-//! construction. The `measured` block starts empty and the doctor fills it.
+//! The doctor's pass validates discovered facts and fills the measured block
+//! before a GPU plan may be cached (Spec 11 §7).
 
 use crate::{DType, IrError, LayoutId};
 
@@ -137,6 +136,50 @@ pub enum GraphCapture {
     None,
 }
 
+/// Stable physical identity used by fingerprints and cached plans.
+///
+/// HIP ordinals are process-local handles and are intentionally absent here.
+/// A GPU is identified by its UUID and PCI BDF; the doctor refuses to persist
+/// a device cache when neither is available (Spec 5 §2).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DeviceIdentity {
+    /// The portable host execution device.
+    Cpu,
+    /// A physical GPU identity. Some runtimes do not expose a UUID, so the
+    /// canonical PCI BDF remains mandatory.
+    Gpu {
+        /// Runtime-reported 16-byte UUID, when nonzero and available.
+        uuid: Option<[u8; 16]>,
+        /// Canonical PCI address, `dddd:bb:dd.f`.
+        pci_bdf: String,
+    },
+}
+
+/// Facts belonging to one physical device rather than to its ISA family.
+///
+/// These values must be populated from runtime discovery and measurement.
+/// There is intentionally no checked-in R9700 constructor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceFacts {
+    /// Stable identity; never a HIP ordinal.
+    pub identity: DeviceIdentity,
+    /// Compute-unit count reported by the runtime.
+    pub cu_count: u32,
+    /// Total usable device memory reported by the runtime.
+    pub vram_bytes: u64,
+    /// L2 cache bytes, when the runtime exposes the value.
+    pub l2_bytes: Option<u64>,
+    /// Last-level/infinity-cache bytes, when the runtime exposes the value.
+    pub l3_bytes: Option<u64>,
+    /// Nominal board memory bandwidth, when known from a matched device
+    /// database. Planning uses the measured value instead.
+    pub nominal_mem_bw_gbps: Option<f32>,
+    /// Current runtime-reported core clock in MHz, when available.
+    pub clock_mhz: Option<f32>,
+    /// Runtime/driver graph-capture status established by the doctor.
+    pub graph_capture: GraphCapture,
+}
+
 /// Peer transport for collectives (Spec 1 App. A `p2p`, Spec 1 §4.G).
 ///
 /// The op is the same either way; transport only changes how the runtime
@@ -165,8 +208,8 @@ pub struct P2pLink {
 
 /// Doctor-measured values (Spec 1 App. A `measured`, Spec 11 §7).
 ///
-/// Empty until the doctor's measurement pass fills it; spec-sheet values live
-/// on [`ArchDescriptor`] itself.
+/// Empty until the doctor's measurement pass fills it; optional board-sheet
+/// values live in [`DeviceFacts`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Measured {
     /// Measured memory bandwidth in GB/s (Spec 1 App. A).
@@ -204,10 +247,10 @@ impl Measured {
     }
 }
 
-/// Per-device hardware description (Spec 1 App. A).
+/// ISA-family capabilities (Spec 1 App. A).
 ///
-/// The only source of hardware facts: the planner also gets a link matrix
-/// (Spec 5 §2), and per-pair entries here mirror `Topology.links`.
+/// This type contains only facts that are invariant for the named ISA target.
+/// Physical resource quantities belong to [`DeviceFacts`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArchDescriptor {
     /// Device name, e.g. `"gfx1201"` (Spec 1 App. A).
@@ -216,23 +259,10 @@ pub struct ArchDescriptor {
     pub family: ArchFamily,
     /// Wavefront size, 32 on gfx1201 (Spec 1 App. A).
     pub wave_size: u32,
-    /// Compute-unit count, 64 on gfx1201 (Spec 1 App. A).
-    pub cu_count: u32,
     /// LDS bytes per workgroup, 64 KiB on gfx1201 (Spec 1 App. A).
     pub lds_bytes_per_wg: u32,
     /// VGPRs available per lane (Spec 1 App. A).
     pub vgprs_per_lane: u32,
-    /// L2 cache size in bytes (Spec 1 App. A).
-    pub l2_bytes: u64,
-    /// Infinity-cache size in bytes; 0 if none (Spec 1 App. A).
-    pub l3_bytes: u64,
-    /// VRAM in bytes; 32 GiB on gfx1201 (Spec 1 App. A).
-    pub vram_bytes: u64,
-    /// Spec-sheet bandwidth in GB/s; measured value lives in
-    /// [`Measured::mem_bw_gbps`] (Spec 1 App. A).
-    pub mem_bw_gbps: f32,
-    /// Clock in MHz (Spec 1 App. A).
-    pub clock_mhz: f32,
     /// Complete list of WMMA/MFMA forms with relative throughput
     /// (Spec 1 App. A).
     pub matrix_ops: Vec<MatrixOp>,
@@ -252,30 +282,35 @@ pub struct ArchDescriptor {
     pub attention_layout: LayoutId,
     /// Maximum workgroup size (Spec 1 App. A).
     pub max_wg_size: u32,
-    /// hipGraph capture support (Spec 1 App. A).
-    pub graph_capture: GraphCapture,
-    /// Doctor-measured values; empty until measured (Spec 1 App. A,
-    /// Spec 11 §7).
+}
+
+/// One runtime execution device: ISA capabilities plus discovered facts and
+/// measurements (Spec 1 App. A, Spec 5 §2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceDescriptor {
+    /// ISA capabilities used by kernel selection.
+    pub arch: ArchDescriptor,
+    /// Facts discovered for this physical device.
+    pub facts: DeviceFacts,
+    /// Doctor-measured values; empty before measurement.
     pub measured: Measured,
-    /// Peer links, mirrored in `Topology.links` (Spec 1 App. A, Spec 5 §2).
+    /// Measured peer links. Empty is valid for CPU and single-GPU operation.
     pub p2p: Vec<P2pLink>,
 }
 
 impl ArchDescriptor {
-    /// gfx1201 (R9700) initial values, to be overwritten by measurement
-    /// (Spec 1 App. A).
+    /// gfx1201 ISA capabilities (Spec 1 App. A).
     ///
-    /// Spec-stated: wave 32; 64 CUs; 64 KiB LDS/WG; f16/bf16 at 1×,
+    /// Spec-stated: wave 32; 64 KiB LDS/WG; f16/bf16 at 1×,
     /// e4m3/e5m2, iu8 and iu4 (nominal, verify) at 2×; `dot4_i32_i8` present;
-    /// fp8 convert present; SWMMAC present; 32 GiB VRAM; 640 GB/s spec
-    /// bandwidth; graph capture `Supported`. `fragment_layout` is `L1`: the
+    /// fp8 convert present; SWMMAC present. `fragment_layout` is `L1`: the
     /// gfx12 native fragment order equals `L1` (Spec 2 §2.2).
     // DECISION(A1.1): fields omitted from App. A's initial-value sentence use
     // the reference gfx1201 capabilities recorded by the A0 spike hardware
-    // fingerprints: 256 addressable VGPRs/lane, 8 MiB L2, 64 MiB L3, 2350 MHz,
-    // and 1024 threads/WG. Rejected zero sentinels because Spec 4 §4.2 uses
-    // these fields as hard search-space limits. `measured` remains empty and
-    // p2p remains per-device/topology data; SI-2 owns the current rig's link.
+    // fingerprints: 256 addressable VGPRs/lane and 1024 threads/WG. Rejected
+    // embedding the reference R9700's CU count, VRAM, caches, clock and board
+    // bandwidth because those are physical-device facts and gfx1201 names an
+    // ISA target, not one SKU. Runtime discovery owns those values.
     // DECISION(A1.1): the e5m2 matrix entry pairs an e4m3 first operand.
     // Spec 1 §2.1 constrains e5m2 to the second operand only but never names
     // the first; rejected omitting e5m2 (App. A lists it at 2×) and rejected
@@ -291,14 +326,8 @@ impl ArchDescriptor {
             name: "gfx1201".to_owned(),
             family: ArchFamily::Rdna4,
             wave_size: 32,
-            cu_count: 64,
             lds_bytes_per_wg: 64 * 1024,
             vgprs_per_lane: 256,
-            l2_bytes: 8 * 1024 * 1024,
-            l3_bytes: 64 * 1024 * 1024,
-            vram_bytes: 32 * 1024 * 1024 * 1024,
-            mem_bw_gbps: 640.0,
-            clock_mhz: 2350.0,
             matrix_ops: vec![
                 mat([16, 16, 16], DType::F16, DType::F16, DType::F32, 1.0),
                 mat([16, 16, 16], DType::Bf16, DType::Bf16, DType::F32, 1.0),
@@ -313,9 +342,6 @@ impl ArchDescriptor {
             fragment_layout: LayoutId::L1,
             attention_layout: LayoutId::ATTENTION_GFX1201,
             max_wg_size: 1024,
-            graph_capture: GraphCapture::Supported,
-            measured: Measured::empty(),
-            p2p: Vec::new(),
         }
     }
 
@@ -334,14 +360,8 @@ impl ArchDescriptor {
             name: "cpu".to_owned(),
             family: ArchFamily::Cpu,
             wave_size: 1,
-            cu_count: 1,
             lds_bytes_per_wg: 0,
             vgprs_per_lane: 0,
-            l2_bytes: 0,
-            l3_bytes: 0,
-            vram_bytes: 0,
-            mem_bw_gbps: 0.0,
-            clock_mhz: 0.0,
             matrix_ops: Vec::new(),
             valu_dot: Vec::new(),
             fp8_convert: false,
@@ -349,7 +369,26 @@ impl ArchDescriptor {
             fragment_layout: LayoutId::CONTIGUOUS,
             attention_layout: LayoutId::CONTIGUOUS,
             max_wg_size: 1,
-            graph_capture: GraphCapture::None,
+        }
+    }
+}
+
+impl DeviceDescriptor {
+    /// Portable CPU device. It is always present, including when HIP or every
+    /// GPU is absent.
+    pub fn cpu() -> Self {
+        Self {
+            arch: ArchDescriptor::cpu(),
+            facts: DeviceFacts {
+                identity: DeviceIdentity::Cpu,
+                cu_count: 1,
+                vram_bytes: 0,
+                l2_bytes: None,
+                l3_bytes: None,
+                nominal_mem_bw_gbps: None,
+                clock_mhz: None,
+                graph_capture: GraphCapture::None,
+            },
             measured: Measured::empty(),
             p2p: Vec::new(),
         }

@@ -270,7 +270,7 @@ Extensibility: new acceptance rules are new `method` values; proposers never tou
 `all_reduce(op=Sum)`, `all_gather`, `reduce_scatter`, `all_to_all(counts)`, `send(peer)`, `recv(peer)`, `barrier`.
 attrs: `group: GroupId`, `dtype`, `reduce_in: f32`
 Numerics: reduction in f32 in ascending rank order on every rank (spec 5 §6.2); result bit-identical across ranks. `all_to_all` for EP carries variable per-peer counts resolved in the pre-step phase; buffers are fixed-size per bucket.
-Transport: P2P where the arch descriptor says the pair supports it, host-staged otherwise. The op is the same either way.
+Transport: P2P where the measured topology says the directed pair supports it, host-staged otherwise. The ISA descriptor never carries peer facts. The op is the same either way.
 
 ## 5. Sharding
 
@@ -334,21 +334,15 @@ An op lands with the reference tier only. Fast paths are separate PRs gated on t
 
 ## Appendix A — Arch descriptor
 
-Consumed by the kernel generator (spec 4), the partitioner (spec 5), the loader (spec 9) and the scheduler (spec 6). One instance per device; the planner also gets a link matrix.
+Consumed by the kernel generator (spec 4), the partitioner (spec 5), the loader (spec 9) and the scheduler (spec 6). ISA capabilities and physical-device facts are separate types. An ISA descriptor may be checked in; a physical-device descriptor may only be constructed from runtime discovery and doctor measurement. The planner also gets a measured link matrix.
 
 ```
 ArchDescriptor {
   name:              str            # "gfx1201"
   family:            RDNA4 | RDNA3 | CDNA3 | Reference | CPU     # CPU is the T0/T0v device (spec 4 §2)
   wave_size:         u32            # 32
-  cu_count:          u32
   lds_bytes_per_wg:  u32
   vgprs_per_lane:    u32
-  l2_bytes:          u64
-  l3_bytes:          u64            # infinity cache; 0 if none
-  vram_bytes:        u64
-  mem_bw_gbps:       f32            # spec sheet; measured value stored alongside by doctor
-  clock_mhz:         f32
   matrix_ops: [ { shape: (16,16,16), a: f16, b: f16, acc: f32, rate: RelRate }, ... ]
                                      # complete list of WMMA/MFMA forms with relative throughput
   valu_dot:          [ dot4_i32_i8, dot2_f32_f16, dot2_f32_bf16, ... ]
@@ -357,7 +351,20 @@ ArchDescriptor {
   fragment_layout:   LayoutId       # native B-fragment order the zero-copy loader checks against (spec 2 §2.4)
   attention_layout:  LayoutId       # intra-block K/V element order the attention kernels use (spec 3 §3.2, spec 4 §5.3)
   max_wg_size:       u32
-  graph_capture:     Supported | Unstable | None
+}
+
+DeviceDescriptor {
+  arch:              ArchDescriptor
+  facts: {
+    identity:        CPU | GPU { uuid: Option<[u8; 16]>, pci_bdf: str }
+    cu_count:        u32
+    vram_bytes:      u64
+    l2_bytes:        Option<u64>
+    l3_bytes:        Option<u64>
+    nominal_mem_bw_gbps: Option<f32> # optional matched-board information; never a planning input
+    clock_mhz:       Option<f32>
+    graph_capture:   Supported | Unstable | None
+  }
   measured: {                       # filled by the doctor's measurement pass (spec 11 §7); empty until then
     mem_bw_gbps, dispatch_overhead_us, matrix_rates: [RelRate], h2d_gbps, d2h_gbps
   }
@@ -365,7 +372,9 @@ ArchDescriptor {
 }
 ```
 
-gfx1201 (R9700) initial values, to be overwritten by measurement: wave 32; 64 CUs; 64 KB LDS/WG; matrix ops f16/bf16 (1×), e4m3/e5m2 (2×), iu8 (2×), iu4 (2× nominal, verify); `dot4_i32_i8` present; fp8 convert present; SWMMAC present; VRAM 32 GB; bandwidth 640 GB/s spec; graph capture Supported. Link matrix on the current rig: rank0↔rank1 over PCIe x4 on one side, P2P capability to be measured (assume HostStaged until proven).
+gfx1201 ISA values: wave 32; 64 KB LDS/WG; matrix ops f16/bf16 (1×), e4m3/e5m2 (2×), iu8 (2×), iu4 (2× nominal, verify); `dot4_i32_i8` present; fp8 convert present; SWMMAC present. CU count, VRAM, caches, clocks, board bandwidth, graph-capture reliability, PCIe topology and P2P are not gfx1201 properties and must never be supplied by this constructor.
+
+HIP device ordinals are ephemeral handles valid only inside the process that enumerated them. They never appear in a persistent device identity, plan-cache key or receipt fingerprint. GPU identity uses the runtime UUID when available plus canonical PCI BDF; rank is assigned only after discovery. CPU is always a valid device and does not depend on HIP being installed.
 
 ## Appendix B — Determinism and tolerance policy
 

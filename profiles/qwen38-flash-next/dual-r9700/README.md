@@ -8,7 +8,7 @@ how to respond to every class of doctor result.
 
 The published profile is optimized for two 32 GiB Radeon AI PRO R9700 GPUs.
 The GPUs do not need to occupy the same PCIe slots as the reference machine.
-The rank order, negotiated link bandwidth, RAM policy, PLE storage, and expert
+The rank order, PCIe path capacity, RAM policy, PLE storage, and expert
 cache are explicit so similar machines can use the defaults while different
 machines fail or warn with a concrete correction.
 
@@ -135,8 +135,8 @@ to silence the failure.
 
 ### `R9V_EXPECTED_PCIE_LINKS`
 
-This optional lock records the exact negotiated generation/speed and lane
-width expected for each TP rank. It accepts a readable generation form or a
+This optional lock records the exact end-to-root path-capacity bottleneck
+expected for each TP rank. It accepts a readable generation form or a
 numeric transfer-rate form:
 
 ```bash
@@ -147,23 +147,26 @@ numeric transfer-rate form:
 
 The values follow `R9V_VISIBLE_DEVICES` rank order. Leave the setting empty on
 the first doctor run. If sysfs exposes both links, doctor prints the exact line
-to paste into the configuration. Once locked, a speed or width change fails
+to paste into the configuration. Once locked, a capacity or width change fails
 preflight instead of silently changing the performance profile.
 
-R9V cannot set a physical PCIe generation or lane width. Those are negotiated
+R9V cannot set a physical PCIe generation or lane width. Those are determined
 by the GPU, motherboard slot, BIOS lane allocation, riser/cable, and competing
 devices. This setting only verifies the result. If it fails, repair the
 hardware/firmware topology or deliberately update the lock after deciding the
 new topology is correct.
 
-The lock matches the endpoint's own negotiated link. Upstream-hop capacity is
-enforced separately by the bandwidth floor below, which walks the full path.
+The lock and bandwidth floor both walk the complete device-to-root path. They
+use each hop's maximum speed and negotiated width for stable capacity because
+an idle PCIe link may temporarily downshift speed while lane allocation and
+degraded training remain significant. The report includes current state
+as a diagnostic but never mistakes the endpoint alone for the full topology.
 
 ### `R9V_MIN_PCIE_BANDWIDTH_GBPS`
 
 This is the minimum theoretical one-direction PCIe payload bandwidth for each
-TP rank, not a benchmark result. The doctor reads the negotiated speed and
-width of every hop from the device up to the root port, accounts for PCIe
+TP rank, not a benchmark result. The doctor reads maximum speed and negotiated width
+of every hop from the device up to the root port, accounts for PCIe
 link encoding, and applies the floor to the slowest hop. An endpoint that
 negotiates x16 behind a x4 upstream bridge is therefore scored at the x4
 bottleneck, and the report names the capping hop. Endpoint sysfs alone cannot
@@ -179,7 +182,7 @@ The published defaults are:
 They allow topology shapes different from the reference host when their
 payload capability is equivalent or better. This bandwidth floor is
 independent of the exact link lock: use the floor to express "fast enough"
-and the lock to express "the intended slots negotiated as expected." Inspect
+and the lock to express "the intended slot paths have the expected capacity." Inspect
 a card manually with:
 
 ```bash
@@ -426,7 +429,7 @@ Static doctor verifies:
 
 - Docker, ROCm device nodes, source/submodule inputs, and two `gfx1201` GPUs.
 - HIP index to BDF to TP-rank mapping.
-- Exact negotiated PCIe links when configured, plus the slowest-hop payload
+- Exact PCIe path-capacity bottlenecks when configured, plus the slowest-hop payload
   of each rank's full path to the root port against per-rank floors.
 - Total/available host RAM policy.
 - Cache rank/slots and static-manifest-plus-cache VRAM ceiling.
@@ -477,7 +480,7 @@ is intentional and you accept that the published TG figure may not apply.
 
 ### PCIe link does not match the exact lock
 
-The exact lock is reporting what the system negotiated, not trying to tune it.
+The exact lock reports stable path capacity; it does not try to tune hardware.
 Compare `current_link_*` and `max_link_*` in sysfs. If current is below max,
 check slot wiring, BIOS bifurcation, risers/cables, and devices sharing lanes.
 If the detected link is the topology you intentionally built, update

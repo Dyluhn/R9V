@@ -28,8 +28,8 @@ fn test_device_enum_variants_and_accessors() {
 #[test]
 fn test_device_ordering_and_collections() {
     let cpu = Device::Cpu;
-    let hip0 = Device::Hip(0);
-    let hip1 = Device::Hip(1);
+    let hip0 = Device::Hip(r9v_hip::HipOrdinal::new(0));
+    let hip1 = Device::Hip(r9v_hip::HipOrdinal::new(1));
 
     // Ordering: Cpu < Hip(0) < Hip(1)
     assert!(cpu < hip0);
@@ -41,12 +41,19 @@ fn test_device_ordering_and_collections() {
     btree.insert(hip0);
 
     let sorted: Vec<_> = btree.into_iter().collect();
-    assert_eq!(sorted, vec![Device::Cpu, Device::Hip(0), Device::Hip(1)]);
+    assert_eq!(
+        sorted,
+        vec![
+            Device::Cpu,
+            Device::Hip(r9v_hip::HipOrdinal::new(0)),
+            Device::Hip(r9v_hip::HipOrdinal::new(1))
+        ]
+    );
 
     let mut set = HashSet::new();
     set.insert(Device::Cpu);
-    set.insert(Device::Hip(0));
+    set.insert(Device::Hip(r9v_hip::HipOrdinal::new(0)));
     assert_eq!(set.len(), 2);
     assert!(set.contains(&Device::Cpu));
-    assert!(set.contains(&Device::Hip(0)));
+    assert!(set.contains(&Device::Hip(r9v_hip::HipOrdinal::new(0))));
 }

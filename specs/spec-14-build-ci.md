@@ -11,8 +11,9 @@ The repository layout, pinned toolchains, how the kernel bundle and tune files a
 1. **Hosted CI never claims GPU correctness.** It runs the CPU tiers, compiles everything, regenerates and diffs, and builds docs. Its status name says `cpu-only`.
 2. **The runner is the gate.** Golden, invariance, determinism and perf tests on real gfx1201 hardware are required for merge to `main`, and they run only on trusted code.
 3. **Everything is pinned and reproducible.** Rust toolchain, ROCm LLVM, Python lockfile, calibration manifests, reference checkpoints by fingerprint. Two builds of the same commit produce the same bundle bytes.
-4. **The binary starts without ROCm.** HIP is loaded at runtime; the CPU tiers, the helper, the doctor and config tooling work on a machine with no GPU.
+4. **The binary runs without ROCm.** HIP is loaded at runtime; no HIP runtime or zero discovered GPUs selects the full scalar CPU tier. The helper, doctor and config tooling use the same no-GPU path.
 5. **Linux x86_64 only in v1.** Stated, not implied.
+6. **The CPU binary is architectural-baseline code.** Official x86_64 artifacts are compiled for baseline x86_64, never for the build host. T0 contains no optional SIMD requirement; T0v may use runtime-dispatched features only and must always fall back to T0.
 
 ## 2. Repository layout
 
@@ -60,7 +61,8 @@ Crate dependencies point strictly downward in the order listed. `cargo deny` enf
 
 - **Rust**: stable, pinned in `rust-toolchain.toml`; bumped by PR. `cargo build --locked` everywhere.
 - **ROCm**: the pinned release in `toolchain.toml` (a 7.x line release; the file is the truth). Its `clang++` is the only compiler used for kernels (spec 4 §4.3). The compile-test matrix is the pinned release plus the previous minor.
-- **HIP at runtime**: `r9v-hip` `dlopen`s `libamdhip64` on first GPU use and resolves the dozen entry points the engine needs. No GPU or no ROCm → the CPU device is the only device and the loader says so.
+- **HIP at runtime**: `r9v-hip` `dlopen`s `libamdhip64` on first GPU use and resolves only the entry points the engine needs. No GPU or no ROCm → the CPU device is the only device and the loader says so. Enumeration obtains the complete BDF, including PCI function, from `hipDeviceGetPCIBusId` and rejects disagreement with `hipDeviceProp_t` before constructing a stable identity.
+- **CPU target**: `.cargo/config.toml` pins official Linux x86_64 Rust code to `target-cpu=x86-64`. The `r9v-t0` build gate rejects optional crate-level x86 features and host-native compilation. Optimized T0v functions use runtime detection and a baseline T0 fallback; release correctness never depends on AVX, AVX2, AVX-512, VNNI, AMX or a particular CPU vendor.
 - **Python** (quant tool): 3.11+, `uv` lockfile, torch pinned per accelerator extra (`[cuda]`, `[rocm]`, `[cpu]`).
 - **Container**: `ci/Dockerfile` with the pinned ROCm and Rust; hosted CI and the runner both use it, so "works in CI" and "works on the runner" mean the same environment.
 
@@ -84,6 +86,7 @@ cargo xtask verify-bundle              build twice, compare bytes
 On every PR and push:
 
 - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo deny`
+- portability policy: reject developer-home paths and native-CPU flags in engine/build sources; compile T0 at the baseline target; stub HIP discovery at 0, 1, 2 and 3 devices
 - `cargo test --workspace`: T0 and T0v tests; format repack round-trips on synthetic tensors (spec 2 §10); state manager commit/prefix logic against an in-memory pool (spec 3 §8); partitioner as a pure function against golden per-rank graph summaries (spec 5 §4.1); scheduler simulation against a fake `C(S, T_dec, T_pre)` and `C_draft(k)` table (spec 6, since every decision is a function of those tables); config schema round-trip and settings-index consistency (spec 12 §3); loader on tiny synthetic GGUFs; serve routes against a CPU engine running a 30M-parameter test model
 - `xtask gen` and diff against `kernels/gen/` (spec 4 §1.6)
 - compile T1 and T2 for every arch in `toolchain.toml` (compile only)
@@ -109,6 +112,8 @@ Status check name: `gpu/gfx1201`. Required for merge to `main`.
 
 ### 5.3 Runner isolation
 
+- GPU jobs run in the pinned OCI image under the ordinary Linux container runtime. The container receives only `/dev/kfd` and the required `/dev/dri/renderD*` nodes; it does not receive a privileged container or the host filesystem.
+- A syscall-interposition sandbox such as gVisor may be an additional CPU-only/untrusted-source tier, but it is not the GPU correctness environment: the GPU path must exercise the real KFD/DRM ioctl and memory-mapping ABI against the host kernel and driver.
 - Dedicated non-privileged user; the runner has no secrets beyond its registration token; no deploy keys, no package registry credentials.
 - Network egress limited to GitHub and the package mirrors the container needs; models are pre-staged read-only on local disk by fingerprint, never downloaded by jobs.
 - Each job runs in a fresh container with the workspace wiped; GPU access via device passthrough only.
@@ -137,6 +142,7 @@ Both the standard GGUF (Q4_K_M and Q8_0) and the native file for each are staged
 `cargo xtask release <version>`:
 
 1. Requires green `ci/cpu-only` and `gpu/gfx1201` on the commit and a green nightly within 24 h.
+   A release advertised as generally supporting gfx1201 also requires a green correctness/installation qualification from a second clean gfx1201 host whose stable hardware/topology fingerprint differs from the reference runner. This second-host gate does not weaken or replace the immutable performance floors, which remain gated on the reference receipt protocol.
 2. Builds the bundle for every arch in the support matrix; verifies reproducibility.
 3. Produces `r9v-<version>-linux-x86_64.tar.gz` (binary, `kernels/bundle`, `tune/`, `docs/`, generated `SUPPORT.md`), `r9v-quant-<version>.whl`, `SHA256SUMS`, and release notes that embed the reference receipts (spec 11 §9.4) and the version table (§8).
 4. Tags; publishes the wheel.
@@ -157,7 +163,7 @@ All five appear in `r9v --version`, the load report, the doctor bundle and every
 
 ## 9. Platform scope
 
-- **v1**: Linux x86_64, glibc; ROCm on gfx1201 for the fast path; any gfx9+ for the reference tier; CPU-only mode for the helper and tooling.
+- **v1**: Linux x86_64 architectural baseline, glibc; scalar T0 execution on every CPU in that platform scope; ROCm on gfx1201 for the fast path; any gfx9+ for the GPU reference tier. Optional SIMD is an upgrade, never a requirement.
 - **Not in v1**: Windows (ROCm on Windows exists for gfx12, but direct I/O, pinned-memory handling and the Unix socket need porting and a second runner), macOS, aarch64. Each is a tracked issue with the list of what would need to change, so a contributor can pick it up without archaeology.
 
 ## 10. Developer workflow

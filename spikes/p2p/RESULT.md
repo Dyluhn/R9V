@@ -3,21 +3,27 @@
 - **Spike ID**: S6 (`p2p`)
 - **Card**: A0.S6
 - **Governing Specs**: Spec 5 §1, §2, §6; Spec 11 §7; Roadmap §A0
-- **Status**: PASS
+- **Status**: PASS for measured peer transport; PCIe fingerprint corrected 2026-09-03
 
 ## Hardware Fingerprint
 
 - Board: ASRock B850M-C; AMD Ryzen 5 9600X; 12 logical CPUs; one NUMA node.
 - Discrete rank 0: AMD Radeon AI PRO R9700, gfx1201, 32624 MiB, PCI
-  `0000:03:00.0`, current link `32.0 GT/s x16`, IOMMU group 15.
+  `0000:03:00.0`; the complete upstream path has Gen5 x16 capacity; IOMMU
+  group 15.
 - Discrete rank 1: AMD Radeon AI PRO R9700, gfx1201, 32624 MiB, PCI
-  `0000:13:00.0`, current link `32.0 GT/s x16`, IOMMU group 31.
+  `0000:13:00.0`; its endpoint reports Gen5 x16, but upstream root port
+  `0000:00:02.2` is physically capped at Gen4 x4; IOMMU group 31.
 - An integrated gfx1036 device is HIP device 2 and is outside the measured
   two-rank topology.
 - Kernel: `7.1.5-ogc5.1.fc44.x86_64`; HIP runtime/driver version reported by
   the container: `71460850`; ROCm runtime from `r9v-ci:test`.
-- The live link state contradicts the seeded x16/x4 description; SI-2 records
-  that topology issue.
+- The original result incorrectly treated endpoint sysfs as the complete PCIe
+  path and consequently reported x16/x16. Endpoint capability does not expose
+  an upstream bridge or root-port bottleneck. The corrected fingerprint walks
+  every PCI ancestor and selects the lowest configured payload capacity using
+  maximum speed with negotiated width. Current link speed is retained only as
+  a transient diagnostic because idle links may downshift.
 
 ## Execution
 
@@ -34,6 +40,11 @@
   own stream. Latency is end-to-end monotonic wall time; GB/s is decimal
   payload bytes per second. Destination bytes are exhaustively compared with
   the deterministic source after each trial set.
+- PCIe topology method: resolve each HIP device's BDF under
+  `/sys/bus/pci/devices`, walk the endpoint and every PCI ancestor to the root,
+  read both `current_link_*` and `max_link_*`, and choose the path-capacity
+  bottleneck. P2P capability and measured peer-copy performance are recorded
+  separately and never used to infer lane width.
 
 ## Measurements
 
@@ -63,5 +74,6 @@ letting them determine the topology coefficient.
 - Direct is materially lower latency than explicit host staging at 16 KiB in
   both directions, and every destination byte matches.
 - Selected topology transport for rank 0↔1: **Direct**.
-- **Result: PASS.** The card's diagnostic claim is established. SI-2 is the
-  separate stale-link-width issue; it does not invalidate the live P2P result.
+- **Result: PASS.** The peer-map and copy claim is established for the measured
+  pair. It does not claim that the paths are symmetric: the physical reference
+  topology remains Gen5 x16 plus upstream-capped Gen4 x4.

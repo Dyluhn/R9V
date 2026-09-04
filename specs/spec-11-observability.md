@@ -80,20 +80,23 @@ Weights that were not read this step (embedding rows other than those gathered, 
 
 ## 7. Measurement pass
 
-`r9v doctor measure` (also run automatically on first load on a new hardware fingerprint) fills the measured fields of the arch descriptor and topology (spec 1 App. A, spec 5 §2):
+`r9v doctor measure` (also run automatically on first GPU load on a new hardware fingerprint) fills the measured fields of each physical-device descriptor and the topology (spec 1 App. A, spec 5 §2):
 
 | measurement | method |
 |---|---|
+| `pcie_path` | resolve each GPU's canonical PCI BDF in sysfs; record endpoint and every upstream PCI ancestor through the root port, including current and maximum speed/width; select configured capacity from maximum speed plus negotiated width over the whole path, never the endpoint alone; a partial link-bearing hop is a typed failure, never silently omitted |
 | `mem_bw_gbps` | streaming read kernel over 1 GB, median of 10 |
 | `dispatch_overhead_us` | 1000 empty launches, launch list and hipGraph |
 | `matrix_ops[*].rate` | synthetic 4096³ GEMM per dtype, WMMA path, median of 10 |
-| `p2p{a,b}` | direct and host-staged copies at 16 KB / 256 KB / 16 MB, latency and bandwidth each |
+| `p2p{a,b}` | for every directed pair `a != b`, direct and host-staged copies at 16 KB / 256 KB / 16 MB, latency and bandwidth each; skipped for zero or one GPU |
 | `h2d_gbps`, `d2h_gbps` | pinned copies, 256 MB |
 | `host.mem_gbps` | multi-threaded streaming read |
 | `nvme_gbps` | direct-IO sequential read, 1 GB, on the model's volume |
 | clocks and temperatures | via `rocm-smi` before and after, recorded not gated |
 
-Results are cached under the hardware fingerprint (`GPU ids ‖ driver ‖ ROCm ‖ kernel ‖ CPU model ‖ PCIe topology`) and invalidated when any component changes. The spec-sheet values stay in the descriptor beside the measured ones; both are reported.
+Results are cached under the hardware fingerprint (`GPU UUID+BDF identities ‖ driver ‖ ROCm ‖ kernel ‖ CPU architecture/features ‖ stable PCIe path capacities`) and invalidated when any component changes. HIP ordinals are excluded because they are process-local and may reorder. Transient current PCIe speed is recorded but excluded from the stable fingerprint because an idle link may downshift; every hop's maximum speed, negotiated width, maximum width and measured transfer rates are retained. Optional board-sheet values stay in the device facts beside the measured ones; both are reported.
+
+No-GPU is a valid measurement result. With no HIP runtime, the bundle records `hip_runtime = absent`, the GPU list and link matrix are empty, and CPU measurements continue. A present but broken HIP runtime is a typed diagnostic failure rather than being silently treated as absence.
 
 ## 8. Doctor bundle
 
@@ -101,7 +104,7 @@ Results are cached under the hardware fingerprint (`GPU ids ‖ driver ‖ ROCm 
 
 ```
 manifest.json         r9v version, gen_version, bundle manifest hash, tune file hashes, timestamp, redaction flags
-hardware.json         arch descriptors (spec + measured), topology, CPU, RAM, NVMe, driver, ROCm, kernel, rocm-smi snapshot
+hardware.json         ISA and physical-device descriptors, measurements, topology, CPU, RAM, NVMe, driver, ROCm, kernel, rocm-smi snapshot
 model.json            load report (spec 9 §10), model_fp, family, per-tensor table
 plan.json             the plan (spec 5 §5.1) and per-rank graph summaries (spec 5 §4.1)
 config.toml           effective config, every auto resolved, with the source of each value (default / file / runtime change)

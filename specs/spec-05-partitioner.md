@@ -16,23 +16,36 @@ Out of scope: which sequences run in a step (spec 6), the row cache that backs t
 4. **Host experts are computed on the host.** At low batch, moving an expert's weights to the GPU costs 100× more than moving the hidden state to the CPU. A `tiered` placement hint on experts resolves to CPU compute for the cold set (`Host`, spec 2 §5); fetching weights to device (`Tiered`, host_fetch) is a throughput-mode option only.
 5. **P2P is measured, never assumed.** Every link is `Direct` or `HostStaged` per the doctor's measurement; the collective ops are identical either way.
 6. **Replicated tensors are bit-identical across ranks.** Every reduction is computed in the same fixed order on every rank. Divergence between ranks is a bug class this spec is designed to make impossible.
+7. **Device count is data.** Zero, one and N GPUs are ordinary discovery results. CPU is always present; no engine path may require a second GPU, and no peer operation exists when fewer than two GPUs are selected.
 
 ## 2. Topology
 
 ```
 Topology {
-  devices: [ { rank, arch: ArchDescriptor, vram_free: u64 } ]
-  links:   [ (a, b, transport: Direct | HostStaged, gbps: f32, latency_us: f32) ]   # measured
-  host:    { cores, simd: AVX2 | AVX512 | AVX512_VNNI | AMX, mem_gbps: f32, pinned_budget: u64 }
+  devices: [ { rank, descriptor: DeviceDescriptor, vram_free: u64,
+               pcie_path: [ { bdf, current: { speed_gts, width }, maximum: { speed_gts, width } } ],
+               pcie_capacity_bottleneck } ]
+  links:   [ (a, b, transport: Direct | HostStaged, gbps: f32, latency_us: f32) ]   # measured, directed
+  host:    { cores, simd: Baseline | AVX2 | AVX512 | AVX512_VNNI | AMX, mem_gbps: f32, pinned_budget: u64 }
 }
 ```
 
-Populated by the doctor's measurement pass (spec 11) and cached by hardware fingerprint. On the current rig: two gfx1201, one on x16 and one on x4; the x4 link sets the PCIe cost for every plan, and P2P is `HostStaged` until measured otherwise.
+Populated by the doctor's measurement pass (spec 11) and cached by hardware fingerprint. PCIe discovery walks from each endpoint through every upstream PCI bridge to the root and records both current and maximum speed/width for every hop. Configured capacity uses maximum speed with negotiated width: current speed is diagnostic because power management may downshift an idle link, while current width detects lane allocation, bifurcation and degraded training. The capacity bottleneck is the hop with the lowest configured payload capacity; endpoint link files alone are not a topology measurement. If the endpoint or any link-bearing ancestor lacks a complete positive speed/width capacity pair, GPU discovery fails with a typed diagnostic rather than omitting that hop. H2D, D2H and peer-copy measurements—not PCIe labels—supply planner bandwidth.
+
+The reference rig is one gfx1201 path at Gen5 x16 and one path capped by an upstream Gen4 x4 root port even though that GPU endpoint reports Gen5 x16. Direct P2P capability is independent of this width and remains selected only when the measured direct path wins. For N selected GPUs, the doctor measures every directed pair `a != b`; zero or one GPU produces an empty link list.
+
+The cardinality rules are mechanical:
+
+- zero GPUs: CPU plan; GPU measurements and peer checks are skipped;
+- one GPU: single-device plan; link list and collectives are empty;
+- N GPUs: ranks are assigned after stable UUID+BDF discovery, and strategies are evaluated from the measured topology without a two-device special assumption.
 
 ## 3. Strategies
 
 | strategy | what is sharded | comms per layer per step | when |
 |---|---|---|---|
+| **CPU** | nothing | none | no GPU selected or explicit CPU execution |
+| **Single** | nothing | none | one GPU, or the model and requested profile fit one selected GPU |
 | **PP** | layers by range | one `send/recv` of `[T, Dm]` at each stage boundary (per step, not per layer) | default for `latency`; any model that doesn't fit one device |
 | **TP** | attention heads; MLP columns/rows | 2 × `all_reduce` of `[T, Dm]` | `throughput`, or a single layer too large for one device |
 | **EP** | experts by device | `all_to_all` dispatch + combine of routed tokens | `throughput` on MoE; never at `latency` |
@@ -108,7 +121,7 @@ The partitioner is a pure function of `(graph, plan, topology)` and its output i
 ```
 plan(model: ModelSummary, topology, config) -> Plan
 Plan {
-  strategy:        PP | TP | EP | PP+TP
+  strategy:        CPU | Single | PP | TP | EP | PP+TP
   stages:          [ { rank_set, layer_range } ]
   tp_degree:       u32
   expert_map:      { expert → (rank, Device | HostCompute | HostFetch) }
@@ -122,7 +135,7 @@ Plan {
 
 ### 5.2 Selection
 
-1. Enumerate candidate plans for the device set: PP with each balanced boundary set; TP at each degree dividing `hkv`; EP for MoE; PP+TP for 4+ devices; host-expert variants when experts exceed VRAM.
+1. Select `CPU` for zero GPUs and `Single` for one GPU. For two or more GPUs, enumerate candidate plans for the discovered device set: `Single` where feasible; PP with each balanced boundary set; TP at each degree dividing `hkv`; EP for MoE; PP+TP for 4+ devices; host-expert variants when experts exceed VRAM.
 2. Drop infeasible plans (§4.3).
 3. Score each with the cost model for the profile's target buckets: `latency` scores `T ∈ {1, 2, 4}` with weights `{0.6, 0.3, 0.1}`; `throughput` scores `T ∈ {32, 128, 512}` equally.
 4. Pick the minimum. Ties go to fewer collectives.
@@ -152,7 +165,7 @@ All buffers are fixed-size per bucket and pre-registered (pinned for `HostStaged
 
 ### 6.2 Implementation
 
-v1 is an in-process implementation over HIP streams and events for 2–4 devices in one process. Not RCCL: it adds a large dependency with inconsistent behavior on consumer RDNA, and at the message sizes this engine moves (`[T, Dm]` at small `T` is tens of KB) a direct exchange beats ring algorithms. An RCCL backend can be added behind the same interface for larger nodes.
+v1 is an in-process implementation over HIP streams and events for every selected GPU. The zero- and one-GPU cases construct no comms objects. The direct-exchange implementation is optimized for 2–4 devices; the fixed-order path remains correct for larger N. Not RCCL: it adds a large dependency with inconsistent behavior on consumer RDNA, and at the message sizes this engine moves (`[T, Dm]` at small `T` is tens of KB) a direct exchange beats ring algorithms. An RCCL backend can be added behind the same interface for larger nodes.
 
 - `Direct`: `hipMemcpyPeerAsync` or peer-mapped loads, whichever the doctor measured faster for the size class.
 - `HostStaged`: D2H into a pinned bounce buffer, H2D to the peer; two copies, both on the sender's stream, with an event the receiver waits on.
@@ -165,6 +178,8 @@ Each rank has a compute stream and a comms stream. Collectives are enqueued on t
 
 ## 7. Correctness across device counts
 
+- **CPU-only and single-GPU are first-class.** The full T0 graph runs with no HIP runtime or GPU. A one-GPU plan contains no collective nodes and must match T0 within the tier tolerance.
+- **Cardinality matrix.** Hosted tests exercise discovered GPU counts 0, 1, 2 and 3; they assert plan kind, rank assignment, link count (`N × (N - 1)` directed links after measurement) and absence of peer calls for N < 2.
 - **PP vs single device: bit-identical (L0).** No arithmetic changes; only where it runs.
 - **TP or EP vs single device: within tolerance (L1).** Splitting K or experts across ranks changes reduction order. Run-to-run on the same plan is L0.
 - **Across ranks under TP: bit-identical replicated tensors (L0).** Enforced by §6.2 ordering and tested by hashing every replicated tensor on every rank after each layer in debug mode.
@@ -175,7 +190,7 @@ Each rank has a compute stream and a comms stream. Collectives are enqueued on t
 ```
 [parallel]
 profile        = "latency" | "throughput"           # default latency
-devices        = [0, 1]
+devices        = "auto" | "cpu" | ["uuid-or-pci-bdf", ...]  # default auto
 mode           = "auto" | "pp" | "tp" | "ep" | "pp+tp"
 tp_degree      = auto | n
 pp_stages      = auto | [[0..23], [24..47]]
@@ -187,4 +202,4 @@ hot_set_vram   = auto | bytes
 transport      = "auto" | "p2p" | "host"
 ```
 
-Every `auto` resolves to a concrete value in the plan file, which the doctor bundle includes, so a reported result always states exactly how the model was placed.
+Numeric HIP ordinals may be accepted as an interactive process-local selector, but are resolved immediately to UUID+BDF and never written to a config, plan, cache key or receipt. Every `auto` resolves to a concrete stable identity in the plan file, which the doctor bundle includes, so a reported result always states exactly how the model was placed.

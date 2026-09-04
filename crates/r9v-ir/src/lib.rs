@@ -25,8 +25,8 @@ pub mod tensor;
 pub mod version;
 
 pub use arch::{
-    ArchDescriptor, ArchFamily, GraphCapture, MatrixOp, Measured, P2pLink, P2pTransport, RelRate,
-    ValuDot,
+    ArchDescriptor, ArchFamily, DeviceDescriptor, DeviceFacts, DeviceIdentity, GraphCapture,
+    MatrixOp, Measured, P2pLink, P2pTransport, RelRate, ValuDot,
 };
 pub use batch::{BatchMeta, BatchMetaBuilder, Positions, TreeMask, BLOCK_TABLE_SENTINEL};
 pub use dtype::DType;

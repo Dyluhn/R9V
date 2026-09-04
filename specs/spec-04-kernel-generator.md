@@ -246,7 +246,7 @@ Every launch goes through one dispatch function that, when profiling is enabled 
 
 ## 13. Bringing up a new arch
 
-1. Write `ArchDescriptor` (spec 1 App. A) from the ISA doc; leave measured fields empty.
+1. Write `ArchDescriptor` (spec 1 App. A) from the ISA documentation. Do not put SKU, board, clock, memory or topology facts in it; those enter through runtime `DeviceDescriptor` discovery.
 2. Run the doctor's measurement pass to fill bandwidth, dispatch overhead, P2P matrix, and confirm `matrix_ops` rates empirically.
 3. T1 for every op compiles and passes golden. The arch is now **supported (reference tier)**.
 4. Add the arch's leaf wrappers (§8) for whichever of `matrix_ops`, `valu_dot`, `fp8_convert`, `sparse_matrix` it has. Set `fragment_layout` and `attention_layout` to its native orders (new `LayoutId`s if they differ from `L1`).

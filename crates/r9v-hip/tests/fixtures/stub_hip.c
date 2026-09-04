@@ -3,11 +3,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 typedef int hipError_t;
 #define HIP_SUCCESS 0
+#define HIP_ERROR_NO_DEVICE 100
 #define HIP_ERROR_INVALID_DEVICE 101
 #define HIP_ERROR_OUT_OF_MEMORY 2
 #define HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED 704
@@ -55,32 +57,62 @@ typedef struct {
     uint8_t _gap_end[56];
 } MockDeviceProp;
 
+#ifndef STUB_DEVICE_COUNT
+#define STUB_DEVICE_COUNT 2
+#endif
+
 hipError_t hipGetDeviceCount(int *count) {
     if (!count) return 1;
-    *count = 2;
+#ifdef STUB_NO_DEVICE_ERROR
+    *count = 0;
+    return HIP_ERROR_NO_DEVICE;
+#else
+#ifdef STUB_DEVICE_COUNT_ERROR
+    return 101;
+#else
+    *count = STUB_DEVICE_COUNT;
     return HIP_SUCCESS;
+#endif
+#endif
 }
 
 hipError_t hipSetDevice(int device) {
-    if (device < 0 || device >= 2) {
+#ifdef STUB_DEVICE_COUNT_ERROR
+    return 101;
+#else
+    if (device < 0 || device >= STUB_DEVICE_COUNT) {
         return HIP_ERROR_INVALID_DEVICE;
     }
     return HIP_SUCCESS;
+#endif
 }
 
 hipError_t hipGetDevice(int *device) {
     if (!device) return 1;
+#ifdef STUB_DEVICE_COUNT_ERROR
+    return 101;
+#else
     *device = 0;
     return HIP_SUCCESS;
+#endif
 }
 
 hipError_t hipGetDevicePropertiesR0600(void *prop_ptr, int device) {
     if (!prop_ptr) return 1;
-    if (device < 0 || device >= 2) return HIP_ERROR_INVALID_DEVICE;
+#ifdef STUB_DEVICE_COUNT_ERROR
+    return 101;
+#else
+    if (device < 0 || device >= STUB_DEVICE_COUNT) return HIP_ERROR_INVALID_DEVICE;
 
     MockDeviceProp *prop = (MockDeviceProp *)prop_ptr;
     memset(prop, 0, sizeof(MockDeviceProp));
-    strncpy(prop->name, "Stub AMD Radeon AI PRO R9700", sizeof(prop->name) - 1);
+    if (device == 0) {
+        strncpy(prop->name, "Stub AMD Radeon AI PRO R9700", sizeof(prop->name) - 1);
+        prop->pciBusID = 3;
+    } else {
+        snprintf(prop->name, sizeof(prop->name), "Stub AMD Radeon AI PRO R9700 (#%d)", device);
+        prop->pciBusID = 3 + device * 4;
+    }
     strncpy(prop->gcnArchName, "amdgcn-amd-amdhsa--gfx1201", sizeof(prop->gcnArchName) - 1);
     prop->totalGlobalMem = 34359738368ULL; // 32 GiB
     prop->sharedMemPerBlock = 65536;
@@ -97,7 +129,6 @@ hipError_t hipGetDevicePropertiesR0600(void *prop_ptr, int device) {
     prop->major = 12;
     prop->minor = 0;
     prop->multiProcessorCount = 64;
-    prop->pciBusID = 3;
     prop->pciDeviceID = 0;
     prop->pciDomainID = 0;
     prop->isMultiGpuBoard = 0;
@@ -106,11 +137,25 @@ hipError_t hipGetDevicePropertiesR0600(void *prop_ptr, int device) {
     prop->ECCEnabled = 1;
     prop->cooperativeLaunch = 1;
 
+    for (int i = 0; i < 16; i++) {
+        prop->uuid[i] = (uint8_t)(0x10 * (device + 1) + i);
+    }
+
     return HIP_SUCCESS;
+#endif
+}
+
+hipError_t hipDeviceGetPCIBusId(char *pci_bus_id, int len, int device) {
+    if (!pci_bus_id || len <= 0) return 1;
+    if (device < 0 || device >= STUB_DEVICE_COUNT) return HIP_ERROR_INVALID_DEVICE;
+    int bus = 3 + device * 4;
+    int written = snprintf(pci_bus_id, (size_t)len, "0000:%02x:00.0", bus);
+    return (written >= 0 && written < len) ? HIP_SUCCESS : 1;
 }
 
 const char *hipGetErrorString(hipError_t error) {
     if (error == HIP_SUCCESS) return "hipSuccess";
+    if (error == HIP_ERROR_NO_DEVICE) return "hipErrorNoDevice";
     if (error == HIP_ERROR_INVALID_DEVICE) return "hipErrorInvalidDevice";
     if (error == HIP_ERROR_OUT_OF_MEMORY) return "hipErrorOutOfMemory";
     if (error == HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED) return "hipErrorPeerAccessAlreadyEnabled";
@@ -314,11 +359,11 @@ hipError_t hipDeviceCanAccessPeer(int *can_access, int device, int peer_device) 
     return HIP_SUCCESS;
 }
 
-static int g_peer_access_enabled[2] = {0, 0};
+static int g_peer_access_enabled[16] = {0};
 
 hipError_t hipDeviceEnablePeerAccess(int peer_device, unsigned int flags) {
     (void)flags;
-    if (peer_device < 0 || peer_device >= 2) return HIP_ERROR_INVALID_DEVICE;
+    if (peer_device < 0 || peer_device >= STUB_DEVICE_COUNT || peer_device >= 16) return HIP_ERROR_INVALID_DEVICE;
     if (g_peer_access_enabled[peer_device]) {
         return HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED;
     }
@@ -327,7 +372,7 @@ hipError_t hipDeviceEnablePeerAccess(int peer_device, unsigned int flags) {
 }
 
 hipError_t hipDeviceDisablePeerAccess(int peer_device) {
-    if (peer_device < 0 || peer_device >= 2) return HIP_ERROR_INVALID_DEVICE;
+    if (peer_device < 0 || peer_device >= STUB_DEVICE_COUNT || peer_device >= 16) return HIP_ERROR_INVALID_DEVICE;
     if (!g_peer_access_enabled[peer_device]) {
         return HIP_ERROR_PEER_ACCESS_NOT_ENABLED;
     }

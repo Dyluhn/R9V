@@ -52,8 +52,16 @@ impl DynamicLibrary {
                     CStr::from_ptr(err_ptr).to_string_lossy().into_owned()
                 }
             };
-            return Err(HipError::LibraryNotFound {
-                searched: vec![format!("{}: {err_msg}", path.display())],
+            let requested = path.as_os_str().to_string_lossy();
+            let missing_requested_library = err_msg.starts_with(requested.as_ref())
+                && err_msg.contains("No such file or directory");
+            if missing_requested_library {
+                return Err(HipError::LibraryNotFound {
+                    searched: vec![format!("{}: {err_msg}", path.display())],
+                });
+            }
+            return Err(HipError::LibraryLoadFailed {
+                attempts: vec![format!("{}: {err_msg}", path.display())],
             });
         }
 
@@ -112,6 +120,7 @@ pub(crate) struct SymbolCache {
     pub(crate) hip_set_device: AtomicPtr<c_void>,
     pub(crate) hip_get_device: AtomicPtr<c_void>,
     pub(crate) hip_get_device_properties_r0600: AtomicPtr<c_void>,
+    pub(crate) hip_device_get_pci_bus_id: AtomicPtr<c_void>,
     pub(crate) hip_get_error_string: AtomicPtr<c_void>,
 
     pub(crate) hip_malloc: AtomicPtr<c_void>,

@@ -16,6 +16,13 @@ pub enum HipError {
         searched: Vec<String>,
     },
 
+    /// A HIP library file was present but could not be loaded.
+    #[error("HIP runtime library is present but unusable: {attempts:?}")]
+    LibraryLoadFailed {
+        /// Existing candidates and their loader failures.
+        attempts: Vec<String>,
+    },
+
     /// A required HIP symbol could not be resolved from the dynamic library.
     #[error("HIP symbol '{symbol}' could not be resolved: {details}")]
     SymbolNotFound {
@@ -67,6 +74,55 @@ pub enum HipError {
     InvalidDeviceCount {
         /// The invalid device count value returned by the driver.
         count: i32,
+    },
+
+    /// A public process-local ordinal did not fit the HIP C API's signed type.
+    #[error("HIP device ordinal is outside the supported range: {ordinal}")]
+    InvalidDeviceOrdinal {
+        /// Rejected ordinal.
+        ordinal: i64,
+    },
+
+    /// HIP's property record and canonical PCI-bus query disagreed about a device.
+    #[error(
+        "HIP device {ordinal} reported inconsistent PCI identities: properties={properties_bdf}, bus_id={bus_id_bdf}"
+    )]
+    InconsistentPciIdentity {
+        /// Process-local ordinal used for both queries.
+        ordinal: u32,
+        /// Domain/bus/device reported in `hipDeviceProp_t`.
+        properties_bdf: String,
+        /// Canonical BDF reported by `hipDeviceGetPCIBusId`.
+        bus_id_bdf: String,
+    },
+
+    /// A PCIe sysfs discovery query failed.
+    #[error("PCIe sysfs discovery failed for {bdf} at '{path}': {details}")]
+    SysfsError {
+        /// The target PCI BDF address.
+        bdf: String,
+        /// The filesystem path that failed.
+        path: String,
+        /// Description of the error.
+        details: String,
+    },
+
+    /// A string could not be parsed as a valid PCI BDF.
+    #[error("invalid PCI BDF '{input}': {details}")]
+    InvalidPciBdf {
+        /// The invalid input string.
+        input: String,
+        /// Details of the syntax or value error.
+        details: &'static str,
+    },
+
+    /// A string could not be parsed as a 16-byte HIP UUID.
+    #[error("invalid HIP UUID '{input}': {details}")]
+    InvalidHipUuid {
+        /// Rejected input.
+        input: String,
+        /// Parse failure.
+        details: String,
     },
 }
 

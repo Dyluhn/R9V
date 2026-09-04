@@ -156,7 +156,7 @@ amd-smi list
 export R9V_CACHE_DIR="$R9V_DATA_DIR/cache"
 export R9V_VISIBLE_DEVICES=0,1
 export R9V_EXPECTED_GPU_BDFS=0000:03:00.0,0000:13:00.0  # use your amd-smi BDFs
-export R9V_EXPECTED_PCIE_LINKS=Gen5x16,Gen4x4          # use your negotiated links
+export R9V_EXPECTED_PCIE_LINKS=Gen5x16,Gen4x4          # use path bottlenecks
 ./r9v doctor qwen38 --model-dir "$MODEL_DIR"
 ./r9v run qwen38 --model-dir "$MODEL_DIR"
 ```
@@ -172,7 +172,7 @@ The host contract is configurable rather than tied to one motherboard:
 |---|---|---|
 | `R9V_VISIBLE_DEVICES` | HIP devices in TP-rank order | `0,1` |
 | `R9V_EXPECTED_GPU_BDFS` | Optional PCI-address lock in rank order | unset; doctor warns |
-| `R9V_EXPECTED_PCIE_LINKS` | Optional exact negotiated links in rank order | unset; doctor warns |
+| `R9V_EXPECTED_PCIE_LINKS` | Optional exact device-to-root capacity bottlenecks in rank order | unset; doctor warns |
 | `R9V_MIN_PCIE_BANDWIDTH_GBPS` | Minimum theoretical payload per rank | `15,7` |
 | `R9V_MIN_HOST_RAM_BYTES` | Hard total-RAM floor; `0` only reports | `0` |
 | `R9V_MIN_HOST_AVAILABLE_BYTES` | Hard pre-launch available-RAM floor | `0` |
@@ -183,9 +183,10 @@ The host contract is configurable rather than tied to one motherboard:
 | `R9V_REQUIRE_PLE_NONROTATIONAL` | Reject a PLE file backed by rotating media | `1` |
 
 The exact PCIe setting accepts forms such as `Gen5x16,Gen4x4` or
-`32x16,16x4`. It verifies the negotiated hardware result; it cannot change
+`32x16,16x4`. It verifies configured path capacity (maximum speed with
+negotiated width); it cannot change
 the link. The independent bandwidth check walks every hop from the device to
-the root port and scores the slowest negotiated link, so equivalent or faster
+the root port and scores the slowest-capacity link, so equivalent or faster
 paths satisfy the performance floor even when their generation/width differs
 from the reference host, and a card that negotiates x16 behind a narrower
 upstream bridge is scored at the bridge's capacity.

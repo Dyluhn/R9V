@@ -6,6 +6,7 @@ use std::ffi::{c_char, c_int, c_uint, c_void};
 pub(crate) type HipErrorT = i32;
 pub(crate) const HIP_SUCCESS: HipErrorT = 0;
 
+pub(crate) const HIP_ERROR_NO_DEVICE: HipErrorT = 100;
 pub(crate) const HIP_ERROR_NOT_READY: HipErrorT = 600;
 pub(crate) const HIP_ERROR_PEER_ACCESS_ALREADY_ENABLED: HipErrorT = 704;
 pub(crate) const HIP_ERROR_PEER_ACCESS_NOT_ENABLED: HipErrorT = 705;

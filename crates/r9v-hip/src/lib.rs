@@ -11,13 +11,18 @@ pub mod device;
 pub mod error;
 pub mod handles;
 pub mod library;
+pub mod pcie;
 
 use std::sync::Arc;
 
-pub use device::{Device, DeviceProperties};
+pub use device::{
+    Device, DeviceIdentity, DeviceInventory, DeviceProperties, DiscoveredDevice, HipOrdinal,
+    HipUuid, PciBdf,
+};
 pub use error::{HipError, Result};
 pub use handles::{DeviceBuffer, Event, Function, Graph, GraphExec, HostBuffer, Module, Stream};
 pub use library::HipLibrary;
+pub use pcie::{pcie_payload_bandwidth_gbps, PciLinkHop, PciPathDiscovery};
 
 /// Memory copy direction for HIP transfer operations (Spec 14 §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -120,4 +125,19 @@ pub fn is_available() -> bool {
 /// Queries the total number of available HIP GPU devices (Spec 14 §3).
 pub fn device_count() -> Result<u32> {
     default_library()?.device_count()
+}
+
+/// Discovers system compute devices in a CPU-safe manner (Spec 14 §2, §3).
+///
+/// If the HIP runtime dynamic library is not installed on the system, this returns
+/// a normal empty-GPU inventory rather than an error, allowing CPU-only execution.
+/// If the HIP runtime is present but broken (e.g. driver initialization failure,
+/// symbol resolution error, or invalid device response), this returns a typed [`HipError`].
+pub fn inventory() -> Result<DeviceInventory> {
+    DeviceInventory::discover()
+}
+
+/// Enumerates all available HIP GPU devices using the default HIP library (Spec 14 §2, §3).
+pub fn enumerate_devices() -> Result<Vec<DiscoveredDevice>> {
+    default_library()?.enumerate_devices()
 }

@@ -310,7 +310,11 @@ def pcie_payload_gbps(speed_gts: float, width: int) -> float:
 
 
 def pcie_upstream_links(sys_root: Path, bdf: str) -> list[tuple[str, float, int]]:
-    """Negotiated links of every bridge between the device and the root port."""
+    """Capacity links of every bridge between the device and the root port.
+
+    Maximum speed avoids idle power-state downshifts. Negotiated width detects
+    lane allocation or degraded training; maximum width is only its fallback.
+    """
     try:
         device = (sys_root / "bus/pci/devices" / bdf).resolve()
     except OSError:
@@ -321,10 +325,29 @@ def pcie_upstream_links(sys_root: Path, bdf: str) -> list[tuple[str, float, int]
             r"[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]", node.name
         ):
             continue
-        speed = _read_first_float(node / "current_link_speed")
-        width = _read_first_int(node / "current_link_width")
-        if speed is None or width is None:
+        max_speed = _read_first_float(node / "max_link_speed")
+        current_speed = _read_first_float(node / "current_link_speed")
+        current_width = _read_first_int(node / "current_link_width")
+        max_width = _read_first_int(node / "max_link_width")
+        if all(
+            value is None
+            for value in (max_speed, current_speed, current_width, max_width)
+        ):
             continue
+        speed = max_speed
+        width = current_width
+        if speed is None:
+            speed = current_speed
+        if width is None:
+            width = max_width
+        if speed is None or width is None:
+            raise ValueError(
+                f"PCIe hop {node.name} lacks a complete positive speed/width capacity pair"
+            )
+        if speed <= 0 or width <= 0:
+            raise ValueError(
+                f"PCIe hop {node.name} reports a non-positive speed/width capacity pair"
+            )
         links.append((node.name, speed, width))
     return links
 
@@ -490,17 +513,36 @@ def _selected_gpus(
             )
             continue
         pci = sys_root / "bus/pci/devices" / gpu.bdf
-        speed = _read_first_float(pci / "current_link_speed")
-        width = _read_first_int(pci / "current_link_width")
+        current_speed = _read_first_float(pci / "current_link_speed")
+        current_width = _read_first_int(pci / "current_link_width")
+        speed = _read_first_float(pci / "max_link_speed") or current_speed
+        width = current_width or _read_first_int(pci / "max_link_width")
         bandwidth: float | None = None
         capping_hop: tuple[str, float, int] | None = None
-        if speed is not None and width is not None:
+        path_error: str | None = None
+        if speed is None or width is None:
+            path_error = (
+                f"PCIe endpoint {gpu.bdf} lacks a complete positive "
+                "speed/width capacity pair"
+            )
+        elif speed <= 0 or width <= 0:
+            path_error = (
+                f"PCIe endpoint {gpu.bdf} reports a non-positive "
+                "speed/width capacity pair"
+            )
+        else:
             bandwidth = pcie_payload_gbps(speed, width)
-            for hop in pcie_upstream_links(sys_root, gpu.bdf):
-                hop_payload = pcie_payload_gbps(hop[1], hop[2])
-                if hop_payload + 1e-9 < bandwidth:
-                    bandwidth = hop_payload
-                    capping_hop = hop
+            try:
+                upstream_links = pcie_upstream_links(sys_root, gpu.bdf)
+            except ValueError as error:
+                path_error = str(error)
+                bandwidth = None
+            else:
+                for hop in upstream_links:
+                    hop_payload = pcie_payload_gbps(hop[1], hop[2])
+                    if hop_payload + 1e-9 < bandwidth:
+                        bandwidth = hop_payload
+                        capping_hop = hop
         mapped = kfd.get(gpu.bdf)
         if mapped is None:
             reporter.fail(
@@ -534,28 +576,33 @@ def _selected_gpus(
                 "rank placement.",
             )
         if bandwidth is None:
+            reporter.fail(
+                "pcie-link",
+                f"rank {rank} {gpu.bdf} PCIe path is incomplete: {path_error}",
+                "Fix sysfs/driver visibility for the endpoint and every "
+                "link-bearing hop. R9V will not guess around a missing path segment.",
+            )
             if expected_links:
                 reporter.fail(
                     "pcie-link-expectation",
                     f"rank {rank} {gpu.bdf} link data is unavailable; cannot "
                     f"verify expected {expected_links[rank].config_value()}",
-                    "Fix sysfs/driver visibility for current_link_speed and "
-                    "current_link_width. An exact link lock cannot be waived "
+                    "Fix sysfs/driver visibility for max_link_speed and "
+                    "current_link_width. An exact path-capacity lock cannot be waived "
                     "by guessing the hardware topology.",
-                )
-            else:
-                reporter.warn(
-                    "pcie-link",
-                    f"rank {rank} {gpu.bdf} link data is unavailable",
-                    "Check the PCIe link in sysfs/amd-smi; do not assume reference "
-                    "performance until it is visible.",
                 )
         else:
             minimum = minimum_bandwidth[rank] if minimum_bandwidth else 0.0
+            current_endpoint = (
+                f"{current_speed:g} GT/s x{current_width}"
+                if current_speed is not None and current_width is not None
+                else "unavailable"
+            )
             if capping_hop is None:
                 message = (
-                    f"rank {rank} {gpu.bdf}: {speed:g} GT/s x{width}, "
-                    f"~{bandwidth:.2f} GB/s payload"
+                    f"rank {rank} {gpu.bdf}: path capacity {speed:g} GT/s x{width}, "
+                    f"~{bandwidth:.2f} GB/s payload; current endpoint "
+                    f"{current_endpoint}"
                 )
             else:
                 message = (
@@ -583,22 +630,24 @@ def _selected_gpus(
                 )
             if expected_links:
                 expected = expected_links[rank]
-                speed_matches = abs(speed - expected.speed_gts) < 0.01
-                width_matches = width == expected.width
+                actual_speed = capping_hop[1] if capping_hop else speed
+                actual_width = capping_hop[2] if capping_hop else width
+                speed_matches = abs(actual_speed - expected.speed_gts) < 0.01
+                width_matches = actual_width == expected.width
                 if not speed_matches or not width_matches:
                     reporter.fail(
                         "pcie-link-expectation",
-                        f"rank {rank} {gpu.bdf} negotiated "
-                        f"{PcieLink(speed, width).config_value()}, expected "
+                        f"rank {rank} {gpu.bdf} path capacity "
+                        f"{PcieLink(actual_speed, actual_width).config_value()}, expected "
                         f"{expected.config_value()}",
-                        "R9V cannot change a negotiated PCIe link. Check the "
+                        "R9V cannot change a PCIe path capacity. Check the "
                         "motherboard slot, BIOS lane allocation, riser/cable, "
                         "and competing devices. Update R9V_EXPECTED_PCIE_LINKS "
                         "only if the detected topology is intentional.",
                         expected_speed_gts=expected.speed_gts,
                         expected_width=expected.width,
-                        actual_speed_gts=speed,
-                        actual_width=width,
+                        actual_speed_gts=actual_speed,
+                        actual_width=actual_width,
                     )
                 else:
                     reporter.passed(
@@ -608,7 +657,9 @@ def _selected_gpus(
                         expected_speed_gts=expected.speed_gts,
                         expected_width=expected.width,
                     )
-        selected.append((rank, gpu, speed, width, bandwidth))
+        path_speed = capping_hop[1] if capping_hop else speed
+        path_width = capping_hop[2] if capping_hop else width
+        selected.append((rank, gpu, path_speed, path_width, bandwidth))
 
     if not expected_bdfs and len(selected) == expected_count:
         value = ",".join(gpu.bdf for _, gpu, _, _, _ in selected)
@@ -637,7 +688,7 @@ def _selected_gpus(
             value = ",".join(detected_links)
             reporter.warn(
                 "pcie-link-lock",
-                "negotiated PCIe links are detected but not locked; set "
+                "PCIe path capacities are detected but not locked; set "
                 f"R9V_EXPECTED_PCIE_LINKS={value} after confirming the topology",
                 f"Add `: \"${{R9V_EXPECTED_PCIE_LINKS:={value}}}\"` to "
                 "R9V_CONFIG_FILE. This records the intended links; it does "

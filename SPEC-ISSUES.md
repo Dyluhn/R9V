@@ -20,9 +20,9 @@ Proposed resolution: Replace `-ffast-math=off` with `-fno-fast-math` in spec 4 �
 
 ## SI-2 — A0.S6 — spec 5 §2 / hardware topology
 What: Spec 5 §2 says the current rig has one R9700 on x16 and one on x4, and `hardware/dual-r9700/hardware.json` records rank 1 as `Gen4 x4`.
-Why it blocks or misleads: The A0.S6 reference-rig measurement resolves the two discrete R9700 endpoints as PCI `0000:03:00.0` and `0000:13:00.0`; sysfs reports `32.0 GT/s PCIe`, width `16` for both endpoints, and they occupy separate IOMMU groups 15 and 31. Keeping the stale x4 description would make the topology fingerprint and every calibrated communication-cost estimate disagree with the measured machine.
-Option taken: Recorded the live topology and P2P receipt in `spikes/p2p/RESULT.md`; A0.S6 uses the measured link and selects `Direct`. Work that consumes the seeded x4 topology must use the measured result rather than treating the JSON value as observed fact.
-Proposed resolution: Update spec 5 §2 and `hardware/dual-r9700/hardware.json` to record both discrete endpoints at their measured Gen5 x16 link state on the current reference rig, and populate the 0↔1 transport as `Direct` from the A0.S6 receipt.
+Why it blocks or misleads: The original A0.S6 fingerprint read only the GPU endpoint files. Both endpoints report Gen5 x16, but the `0000:13:00.0` path traverses root port `0000:00:02.2`, whose maximum link is Gen4 x4. Endpoint-only discovery therefore produced a false x16/x16 topology and would poison topology fingerprints and communication-cost evidence.
+Option taken: Retained the authoritative x16/x4 hardware description, corrected `spikes/p2p/RESULT.md`, and changed spec 5 §2 to require endpoint-to-root ancestry with a capacity bottleneck. P2P remains `Direct` because that is an independent measured transport result; it is not evidence of lane width.
+Proposed resolution: Resolved in spec 5 §2 and the corrected A0.S6 receipt. The implementation gate is a synthetic endpoint-x16/upstream-x4 test plus live doctor output naming the capping hop.
 
 ## SI-3 — A1.1 — spec 1 §2.3, App. A / spec 2 §2 / spec 4 §13
 What: Spec 1 requires `Tensor.layout`, `ArchDescriptor.fragment_layout`, and `ArchDescriptor.attention_layout` to carry `LayoutId`, while spec 2 defines only the names `L0`, `L1`, and `L1S`, card A2.1 assigns their Rust type to downstream crate `r9v-format`, and spec 4 describes a distinct gfx1201 attention order without assigning it an id.

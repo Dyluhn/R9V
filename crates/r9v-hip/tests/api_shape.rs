@@ -2,9 +2,11 @@
 //! API shape tests verifying public exports, trait implementations, and visibility (Spec 14 §2, §3, CONVENTIONS.md §4.1).
 
 use r9v_hip::{
-    default_library, device_count, is_available, Device, DeviceBuffer, DeviceProperties, Event,
-    EventFlags, Function, Graph, GraphExec, HipError, HipLibrary, HostBuffer, MemcpyKind, Module,
-    Result, Stream, StreamCaptureMode, StreamFlags,
+    default_library, device_count, enumerate_devices, inventory, is_available,
+    pcie_payload_bandwidth_gbps, Device, DeviceBuffer, DeviceIdentity, DeviceInventory,
+    DeviceProperties, DiscoveredDevice, Event, EventFlags, Function, Graph, GraphExec, HipError,
+    HipLibrary, HipOrdinal, HipUuid, HostBuffer, MemcpyKind, Module, PciBdf, PciLinkHop,
+    PciPathDiscovery, Result, Stream, StreamCaptureMode, StreamFlags,
 };
 use std::fmt::Display;
 
@@ -20,6 +22,10 @@ fn test_api_shape_invariants() {
     let _: fn() -> Result<std::sync::Arc<HipLibrary>> = default_library;
     let _: fn() -> bool = is_available;
     let _: fn() -> Result<u32> = device_count;
+    let _: fn() -> Result<DeviceInventory> = inventory;
+    let _: fn() -> Result<Vec<DiscoveredDevice>> = enumerate_devices;
+    let _: fn(f64, u32) -> f64 = pcie_payload_bandwidth_gbps;
+    let _: fn(&HipLibrary, HipOrdinal) -> Result<PciBdf> = HipLibrary::get_device_pci_bdf;
 
     // Device enum traits
     assert_copy::<Device>();
@@ -27,6 +33,48 @@ fn test_api_shape_invariants() {
     assert_send::<Device>();
     assert_sync::<Device>();
     assert_display::<Device>();
+
+    // Ephemeral handle and stable identity types
+    assert_copy::<HipOrdinal>();
+    assert_clone::<HipOrdinal>();
+    assert_send::<HipOrdinal>();
+    assert_sync::<HipOrdinal>();
+    assert_display::<HipOrdinal>();
+
+    assert_copy::<PciBdf>();
+    assert_clone::<PciBdf>();
+    assert_send::<PciBdf>();
+    assert_sync::<PciBdf>();
+    assert_display::<PciBdf>();
+
+    assert_copy::<HipUuid>();
+    assert_clone::<HipUuid>();
+    assert_send::<HipUuid>();
+    assert_sync::<HipUuid>();
+    assert_display::<HipUuid>();
+
+    assert_clone::<DeviceIdentity>();
+    assert_send::<DeviceIdentity>();
+    assert_sync::<DeviceIdentity>();
+    assert_display::<DeviceIdentity>();
+
+    // Enumeration and inventory records
+    assert_clone::<DiscoveredDevice>();
+    assert_send::<DiscoveredDevice>();
+    assert_sync::<DiscoveredDevice>();
+
+    assert_clone::<DeviceInventory>();
+    assert_send::<DeviceInventory>();
+    assert_sync::<DeviceInventory>();
+
+    // PCIe path discovery types
+    assert_clone::<PciLinkHop>();
+    assert_send::<PciLinkHop>();
+    assert_sync::<PciLinkHop>();
+
+    assert_clone::<PciPathDiscovery>();
+    assert_send::<PciPathDiscovery>();
+    assert_sync::<PciPathDiscovery>();
 
     // Typed parameter enums
     assert_copy::<MemcpyKind>();

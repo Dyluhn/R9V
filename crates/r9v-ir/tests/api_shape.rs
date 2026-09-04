@@ -14,19 +14,20 @@ use r9v_ir::{
     match_gated_pair, matmul_numerics, moe_ffn_gemm_numerics, ActMulOp, ActivationKind,
     ActivationOp, AllGatherOp, AllReduceOp, AllToAllOp, ArchDescriptor, ArchFamily, AttentionMask,
     AttentionOp, BarrierOp, BatchMeta, BatchMetaBuilder, CacheScaleGranularity, CastOp,
-    CausalConv1dOp, Class, ConcatOp, ConvActivation, CopyKind, CopyOp, DType, Dim, EdgeId,
-    EmbedGatherOp, Epilogue, ExpertCount, ExternalInput, ExternalInputKind, ExternalOutput,
-    ExternalOutputKind, FusionEntry, FusionPattern, GatherRowsOp, Graph, GraphCapture, GraphEdge,
-    GraphNode, GraphSummary, GroupId, HashId, HeadCount, InsertedCopy, IrError, IrVersion,
-    LayoutId, LinearAttnKind, LinearAttnScanOp, LogitSoftcapOp, LogitsPostprocessOp, MatmulOp,
-    MatrixOp, Measured, MlaAttentionSpec, MlaLatent, MoeFfnOp, MoeGroup, MoeRouteOp, MoeScoring,
-    NgramCombine, NgramGatherOp, NgramSource, NodeId, NormAxis, NormKind, NormOp, Numerics, Op,
-    P2pLink, P2pTransport, Placement, PlanId, Positions, PositionsKind, QuantActOp, QuantScheme,
-    RecvOp, ReduceOp, ReduceScatterOp, ReductionOrder, RelRate, ResidualAddOp, RngAlgorithm,
-    RopeOp, RopeScaling, RopeStyle, SampleOp, SamplingParams, ScatterAddRowsOp, SchemeId, SendOp,
-    ShapeSymbol, ShardLayout, ShardLayoutPattern, ShardingRule, Smoothing, SplitOp, StateHandle,
-    StateKind, StateWriteKvOp, StepGraphKey, StrideRequirement, Tensor, TreeMask, ValuDot,
-    VerifyMethod, VerifyOp, BLOCK_TABLE_SENTINEL, BUCKET_SIZES, FUSION_TABLE,
+    CausalConv1dOp, Class, ConcatOp, ConvActivation, CopyKind, CopyOp, DType, DeviceDescriptor,
+    DeviceFacts, DeviceIdentity, Dim, EdgeId, EmbedGatherOp, Epilogue, ExpertCount, ExternalInput,
+    ExternalInputKind, ExternalOutput, ExternalOutputKind, FusionEntry, FusionPattern,
+    GatherRowsOp, Graph, GraphCapture, GraphEdge, GraphNode, GraphSummary, GroupId, HashId,
+    HeadCount, InsertedCopy, IrError, IrVersion, LayoutId, LinearAttnKind, LinearAttnScanOp,
+    LogitSoftcapOp, LogitsPostprocessOp, MatmulOp, MatrixOp, Measured, MlaAttentionSpec, MlaLatent,
+    MoeFfnOp, MoeGroup, MoeRouteOp, MoeScoring, NgramCombine, NgramGatherOp, NgramSource, NodeId,
+    NormAxis, NormKind, NormOp, Numerics, Op, P2pLink, P2pTransport, Placement, PlanId, Positions,
+    PositionsKind, QuantActOp, QuantScheme, RecvOp, ReduceOp, ReduceScatterOp, ReductionOrder,
+    RelRate, ResidualAddOp, RngAlgorithm, RopeOp, RopeScaling, RopeStyle, SampleOp, SamplingParams,
+    ScatterAddRowsOp, SchemeId, SendOp, ShapeSymbol, ShardLayout, ShardLayoutPattern, ShardingRule,
+    Smoothing, SplitOp, StateHandle, StateKind, StateWriteKvOp, StepGraphKey, StrideRequirement,
+    Tensor, TreeMask, ValuDot, VerifyMethod, VerifyOp, BLOCK_TABLE_SENTINEL, BUCKET_SIZES,
+    FUSION_TABLE,
 };
 
 fn assert_send<T: Send>() {}
@@ -86,6 +87,15 @@ fn api_shape_markers_and_errors() {
     assert_send::<ArchDescriptor>();
     assert_sync::<ArchDescriptor>();
     assert_clone::<ArchDescriptor>();
+    assert_send::<DeviceDescriptor>();
+    assert_sync::<DeviceDescriptor>();
+    assert_clone::<DeviceDescriptor>();
+    assert_send::<DeviceFacts>();
+    assert_sync::<DeviceFacts>();
+    assert_clone::<DeviceFacts>();
+    assert_send::<DeviceIdentity>();
+    assert_sync::<DeviceIdentity>();
+    assert_clone::<DeviceIdentity>();
 
     assert_send::<IrVersion>();
     assert_sync::<IrVersion>();
@@ -657,6 +667,8 @@ fn api_shape_constructors_are_reachable() {
     assert_eq!(gfx.name, "gfx1201");
     let cpu = ArchDescriptor::cpu();
     assert_eq!(cpu.family, ArchFamily::Cpu);
+    let cpu_device = r9v_ir::DeviceDescriptor::cpu();
+    assert_eq!(cpu_device.facts.identity, r9v_ir::DeviceIdentity::Cpu);
 
     assert_eq!(IrVersion::CURRENT, IrVersion::new(0, 2, 0));
     assert_eq!(IrVersion::CURRENT.to_string(), "0.2.0");
