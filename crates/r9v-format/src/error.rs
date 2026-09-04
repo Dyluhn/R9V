@@ -158,6 +158,124 @@ pub enum FormatError {
         /// Every problem found, in deterministic input order.
         problems: Box<[FormatError]>,
     },
+    /// The first four bytes were not the GGUF magic (Spec 2 §6: the
+    /// container is GGUF v3; card A2.5).
+    #[error("bad GGUF magic {found:#010x}, expected 0x46554747 (Spec 2 §6)")]
+    BadMagic {
+        /// The little-endian `u32` actually present at offset 0.
+        found: u32,
+    },
+    /// The GGUF version is not one this reader accepts (Spec 2 §6:
+    /// GGUF v3; gguf-py also reads v2, so v2 is named, not guessed).
+    #[error("unsupported GGUF version {found}, accepts {accepted:?} (Spec 2 §6)")]
+    UnsupportedVersion {
+        /// The version found in the file.
+        found: u32,
+        /// The versions this reader parses.
+        accepted: Vec<u32>,
+    },
+    /// The buffer ends before a complete field (Spec 2 §6; card A2.5).
+    /// Carries the byte offset where decoding stopped and how many
+    /// bytes the field needed.
+    #[error("truncated GGUF at offset {offset}: needed {need} byte(s) for {what} (Spec 2 §6)")]
+    Truncated {
+        /// Byte offset where decoding stopped.
+        offset: u64,
+        /// Bytes the field required from that offset.
+        need: u64,
+        /// Which field was being decoded (`magic`, `kv key`, ...).
+        what: &'static str,
+    },
+    /// A field decoded but is structurally invalid (Spec 2 §6; card
+    /// A2.5). Lengths that would overflow, impossible dimension
+    /// counts, and invalid UTF-8 all land here with their offset.
+    #[error("malformed GGUF at offset {offset}: {detail} (Spec 2 §6)")]
+    Malformed {
+        /// Byte offset of the offending field.
+        offset: u64,
+        /// What is wrong, with the numbers.
+        detail: String,
+    },
+    /// A metadata key appears twice (matches the gguf-py reader,
+    /// which rejects duplicates; card A2.5).
+    #[error("duplicate metadata key {key:?} (Spec 2 §6)")]
+    DuplicateKey {
+        /// The repeated key.
+        key: String,
+    },
+    /// A tensor name appears twice in one shard (matches the gguf-py
+    /// reader, which rejects duplicates; card A2.5).
+    #[error("duplicate tensor name {name:?} (Spec 2 §6)")]
+    DuplicateTensor {
+        /// The repeated tensor name.
+        name: String,
+    },
+    /// `general.alignment` is zero or not a power of two (matches the
+    /// gguf-py reader rule; Spec 2 §6 fixes native files at 4096).
+    #[error("invalid alignment {value}: must be a nonzero power of two (Spec 2 §6)")]
+    InvalidAlignment {
+        /// The offending alignment value.
+        value: u64,
+    },
+    /// A metadata value had a different GGUF type than the accessor
+    /// required (Spec 2 §6; card A2.5).
+    #[error("metadata key {key:?} has type {found}, expected {expected} (Spec 2 §6)")]
+    KvTypeMismatch {
+        /// The key that was read.
+        key: String,
+        /// The GGUF value type actually stored.
+        found: &'static str,
+        /// The type the accessor required.
+        expected: &'static str,
+    },
+    /// A required metadata key is absent (Spec 2 §6; card A2.5).
+    #[error("missing metadata key {key:?} (Spec 2 §6)")]
+    MissingKey {
+        /// The absent key.
+        key: String,
+    },
+    /// A tensor-info `type` code names no known GGUF or R9V type
+    /// (Spec 2 §7 step 1: unknown type → hard error naming the type;
+    /// card A2.5).
+    #[error("unknown tensor type code {code} for tensor {tensor:?} (Spec 2 §7)")]
+    UnknownTensorType {
+        /// The unrecognized numeric `type` code.
+        code: u32,
+        /// The tensor carrying it.
+        tensor: String,
+    },
+    /// A tensor's data range is not inside the file or overlaps
+    /// another entry (Spec 2 §6; card A2.5). All offending tensors
+    /// are collected before returning.
+    #[error("tensor {name:?} data range [{start}, {end}) is invalid: {reason} (Spec 2 §6)")]
+    BadTensorRange {
+        /// The tensor whose range failed.
+        name: String,
+        /// Range start as a file offset.
+        start: u64,
+        /// Range end as a file offset.
+        end: u64,
+        /// Why it is rejected (`outside file`, `overlaps ...`, ...).
+        reason: String,
+    },
+    /// `r9v.format_version` is newer than this reader (Spec 2 §9:
+    /// the loader accepts any `format_version ≤ current`; card A2.5).
+    #[error("unsupported r9v.format_version {found}, newest accepted is {max} (Spec 2 §9)")]
+    FormatVersion {
+        /// The version found in the file.
+        found: u32,
+        /// The newest version this reader accepts.
+        max: u32,
+    },
+    /// File-system read of a container path failed (card A2.5). The
+    /// message carries the path and the OS error, never a panic.
+    #[error("cannot read container file {path:?}: {message} (Spec 2 §6)")]
+    Io {
+        /// The path that was opened.
+        path: String,
+        /// The underlying OS error text.
+        message: String,
+    },
 }
 
 impl FormatError {

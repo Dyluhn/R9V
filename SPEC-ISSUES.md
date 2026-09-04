@@ -352,3 +352,9 @@ What: Spec 14 §10 illustrates the developer workflow with `r9v eval --logits --
 Why it blocks or misleads: Without a checkpoint loader or tokenizer, `r9v eval` in A1.12 cannot consume real binary checkpoints or raw prompt strings; attempting to implement either would pull downstream Phase A2 scope into A1.12.
 Option taken: Per `phase-a-agent-breakdown.md` A1.12, `r9v eval` consumes a token file containing whitespace-separated token IDs via `--tokens <file>` and a JSON `SyntheticSpec` file via `--model <path>` to deterministically build a tiny dense decoder on CPU. Logits are emitted as a NumPy `.npy` array (v1.0, `<f4`, row-major C order) defaulting to `<tokens>.logits.npy` or specified via `--out <path>`.
 Proposed resolution: Update Spec 14 §10 to clarify that `eval` accepts `--tokens <file>` for pre-tokenized sequences and note that `--model` accepts the synthetic JSON specification prior to A2.6 and GGUF checkpoint paths thereafter.
+
+## SI-74 — A2.5 — spec 2 §6
+What: The metadata table shows `r9v.layout_id str = "L1"` (uppercase), while the `Layout` closed set (card A2.1, CONVENTIONS.md §3.2) serializes lowercase snake_case (`l0`/`l1`/`l1s`).
+Why it blocks or misleads: A reader implementing either spelling literally rejects files written per the other; the §6 example and the closed-set serialization rule disagree with no stated precedence.
+Option taken: Accept both spellings on read (`L1`/`l1`, `L0`/`l0`, `L1S`/`l1s`), always write lowercase; see the SI-74 comment in `crates/r9v-format/src/meta.rs`.
+Proposed resolution: Fix the §6 example to `"l1"`, or state that layout ids are case-insensitive on read.

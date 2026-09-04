@@ -175,6 +175,81 @@ fn error_type_composes_and_displays() {
 }
 
 #[test]
+fn container_types_are_send_and_sync() {
+    assert_send_sync::<r9v_format::GgufFile>();
+    assert_send_sync::<r9v_format::GgufWriter>();
+    assert_send_sync::<r9v_format::KvEntry>();
+    assert_send_sync::<r9v_format::KvType>();
+    assert_send_sync::<r9v_format::KvValue>();
+    assert_send_sync::<r9v_format::TensorInfo>();
+    assert_send_sync::<r9v_format::TensorType>();
+    assert_send_sync::<r9v_format::R9vTensorType>();
+    assert_send_sync::<r9v_format::OutTensor>();
+    assert_send_sync::<r9v_format::EntryRegions>();
+    assert_send_sync::<r9v_format::ShardSet>();
+    assert_send_sync::<r9v_format::R9vMeta>();
+    assert_send_sync::<r9v_format::TensorMeta>();
+}
+
+#[test]
+fn container_plain_data_types() {
+    assert_plain_data::<r9v_format::KvType>();
+    assert_plain_data::<r9v_format::TensorType>();
+    assert_plain_data::<r9v_format::R9vTensorType>();
+    assert_plain_data::<r9v_format::EntryRegions>();
+}
+
+#[test]
+fn tensor_type_covers_every_upstream_code() {
+    // Exhaustive with no wildcard: a new upstream code breaks this
+    // compile and forces a sizing decision.
+    fn code(ty: r9v_format::TensorType) -> u32 {
+        match ty {
+            r9v_format::TensorType::F32 => 0,
+            r9v_format::TensorType::F16 => 1,
+            r9v_format::TensorType::Q4_0 => 2,
+            r9v_format::TensorType::Q4_1 => 3,
+            r9v_format::TensorType::Q5_0 => 6,
+            r9v_format::TensorType::Q5_1 => 7,
+            r9v_format::TensorType::Q8_0 => 8,
+            r9v_format::TensorType::Q8_1 => 9,
+            r9v_format::TensorType::Q2_K => 10,
+            r9v_format::TensorType::Q3_K => 11,
+            r9v_format::TensorType::Q4_K => 12,
+            r9v_format::TensorType::Q5_K => 13,
+            r9v_format::TensorType::Q6_K => 14,
+            r9v_format::TensorType::Q8_K => 15,
+            r9v_format::TensorType::IQ2_XXS => 16,
+            r9v_format::TensorType::IQ2_XS => 17,
+            r9v_format::TensorType::IQ3_XXS => 18,
+            r9v_format::TensorType::IQ1_S => 19,
+            r9v_format::TensorType::IQ4_NL => 20,
+            r9v_format::TensorType::IQ3_S => 21,
+            r9v_format::TensorType::IQ2_S => 22,
+            r9v_format::TensorType::IQ4_XS => 23,
+            r9v_format::TensorType::I8 => 24,
+            r9v_format::TensorType::I16 => 25,
+            r9v_format::TensorType::I32 => 26,
+            r9v_format::TensorType::I64 => 27,
+            r9v_format::TensorType::F64 => 28,
+            r9v_format::TensorType::IQ1_M => 29,
+            r9v_format::TensorType::BF16 => 30,
+            r9v_format::TensorType::TQ1_0 => 34,
+            r9v_format::TensorType::TQ2_0 => 35,
+            r9v_format::TensorType::MXFP4 => 39,
+            r9v_format::TensorType::NVFP4 => 40,
+            r9v_format::TensorType::Q1_0 => 41,
+            r9v_format::TensorType::R9v(t) => t.code(),
+            r9v_format::TensorType::Unknown(code) => code,
+        }
+    }
+    for ty in r9v_format::TensorType::ALL {
+        assert_eq!(code(ty), ty.code());
+        assert_eq!(r9v_format::TensorType::from_code(ty.code()), ty);
+    }
+}
+
+#[test]
 fn ir_handle_owns_codes_while_format_owns_semantics() {
     // r9v-ir transports the opaque handle; r9v-format assigns meaning.
     // Both agree on the three spec 2 §2 weight codes.

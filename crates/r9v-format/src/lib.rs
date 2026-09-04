@@ -28,7 +28,16 @@
 //! with their independent source/repacked dequant paths.
 //! [`mod@repack`], [`ggml_dequantize`] and [`repack_dequantize`] route
 //! IQ types there; the A2.2 native surface is unchanged.
+//!
+//! Card A2.5 owns the Spec 2 §6 container half: the GGUF v3 reader
+//! and writer ([`mod@container`]), the R9V tensor-type ids 1000–1099
+//! ([`R9vTensorType`]), the typed `r9v.*` key accessors
+//! ([`mod@meta`]), exact in-entry region offsets
+//! ([`entry_regions`]), per-entry `xxh3` ([`GgufFile::entry_xxh3`]),
+//! the Spec 9 §3 fingerprints ([`GgufFile::file_fp`], [`model_fp`])
+//! and the Spec 2 §9 version rule ([`accept_format_version`]).
 
+pub mod container;
 pub mod decode;
 pub mod encode;
 pub mod error;
@@ -37,6 +46,7 @@ pub mod ggml;
 pub mod iq;
 pub mod iq_lut;
 pub mod layout;
+pub mod meta;
 pub mod permute;
 pub mod records;
 pub mod repack;
@@ -44,6 +54,12 @@ pub mod scales;
 pub mod scheme;
 pub mod sparse;
 
+pub use container::{
+    accept_format_version, entry_regions, model_fp, r9v_tensor_type_id, EntryRegions, GgufFile,
+    GgufWriter, KvEntry, KvType, KvValue, OutTensor, R9vTensorType, ShardSet, TensorInfo,
+    TensorType, GGUF_DEFAULT_ALIGNMENT, GGUF_MAGIC, GGUF_VERSION, GGUF_VERSIONS_ACCEPTED,
+    NATIVE_ALIGNMENT, R9V_FORMAT_VERSION, R9V_TENSOR_TYPE_BASE, SCALE_ALIGN,
+};
 pub use decode::{
     decode, decode_e4m3_block128, decode_i4k_superblock, decode_i8_block128, decode_i8_row,
     QuantValue, ScaleSet,
@@ -61,6 +77,10 @@ pub use layout::{
     l1_forward_index, l1_inverse_index, l1_lane, row_block_tiles, scale_block_counts,
     scale_record_count, scale_region_bytes, tile_index, tile_origin, Layout, Packing, PaddedDims,
     ELEMS_PER_LANE, ELEMS_PER_TILE, LANES_PER_TILE, LANE_K, TILE_K, TILE_N,
+};
+pub use meta::{
+    parse_r9v_meta, ActDtype, ActScheme, ActSpec, Calibration, Interleave, PlacementHint, Quality,
+    R9vMeta, ResidencyUnit, Role, Smoothing, Sparse, TensorMeta,
 };
 pub use permute::{
     decode_halfs_le, encode_halfs_le, l1_forward_elems, l1_inverse_elems, l1_pack_bytes,
