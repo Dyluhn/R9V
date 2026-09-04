@@ -1309,7 +1309,6 @@ impl GgufFile {
                                 | [crate::meta::Role::NgramTable]
                                 | [crate::meta::Role::Vector]
                                 | [crate::meta::Role::Embed, crate::meta::Role::LmHead]
-                                | [crate::meta::Role::LmHead, crate::meta::Role::Embed]
                         );
                         if !is_valid_combo {
                             return Err(FormatError::Malformed {
@@ -1390,18 +1389,16 @@ impl GgufFile {
                 //    - Standalone embed / ngram_table / vector -> L0 (Spec 2 §5, §7)
                 //    - matmul / standalone lm_head -> L1
                 // 4. Missing roles:
-                //    - file-level r9v.layout_id (L0 / L1 / L1S)
+                //    - file-level r9v.layout_id (L0 / L1 / L1S) (note: layout_id is file-level only per Spec 2 §6; no per-tensor layout_id key)
                 //    - default L1
                 let layout = if is_sparse {
                     crate::Layout::L1S
                 } else if info.dims.len() == 1 {
                     crate::Layout::L0
                 } else if let Some(roles) = &parsed_roles {
-                    let has_embed = roles.contains(&crate::meta::Role::Embed);
-                    let has_lm_head = roles.contains(&crate::meta::Role::LmHead);
-                    if has_embed && has_lm_head {
+                    if roles.as_slice() == [crate::meta::Role::Embed, crate::meta::Role::LmHead] {
                         crate::Layout::L1
-                    } else if has_embed
+                    } else if roles.contains(&crate::meta::Role::Embed)
                         || roles.contains(&crate::meta::Role::NgramTable)
                         || roles.contains(&crate::meta::Role::Vector)
                     {

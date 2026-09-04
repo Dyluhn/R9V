@@ -732,7 +732,6 @@ pub fn parse_r9v_meta(file: &GgufFile) -> Result<Option<R9vMeta>, FormatError> {
                                     | [Role::NgramTable]
                                     | [Role::Vector]
                                     | [Role::Embed, Role::LmHead]
-                                    | [Role::LmHead, Role::Embed]
                             );
                             if !is_valid_combo {
                                 problems.push(FormatError::Malformed {

@@ -16,6 +16,8 @@ Outputs (all small, committed as hex text; *.gguf binaries are git-ignored):
   a25_split-00001-of-00002.hex / a25_split-00002-of-00002.hex
                              two-shard split with split.* keys
   llama_tiny_q80.hex         genuine llama.cpp llama-quantize model with 4 tensors
+  a25_native_writer.hex      native R9V GGUF writer golden fixture with full r9v.* keys,
+                             verified at header/metadata level with pinned gguf-py 0.19.0
 """
 
 from __future__ import annotations
@@ -172,6 +174,58 @@ def to_hex(path: Path) -> None:
     path.unlink()
 
 
+class NativeHeaderReader(gguf.GGUFReader):
+    """Header and metadata reader for native R9V GGUF files.
+
+    Card A2.5: native R9V files use scheme type IDs (1000-1099) outside
+    gguf-py's GGML enum, so tensor payload parsing is bypassed while
+    all headers, key-value metadata, and tensor info entries parse identically.
+    """
+
+    def _build_tensors(self, start_offs: int, fields: list) -> None:
+        self.raw_tensor_fields = fields
+
+
+def verify_native_writer(path: Path) -> None:
+    """Verifies that gguf-py 0.19.0 parses the native writer fixture at header/metadata level."""
+    if not path.exists():
+        sys.exit(f"native fixture {path} not found")
+    raw = bytes.fromhex(path.read_text().strip())
+    tmp = path.with_suffix(".verify_tmp.gguf")
+    try:
+        tmp.write_bytes(raw)
+        reader = NativeHeaderReader(str(tmp))
+        arch = reader.fields["general.architecture"].parts[-1].tobytes().decode()
+        assert arch == "llama", f"unexpected arch: {arch}"
+        align = reader.fields["general.alignment"].parts[-1][0]
+        assert align == 4096, f"unexpected alignment: {align}"
+        fmt_v = reader.fields["r9v.format_version"].parts[-1][0]
+        assert fmt_v == 1, f"unexpected format_version: {fmt_v}"
+        layout = reader.fields["r9v.layout_id"].parts[-1].tobytes().decode()
+        assert layout == "L1", f"unexpected layout: {layout}"
+        scheme = (
+            reader.fields["r9v.tensor.blk.0.attn_q.weight.scheme"]
+            .parts[-1]
+            .tobytes()
+            .decode()
+        )
+        assert scheme == "i4_k", f"unexpected tensor scheme: {scheme}"
+        assert len(reader.raw_tensor_fields) == 1, (
+            f"expected 1 tensor field, got {len(reader.raw_tensor_fields)}"
+        )
+        tf = reader.raw_tensor_fields[0]
+        name = str(bytes(tf.parts[1]), encoding="utf-8")
+        assert name == "blk.0.attn_q.weight", f"unexpected tensor name: {name}"
+        dims = list(tf.parts[3])
+        assert dims == [256, 16], f"unexpected tensor dims: {dims}"
+        dtype = tf.parts[4][0]
+        assert dtype == 1003, f"unexpected tensor dtype: {dtype}"
+        print(f"verified {path.name} with gguf-py 0.19.0: PASS")
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def main() -> None:
     std = HERE / "a25_standard.gguf"
     sp1 = HERE / "a25_split-00001-of-00002.gguf"
@@ -182,7 +236,10 @@ def main() -> None:
     to_hex(sp1)
     to_hex(sp2)
     print("wrote a25 fixtures (.hex)")
+    native_fixture = HERE / "a25_native_writer.hex"
+    verify_native_writer(native_fixture)
 
 
 if __name__ == "__main__":
     main()
+
