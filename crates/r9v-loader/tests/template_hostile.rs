@@ -6,7 +6,7 @@
 //! (the output-contract scale); the enormous values all refuse before any
 //! backing allocation.
 
-use r9v_loader::{render_chat_template, TemplateValue};
+use r9v_loader::{render_chat_template, TemplateValue, ToolCall};
 use r9v_loader::{render_template_vars as render_vars, ChatContext, ChatMessage, LoaderError};
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -150,8 +150,14 @@ fn indent_width_and_line_growth_capped() {
 #[test]
 fn replace_empty_needle_and_huge_counts() {
     assert_ok("{{ 'abc'|replace('', 'x') }}", &[], "xaxbxcx");
-    assert_ok("{{ 'abc'|replace('', 'x', 2) }}", &[], "xxabc");
+    // Pinned Jinja/minja boundary semantics: a finite count inserts at the
+    // first `count` boundaries, not front-loaded (Python
+    // `"abc".replace("", "x", 2) == "xaxbc"`).
+    assert_ok("{{ 'abc'|replace('', 'x', 2) }}", &[], "xaxbc");
+    assert_ok("{{ 'abc'|replace('', 'x', 0) }}", &[], "abc");
     assert_ok("{{ 'abc'|replace('', '') }}", &[], "abc");
+    assert_ok("{{ ''|replace('', 'x') }}", &[], "x");
+    assert_ok("{{ ''|replace('', 'x', 2) }}", &[], "x");
     assert_ok("{{ 'aaa'|replace('a', 'bb') }}", &[], "bbbbbb");
     assert_ok("{{ 'abc'|replace('b', 'x', 0) }}", &[], "abc");
     // A uselessly huge count that changes one occurrence still succeeds.
@@ -166,11 +172,40 @@ fn replace_empty_needle_and_huge_counts() {
         &[],
         "bb",
     );
-    assert_limit("{{ 'a'|replace('', 'x', 9223372036854775807) }}", &[]);
-    assert_limit("{{ 'a'|replace('', 'xxxxxxxxxx', 500000) }}", &[]);
+    // A uselessly huge empty-needle count clamps to the input-bounded
+    // boundary total (2 for `"a"`) and succeeds on the true result size.
+    assert_ok(
+        "{{ 'a'|replace('', 'x', 9223372036854775807) }}",
+        &[],
+        "xax",
+    );
+    assert_ok(
+        "{{ 'a'|replace('', 'xxxxxxxxxx', 500000) }}",
+        &[],
+        "xxxxxxxxxxaxxxxxxxxxx",
+    );
+    // Empty-needle growth that truly passes the budget refuses up front,
+    // both unlimited and finite-count (3 MiB of subjects each gain ~6 MiB
+    // of insertions).
+    let triple = TemplateValue::Str("a".repeat(3 << 20));
+    assert_limit("{{ y|replace('', 'bb') }}", &[("y", triple.clone())]);
+    assert_limit("{{ y|replace('', 'bb', 3000000) }}", &[("y", triple)]);
     // Doubling 3 MiB of matches would pass the budget: refused up front.
     let triple = TemplateValue::Str("a".repeat(3 << 20));
     assert_limit("{{ y|replace('a', 'bb') }}", &[("y", triple)]);
+}
+
+/// Empty-needle `replace()` inserts at Unicode scalar boundaries exactly,
+/// including multibyte text: byte length never stands in for boundary
+/// count, and zero/empty cases are unchanged.
+#[test]
+fn replace_empty_needle_unicode_boundaries() {
+    assert_ok("{{ 'héllo'|replace('', 'x') }}", &[], "xhxéxlxlxox");
+    assert_ok("{{ 'héllo'|replace('', 'x', 2) }}", &[], "xhxéllo");
+    assert_ok("{{ 'héllo'|replace('', 'x', 0) }}", &[], "héllo");
+    assert_ok("{{ 'a💯b'|replace('', '-') }}", &[], "-a-💯-b-");
+    assert_ok("{{ 'a💯b'|replace('', '-', 1) }}", &[], "-a💯b");
+    assert_ok("{{ '💯'|replace('💯', 'ab') }}", &[], "ab");
 }
 
 /// `format()` preflights every push, so hostile placeholder/argument sizes
@@ -357,4 +392,208 @@ fn hostile_entry_values_refused() {
         Ok(Err(other)) => panic!("150k messages refused with {other:?}, expected Limit"),
         Err(_) => panic!("150k messages panicked"),
     }
+}
+
+/// Equality and membership charge hostile wide inputs against the loop
+/// budget and fail fast with `Limit` (never a panic or a silent `false`),
+/// while small cases keep exact reference outcomes.
+#[test]
+fn equality_breadth_fails_fast() {
+    let wide: Vec<TemplateValue> = (0..200_000).map(TemplateValue::Int).collect();
+    let a = TemplateValue::List(wide.clone());
+    let b = TemplateValue::List(wide);
+    let pairs = [("a", a.clone()), ("b", b)];
+    // Two 200k lists refuse on breadth before visiting elements.
+    assert_limit("{{ a == b }}", &pairs);
+    assert_limit("{{ a != b }}", &pairs);
+    // A miss over a hostile list trips the shared budget mid-scan.
+    assert_limit("{{ -1 in a }}", &[("a", a.clone())]);
+    // A whole-filter `select` shares one budget across its items.
+    assert_limit("{{ a|select('eq', -1)|length }}", &[("a", a.clone())]);
+    // An early hit still succeeds without visiting the rest.
+    assert_ok("{{ 1 in a }}", &[("a", a)], "True");
+    // Wide objects trip the budget mid-scan instead of spending quadratic
+    // key-search work first.
+    let wide_obj = || {
+        TemplateValue::Dict(
+            (0..2000)
+                .map(|i| (format!("k{i}"), TemplateValue::Int(i)))
+                .collect(),
+        )
+    };
+    assert_limit("{{ a == b }}", &[("a", wide_obj()), ("b", wide_obj())]);
+    // Small cases keep exact outcomes through every equality caller.
+    assert_ok(
+        "{{ [1, [2, {'a': 1}]] == [1, [2, {'a': 1}]] }}",
+        &[],
+        "True",
+    );
+    assert_ok(
+        "{{ [1, [2, {'a': 1}]] == [1, [2, {'a': 2}]] }}",
+        &[],
+        "False",
+    );
+    assert_ok("{{ [1, 2] == [1] }}", &[], "False");
+    assert_ok("{{ [1, 2] != [1] }}", &[], "True");
+    assert_ok("{{ 2 in [1, 2, 3] }}", &[], "True");
+    assert_ok("{{ 9 in [1, 2, 3] }}", &[], "False");
+    assert_ok("{{ 1 is eq(1) }}", &[], "True");
+    assert_ok("{{ [1] is eq([2]) }}", &[], "False");
+    assert_ok("{{ [1] is ne([2]) }}", &[], "True");
+    assert_ok("{{ 2 is in([1, 2, 3]) }}", &[], "True");
+    assert_ok("{{ {'a': 1} == {'a': 1} }}", &[], "True");
+    assert_ok("{{ {'a': 1} == {'b': 1} }}", &[], "False");
+}
+
+/// Renders a full chat context under `catch_unwind`.
+fn chat_hostile(source: &str, ctx: &ChatContext) -> Result<Result<String, LoaderError>, String> {
+    match std::panic::catch_unwind(AssertUnwindSafe(|| render_chat_template(source, ctx))) {
+        Ok(outcome) => Ok(outcome),
+        Err(_) => Err("render panicked".to_owned()),
+    }
+}
+
+fn assert_chat_limit(source: &str, ctx: &ChatContext) {
+    match chat_hostile(source, ctx) {
+        Ok(Err(LoaderError::Limit { .. })) => {}
+        Ok(Err(other)) => panic!("{source:?} refused with {other:?}, expected Limit"),
+        Ok(Ok(out)) => panic!("{source:?} rendered unexpectedly: {out:?}"),
+        Err(panicked) => panic!("{source:?} {panicked}"),
+    }
+}
+
+fn assert_chat_ok(source: &str, ctx: &ChatContext, expected: &str) {
+    match chat_hostile(source, ctx) {
+        Ok(Ok(out)) => assert_eq!(out, expected, "{source:?}"),
+        Ok(Err(e)) => panic!("{source:?} failed unexpectedly: {e}"),
+        Err(panicked) => panic!("{source:?} {panicked}"),
+    }
+}
+
+fn user_message(content: String) -> ChatMessage {
+    ChatMessage {
+        role: "user".to_owned(),
+        content,
+        tool_calls: Vec::new(),
+        reasoning_content: None,
+    }
+}
+
+/// The aggregate context (roles, contents, tool-call names/arguments/ids,
+/// reasoning, tools, tool choice, extras, nested values) is preflighted
+/// against the byte/node/depth budgets before `message_value` or any clone:
+/// unused hostile messages refuse instead of cloning gigabytes. Small
+/// legitimate contexts render exactly.
+#[test]
+fn message_context_preflight_before_clone() {
+    // A 5 MiB content the template never consults still refuses.
+    let ctx = ChatContext {
+        messages: vec![user_message("q".repeat(5 << 20))],
+        ..ChatContext::default()
+    };
+    assert_chat_limit("{{ 1 }}", &ctx);
+    // Tool-call names/arguments/ids count even when unused.
+    let ctx = ChatContext {
+        messages: vec![ChatMessage {
+            role: "assistant".to_owned(),
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                name: "f".to_owned(),
+                arguments: "a".repeat(5 << 20),
+                id: None,
+            }],
+            reasoning_content: None,
+        }],
+        ..ChatContext::default()
+    };
+    assert_chat_limit("{{ 1 }}", &ctx);
+    // Reasoning text counts too.
+    let ctx = ChatContext {
+        messages: vec![ChatMessage {
+            reasoning_content: Some("r".repeat(5 << 20)),
+            ..user_message(String::new())
+        }],
+        ..ChatContext::default()
+    };
+    assert_chat_limit("{{ 1 }}", &ctx);
+    // Many medium messages trip the aggregate even when each fits alone.
+    let ctx = ChatContext {
+        messages: (0..10)
+            .map(|_| user_message("m".repeat(600 << 10)))
+            .collect(),
+        ..ChatContext::default()
+    };
+    assert_chat_limit("{{ 1 }}", &ctx);
+    // Nested tools/tool_choice/extras count bytes, nodes, and depth.
+    let big = TemplateValue::Str("w".repeat(5 << 20));
+    let ctx = ChatContext {
+        tools: Some(TemplateValue::List(vec![big.clone()])),
+        ..ChatContext::default()
+    };
+    assert_chat_limit("{{ 1 }}", &ctx);
+    let mut deep = TemplateValue::Int(0);
+    for _ in 0..200 {
+        deep = TemplateValue::List(vec![deep]);
+    }
+    let ctx = ChatContext {
+        tool_choice: Some(deep.clone()),
+        ..ChatContext::default()
+    };
+    assert_chat_limit("{{ 1 }}", &ctx);
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert("k".to_owned(), big);
+    extra.insert("deep".to_owned(), deep);
+    let ctx = ChatContext {
+        extra,
+        ..ChatContext::default()
+    };
+    assert_chat_limit("{{ 1 }}", &ctx);
+    // A checked-arithmetic hostile: node counts near the budget refuse
+    // instead of wrapping or cloning (120k one-key tool objects).
+    let ctx = ChatContext {
+        tools: Some(TemplateValue::List(
+            (0..120_000)
+                .map(|i| TemplateValue::Dict(vec![(format!("k{i}"), TemplateValue::Int(i))]))
+                .collect(),
+        )),
+        ..ChatContext::default()
+    };
+    assert_chat_limit("{{ 1 }}", &ctx);
+    // Legitimate reference-scale contexts are untouched: messages, a tool
+    // call, tools, tool choice, and extras all render exactly.
+    let mut extra = std::collections::BTreeMap::new();
+    extra.insert("mode".to_owned(), TemplateValue::Str("fast".to_owned()));
+    let ctx = ChatContext {
+        messages: vec![
+            user_message("hi".to_owned()),
+            ChatMessage {
+                role: "assistant".to_owned(),
+                content: "hello".to_owned(),
+                tool_calls: vec![ToolCall {
+                    name: "f".to_owned(),
+                    arguments: "{}".to_owned(),
+                    id: Some("0".to_owned()),
+                }],
+                reasoning_content: None,
+            },
+        ],
+        add_generation_prompt: true,
+        tools: Some(TemplateValue::List(vec![TemplateValue::Dict(vec![(
+            "name".to_owned(),
+            TemplateValue::Str("f".to_owned()),
+        )])])),
+        tool_choice: Some(TemplateValue::Str("auto".to_owned())),
+        extra,
+        ..ChatContext::default()
+    };
+    assert_chat_ok(
+        "{% for m in messages %}{{ m.role }}:{{ m.content }};{% endfor %}",
+        &ctx,
+        "user:hi;assistant:hello;",
+    );
+    assert_chat_ok(
+        "{{ tools|length }}-{{ tool_choice }}-{{ mode }}",
+        &ctx,
+        "1-auto-fast",
+    );
 }

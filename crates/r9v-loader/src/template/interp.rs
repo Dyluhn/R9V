@@ -269,6 +269,122 @@ impl Interp {
         self.depth -= 1;
     }
 
+    /// Preflights the aggregate render context before `message_value` or any
+    /// clone materializes it: message roles, contents, names, tool-call
+    /// arguments (and ids), reasoning text, tokens, tools, tool choice,
+    /// extras, and nested values are summed without cloning, and the totals
+    /// are checked against the existing budgets — bytes against
+    /// [`MAX_OUTPUT_BYTES`], node counts against [`MAX_LOOP_ITERS`], nesting
+    /// against [`MAX_DEPTH`]. An unused hostile message carrying gigabytes
+    /// refuses here instead of after the clone. There is no new ceiling.
+    /// DECISION(A2.9): only the aggregate is bounded (rejected per-field
+    /// caps: legitimate reference templates vary across fields, and only
+    /// the total clone cost matters); quick outcomes stay quick (small
+    /// contexts add a few integer ops). Spec 10 §3.1 is silent on value
+    /// shapes.
+    fn check_context_budgets(ctx: &ChatContext) -> Result<(), LoaderError> {
+        fn add_bytes(total: usize, add: usize, what: &'static str) -> Result<usize, LoaderError> {
+            match total.checked_add(add) {
+                Some(sum) if sum <= MAX_OUTPUT_BYTES => Ok(sum),
+                _ => Err(LoaderError::Limit {
+                    what,
+                    limit: MAX_OUTPUT_BYTES,
+                    got: total.saturating_add(add),
+                }),
+            }
+        }
+        fn add_nodes(total: usize, add: usize, what: &'static str) -> Result<usize, LoaderError> {
+            match total.checked_add(add) {
+                Some(sum) if sum <= MAX_LOOP_ITERS => Ok(sum),
+                _ => Err(LoaderError::Limit {
+                    what,
+                    limit: MAX_LOOP_ITERS,
+                    got: total.saturating_add(add),
+                }),
+            }
+        }
+        /// Adds one nested value's aggregate bytes, nodes, and depth without
+        /// cloning it. Each container pre-charges its element count, so a
+        /// hostile wide value refuses before its children are pushed.
+        fn walk_value(
+            value: &TemplateValue,
+            mut bytes: usize,
+            mut nodes: usize,
+        ) -> Result<(usize, usize), LoaderError> {
+            let mut stack: Vec<(&TemplateValue, usize)> = vec![(value, 0)];
+            nodes = add_nodes(nodes, 1, "template context values")?;
+            while let Some((v, depth)) = stack.pop() {
+                if depth > MAX_DEPTH {
+                    return Err(LoaderError::Limit {
+                        what: "template value nesting depth",
+                        limit: MAX_DEPTH,
+                        got: depth,
+                    });
+                }
+                match v {
+                    TemplateValue::Str(s) | TemplateValue::SafeStr(s) => {
+                        bytes = add_bytes(bytes, s.len(), "template context bytes")?;
+                    }
+                    TemplateValue::List(items) => {
+                        nodes = add_nodes(nodes, items.len(), "template context values")?;
+                        stack.extend(items.iter().map(|item| (item, depth + 1)));
+                    }
+                    TemplateValue::Dict(entries) => {
+                        nodes = add_nodes(nodes, entries.len(), "template context values")?;
+                        for (k, child) in entries {
+                            bytes = add_bytes(bytes, k.len(), "template context bytes")?;
+                            stack.push((child, depth + 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok((bytes, nodes))
+        }
+
+        let mut bytes = 0usize;
+        let mut nodes = 0usize;
+        // The message list feeds `for` loops directly: cap its
+        // materialization like every other list.
+        nodes = add_nodes(nodes, ctx.messages.len(), "template messages length")?;
+        for message in &ctx.messages {
+            nodes = add_nodes(
+                nodes,
+                message.tool_calls.len(),
+                "template tool calls length",
+            )?;
+            bytes = add_bytes(bytes, message.role.len(), "template context bytes")?;
+            bytes = add_bytes(bytes, message.content.len(), "template context bytes")?;
+            if let Some(reasoning) = &message.reasoning_content {
+                bytes = add_bytes(bytes, reasoning.len(), "template context bytes")?;
+            }
+            for call in &message.tool_calls {
+                bytes = add_bytes(bytes, call.name.len(), "template context bytes")?;
+                bytes = add_bytes(bytes, call.arguments.len(), "template context bytes")?;
+                if let Some(id) = &call.id {
+                    bytes = add_bytes(bytes, id.len(), "template context bytes")?;
+                }
+            }
+        }
+        if let Some(token) = &ctx.bos_token {
+            bytes = add_bytes(bytes, token.len(), "template context bytes")?;
+        }
+        if let Some(token) = &ctx.eos_token {
+            bytes = add_bytes(bytes, token.len(), "template context bytes")?;
+        }
+        if let Some(tools) = &ctx.tools {
+            (bytes, nodes) = walk_value(tools, bytes, nodes)?;
+        }
+        if let Some(choice) = &ctx.tool_choice {
+            (bytes, nodes) = walk_value(choice, bytes, nodes)?;
+        }
+        for (k, v) in &ctx.extra {
+            bytes = add_bytes(bytes, k.len(), "template context bytes")?;
+            (bytes, nodes) = walk_value(v, bytes, nodes)?;
+        }
+        Ok(())
+    }
+
     /// Validates one entry-point value's nesting with an explicit heap stack
     /// (never recursion): hostile values nest deeper than the thread stack.
     /// `write_json` recurses and relies on this bound; interpolation and
@@ -304,18 +420,10 @@ impl Interp {
 
     /// Defines the serving globals (Spec 10 §3.1).
     fn define_globals(&mut self, ctx: &ChatContext) -> Result<(), LoaderError> {
-        // The message list feeds `for` loops directly: cap its
-        // materialization like every other list.
-        ensure_list_add(0, ctx.messages.len(), "template messages length")?;
-        if let Some(tools) = &ctx.tools {
-            Self::check_value_depth(tools)?;
-        }
-        if let Some(choice) = &ctx.tool_choice {
-            Self::check_value_depth(choice)?;
-        }
-        for v in ctx.extra.values() {
-            Self::check_value_depth(v)?;
-        }
+        // Aggregate preflight before `message_value` or any clone: an
+        // unused hostile message must refuse here, not after cloning
+        // gigabytes of strings no template consults.
+        Self::check_context_budgets(ctx)?;
         let messages: Vec<TemplateValue> = ctx.messages.iter().map(message_value).collect();
         self.set("messages", TemplateValue::List(messages));
         self.set(

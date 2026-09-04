@@ -259,19 +259,61 @@ fn int_binary(op: &str, a: i64, b: i64) -> Result<TemplateValue, LoaderError> {
     }
 }
 
+/// Charges one equality-comparison unit against [`MAX_LOOP_ITERS`]: hostile
+/// wide or nested values trip the budget with a typed refusal instead of
+/// spinning, and over-budget work is an error, never a silent `false`.
+fn charge_eq_work(budget: &mut usize) -> Result<(), LoaderError> {
+    *budget = budget.checked_add(1).ok_or(LoaderError::Limit {
+        what: "template equality comparisons",
+        limit: MAX_LOOP_ITERS,
+        got: usize::MAX,
+    })?;
+    if *budget > MAX_LOOP_ITERS {
+        return Err(LoaderError::Limit {
+            what: "template equality comparisons",
+            limit: MAX_LOOP_ITERS,
+            got: *budget,
+        });
+    }
+    Ok(())
+}
+
 /// `==` (mirrors minja `equivalent`: numerics cross-compare, containers
 /// compare deeply, undefined only equals undefined). Iterative over an
 /// explicit heap stack, never recursive: loop-accumulated values nest deeper
 /// than entry validation allows, and the old recursion overflowed the thread
-/// stack on them.
-pub(crate) fn values_equal(left: &TemplateValue, right: &TemplateValue) -> bool {
+/// stack on them. Every popped pair, every container breadth preflight, and
+/// every dict key-scan step charges the shared [`MAX_LOOP_ITERS`] budget, so
+/// hostile wide inputs fail fast with [`LoaderError::Limit`].
+/// DECISION(A2.9): equality breadth reuses `MAX_LOOP_ITERS` (the iteration
+/// budget every list already feeds; rejected a new `MAX_EQ_*` ceiling, which
+/// the mandate forbids, and rejected unbounded comparison, which lets a wide
+/// nested value spin a single `==`). Quick outcomes stay quick: length
+/// mismatches return `false` before any charge, and `in` keeps incremental
+/// charges so an early hit still succeeds. Spec 10 §3.1 is silent here.
+pub(crate) fn values_equal(
+    left: &TemplateValue,
+    right: &TemplateValue,
+) -> Result<bool, LoaderError> {
+    let mut budget = 0usize;
+    values_equal_in(left, right, &mut budget)
+}
+
+/// Budget-sharing `==` used by `in`, tests, and select filters so one
+/// operator call (however many elements it visits) trips a single budget.
+fn values_equal_in(
+    left: &TemplateValue,
+    right: &TemplateValue,
+    budget: &mut usize,
+) -> Result<bool, LoaderError> {
     let mut stack: Vec<(&TemplateValue, &TemplateValue)> = vec![(left, right)];
     while let Some((l, r)) = stack.pop() {
+        charge_eq_work(budget)?;
         if let (Some(a), Some(b)) = (as_number(l), as_number(r)) {
             // Bool vs number: minja compares val_int/val_flt pairs; treat via
             // the numeric values (bool true == 1).
             if a != b {
-                return false;
+                return Ok(false);
             }
             continue;
         }
@@ -283,30 +325,47 @@ pub(crate) fn values_equal(left: &TemplateValue, right: &TemplateValue) -> bool 
             | (TemplateValue::SafeStr(a), TemplateValue::Str(b))
             | (TemplateValue::SafeStr(a), TemplateValue::SafeStr(b)) => {
                 if a != b {
-                    return false;
+                    return Ok(false);
                 }
             }
             (TemplateValue::List(a), TemplateValue::List(b)) => {
                 if a.len() != b.len() {
-                    return false;
+                    return Ok(false);
                 }
+                // A single container wider than the iteration budget refuses
+                // before its pairs are pushed, instead of materializing a
+                // hostile-length work stack first.
+                ensure_list_add(0, a.len(), "template equality breadth")?;
                 stack.extend(a.iter().zip(b.iter()));
             }
             (TemplateValue::Dict(a), TemplateValue::Dict(b)) => {
                 if a.len() != b.len() {
-                    return false;
+                    return Ok(false);
                 }
+                ensure_list_add(0, a.len(), "template equality breadth")?;
                 for (k, v) in a {
-                    match b.iter().find(|(k2, _)| k == k2) {
-                        Some((_, v2)) => stack.push((v, v2)),
-                        None => return false,
+                    // Linear key scan with a per-entry charge: a hostile
+                    // wide object trips the budget mid-scan instead of
+                    // spending quadratic work first. A missing key still
+                    // returns `false` (charged for the work actually done).
+                    let mut found = None;
+                    for (k2, v2) in b.iter() {
+                        charge_eq_work(budget)?;
+                        if k == k2 {
+                            found = Some(v2);
+                            break;
+                        }
+                    }
+                    match found {
+                        Some(v2) => stack.push((v, v2)),
+                        None => return Ok(false),
                     }
                 }
             }
-            _ => return false,
+            _ => return Ok(false),
         }
     }
-    true
+    Ok(true)
 }
 
 /// Total ordering for `sort`/`min`/`max` (mirrors minja `value_compare`:
@@ -340,8 +399,21 @@ fn kind_rank(value: &TemplateValue) -> u8 {
 }
 
 /// `in` membership (mirrors minja `test_is_in`): substring, array
-/// membership, dict key. `x in undefined` is false.
+/// membership, dict key. `x in undefined` is false. Array membership shares
+/// one [`MAX_LOOP_ITERS`] budget across every element comparison (see
+/// [`values_equal`]), so a hostile wide list fails fast instead of spending
+/// an unbounded number of individually cheap comparisons.
 pub(crate) fn value_in(left: &TemplateValue, right: &TemplateValue) -> Result<bool, LoaderError> {
+    let mut budget = 0usize;
+    value_in_in(left, right, &mut budget)
+}
+
+/// Budget-sharing `in` used by operators, tests, and select filters.
+fn value_in_in(
+    left: &TemplateValue,
+    right: &TemplateValue,
+    budget: &mut usize,
+) -> Result<bool, LoaderError> {
     if matches!(right, TemplateValue::Undefined) {
         return Ok(false);
     }
@@ -350,7 +422,18 @@ pub(crate) fn value_in(left: &TemplateValue, right: &TemplateValue) -> Result<bo
             let needle = as_string(left)?;
             Ok(s.contains(needle.as_str()))
         }
-        TemplateValue::List(items) => Ok(items.iter().any(|item| values_equal(item, left))),
+        TemplateValue::List(items) => {
+            for item in items {
+                // Per-element charge first: a hostile list with no match
+                // trips the budget on breadth alone, while an early hit
+                // still succeeds without visiting the rest.
+                charge_eq_work(budget)?;
+                if values_equal_in(item, left, budget)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
         TemplateValue::Dict(entries) => {
             let needle = as_string(left)?;
             Ok(entries.iter().any(|(k, _)| k == &needle))
@@ -371,10 +454,10 @@ pub(crate) fn apply_binary(
     right: &TemplateValue,
 ) -> Result<TemplateValue, LoaderError> {
     if op == "==" {
-        return Ok(TemplateValue::Bool(values_equal(left, right)));
+        return Ok(TemplateValue::Bool(values_equal(left, right)?));
     }
     if op == "!=" {
-        return Ok(TemplateValue::Bool(!values_equal(left, right)));
+        return Ok(TemplateValue::Bool(!values_equal(left, right)?));
     }
     // Undefined / null handling.
     let left_null = matches!(left, TemplateValue::Undefined | TemplateValue::None);
@@ -569,12 +652,27 @@ fn concat_with_null(left: &TemplateValue, right: &TemplateValue) -> Option<Strin
     }
 }
 
-/// `is` tests (mirror minja `test_is_*`).
+/// `is` tests (mirror minja `test_is_*`). Equality, ordering-equality, and
+/// membership arms share one [`MAX_LOOP_ITERS`] budget per test call (see
+/// [`values_equal`]).
 pub(crate) fn apply_test(
     name: &str,
     value: &TemplateValue,
     args: &[TemplateValue],
     negated: bool,
+) -> Result<TemplateValue, LoaderError> {
+    let mut budget = 0usize;
+    apply_test_in(name, value, args, negated, &mut budget)
+}
+
+/// Budget-sharing `is` test used by select filters so one filter call trips
+/// a single budget no matter how many items it visits.
+fn apply_test_in(
+    name: &str,
+    value: &TemplateValue,
+    args: &[TemplateValue],
+    negated: bool,
+    budget: &mut usize,
 ) -> Result<TemplateValue, LoaderError> {
     let result = match name {
         "defined" => value.is_defined(),
@@ -621,26 +719,26 @@ pub(crate) fn apply_test(
             }
         },
         "eq" | "equalto" => match args.first() {
-            Some(other) => values_equal(value, other),
+            Some(other) => values_equal_in(value, other, budget)?,
             None => return Err(render_error(format!("{name} test needs an argument"))),
         },
         "ne" => match args.first() {
-            Some(other) => !values_equal(value, other),
+            Some(other) => !values_equal_in(value, other, budget)?,
             None => return Err(render_error("ne test needs an argument".to_owned())),
         },
-        "lt" | "lessthan" => compare_test(value, args, Ordering::Less)?,
-        "le" => compare_test(value, args, Ordering::Less)?,
-        "gt" | "greaterthan" => compare_test(value, args, Ordering::Greater)?,
-        "ge" => compare_test(value, args, Ordering::Greater)?,
+        "lt" | "lessthan" => compare_test(value, args, Ordering::Less, budget)?,
+        "le" => compare_test(value, args, Ordering::Less, budget)?,
+        "gt" | "greaterthan" => compare_test(value, args, Ordering::Greater, budget)?,
+        "ge" => compare_test(value, args, Ordering::Greater, budget)?,
         "in" => match args.first() {
-            Some(other) => value_in(value, other)?,
+            Some(other) => value_in_in(value, other, budget)?,
             None => return Err(render_error("in test needs an argument".to_owned())),
         },
         "sameas" => match args.first() {
             // `is sameas` compares identity for our value domain via
             // strict equality (mirrors minja pointer compare for the
             // literal cases templates use: true/false/none).
-            Some(other) => values_equal(value, other),
+            Some(other) => values_equal_in(value, other, budget)?,
             None => return Err(render_error("sameas test needs an argument".to_owned())),
         },
         "callable" | "escaped" | "filter" | "test" => {
@@ -665,6 +763,7 @@ fn compare_test(
     value: &TemplateValue,
     args: &[TemplateValue],
     order: Ordering,
+    budget: &mut usize,
 ) -> Result<bool, LoaderError> {
     let other = args
         .first()
@@ -672,7 +771,7 @@ fn compare_test(
     match order {
         Ordering::Less => Ok(compare_values(value, other) == Ordering::Less),
         Ordering::Greater => Ok(compare_values(value, other) == Ordering::Greater),
-        Ordering::Equal => Ok(values_equal(value, other)),
+        Ordering::Equal => Ok(values_equal_in(value, other, budget)?),
     }
 }
 
@@ -1165,16 +1264,21 @@ fn html_escape(s: &str) -> Result<String, LoaderError> {
 
 /// Bounded `replace(old, new, count)`: single-pass left-to-right
 /// non-overlapping replacement. For `count < 0` the result matches
-/// `str::replace` exactly; otherwise at most `count` replacements run, as
-/// the old loop did. The exact result size is preflighted with checked
-/// arithmetic before anything is built, so huge counts fail fast.
-/// Empty needles insert `new` at every char boundary (`str::replace`
-/// semantics); the boundary count is input-bounded and huge `count` values
-/// clamp to it before the size preflight, so neither spins.
-/// DECISION(A2.9): empty-needle replacement keeps Rust `str::replace`
-/// semantics under the same output cap (rejected erroring on empty needles:
-/// small cases behave like the reference string ops); result sizes past
-/// `MAX_OUTPUT_BYTES` fail with `Limit`. Spec 10 §3.1 is silent here.
+/// `str::replace` exactly; otherwise at most `count` replacements run. The
+/// exact result size is preflighted with checked arithmetic before anything
+/// is built, so huge counts fail fast.
+/// Empty needles insert `new` at Unicode scalar boundaries with pinned
+/// Jinja/minja semantics: `count == 0` leaves the subject unchanged,
+/// `count < 0` inserts at every boundary (`"abc"` → `"xaxbxcx"`), and a
+/// finite `count` inserts at the first `count` boundaries (`"abc"` with
+/// `count=2` → `"xaxbc"`). The boundary count is input-bounded (chars + 1)
+/// and clamps huge counts before the size preflight, so neither spins.
+/// DECISION(A2.9): empty-needle replacement keeps pinned Jinja/minja
+/// boundary semantics under the same output cap (rejected erroring on empty
+/// needles, and rejected the old front-loaded `new.repeat(count) + subject`
+/// form: it disagrees with the reference on every finite count); result
+/// sizes past `MAX_OUTPUT_BYTES` fail with `Limit`. Spec 10 §3.1 is silent
+/// here.
 fn filter_replace(s: &str, old: &str, new: &str, count: i64) -> Result<String, LoaderError> {
     const WHAT: &str = "template replace bytes";
     if count == 0 {
@@ -1188,34 +1292,31 @@ fn filter_replace(s: &str, old: &str, new: &str, count: i64) -> Result<String, L
             check_str_result(s.len(), WHAT)?;
             return Ok(s.to_owned());
         }
-        if count >= 0 {
-            // `find("")` hits at position 0 every time, so the old loop
-            // inserted `new` at the front exactly `count` times: `new`
-            // repeated `count` times plus the subject. Preflight first so
-            // enormous counts fail instead of spinning.
-            let total =
-                (s.len() as u64).saturating_add((count as u64).saturating_mul(new.len() as u64));
-            let total = check_str_total(total, WHAT)?;
-            let mut out = String::new();
-            try_reserve_str(&mut out, total, WHAT)?;
-            out.push_str(&new.repeat(count as usize));
-            out.push_str(s);
-            return Ok(out);
-        }
-        // `count < 0`: interleave at every char boundary, matching
-        // `str::replace` exactly (verified: `"".replace("", "x") == "x"`,
-        // `"abc".replace("", "x") == "xaxbxcx"`). The boundary count is
-        // input-bounded and preflighted.
+        // Boundary insertion (both the finite-count and the unlimited
+        // forms): the count clamps to the input-bounded boundary total
+        // before the exact size preflight, so hostile counts refuse or
+        // succeed on the true result size instead of spinning.
         let boundaries = s.chars().count().saturating_add(1) as u64;
-        let total = (s.len() as u64).saturating_add(boundaries.saturating_mul(new.len() as u64));
+        let insertions = if count < 0 {
+            boundaries
+        } else {
+            (count as u64).min(boundaries)
+        };
+        let total = (s.len() as u64).saturating_add(insertions.saturating_mul(new.len() as u64));
         let total = check_str_total(total, WHAT)?;
         let mut out = String::new();
         try_reserve_str(&mut out, total, WHAT)?;
+        let mut done = 0u64;
         for ch in s.chars() {
-            out.push_str(new);
+            if done < insertions {
+                out.push_str(new);
+                done += 1;
+            }
             out.push(ch);
         }
-        out.push_str(new);
+        if done < insertions {
+            out.push_str(new);
+        }
         return Ok(out);
     }
     // Non-empty needle: one bounded scan counts occurrences, the
@@ -1531,8 +1632,11 @@ pub(crate) fn filter_on_array(
                 .cloned()
                 .unwrap_or(TemplateValue::Undefined);
             let mut out = Vec::new();
+            // One equality budget for the whole filter call: every item's
+            // test charges it, so a hostile list trips it mid-scan.
+            let mut eq_budget = 0usize;
             for item in items {
-                let selected = eval_select_test(&test_name, item, &test_arg)?;
+                let selected = eval_select_test(&test_name, item, &test_arg, &mut eq_budget)?;
                 if selected != (name == "reject") {
                     ensure_list_add(out.len(), 1, "template select length")?;
                     out.push(item.clone());
@@ -1552,6 +1656,8 @@ pub(crate) fn filter_on_array(
             };
             let reject = name == "rejectattr";
             let mut out = Vec::new();
+            // One equality budget for the whole filter call (see above).
+            let mut eq_budget = 0usize;
             if args.positional.len() == 1 {
                 for item in items {
                     let TemplateValue::Dict(_) = item else {
@@ -1592,7 +1698,7 @@ pub(crate) fn filter_on_array(
                 } else {
                     item.clone()
                 };
-                let selected = eval_select_test(&test_name, &subject, &test_value)?;
+                let selected = eval_select_test(&test_name, &subject, &test_value, &mut eq_budget)?;
                 if selected != reject {
                     ensure_list_add(out.len(), 1, "template select length")?;
                     out.push(item.clone());
@@ -1845,17 +1951,21 @@ pub(crate) fn slice_str(
 }
 
 /// `select`/`selectattr` test evaluation against the known test names.
+/// One filter call shares a single budget across all its items (see
+/// [`values_equal`]), so a hostile wide list fails fast instead of spending
+/// an unbounded number of per-item tests.
 fn eval_select_test(
     test_name: &str,
     item: &TemplateValue,
     test_value: &TemplateValue,
+    budget: &mut usize,
 ) -> Result<bool, LoaderError> {
     let args = if matches!(test_value, TemplateValue::Undefined) {
         Vec::new()
     } else {
         vec![test_value.clone()]
     };
-    match apply_test(test_name, item, &args, false)? {
+    match apply_test_in(test_name, item, &args, false, budget)? {
         TemplateValue::Bool(b) => Ok(b),
         _ => Err(render_error(format!(
             "selectattr: unknown test '{test_name}'"
