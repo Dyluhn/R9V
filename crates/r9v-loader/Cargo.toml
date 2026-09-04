@@ -14,3 +14,12 @@ r9v-ir = { path = "../r9v-ir" }
 r9v-models = { path = "../r9v-models" }
 r9v-state = { path = "../r9v-state" }
 thiserror = "2.0"
+
+[dev-dependencies]
+# NOTE: do NOT enable `preserve_order` here: serde_json features unify
+# across the workspace build and the sorted-key `Map` shape is load-bearing
+# for other crates' committed artifacts (r9v-config generator parity).
+# Order-preserving fixture ingestion uses a manual `serde::Deserialize`
+# impl in tests/common/ordered_json.rs instead.
+serde_json = "1.0"
+serde = "1.0"

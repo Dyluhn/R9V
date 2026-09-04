@@ -1,0 +1,23 @@
+{
+  "llama3": {
+    "file": "template-llama3.jinja",
+    "source": "https://huggingface.co/unsloth/Meta-Llama-3.1-8B-Instruct/resolve/main/tokenizer_config.json",
+    "fetched": "2026-09-04",
+    "sha256": "e10ca381b1ccc5cf9db52e371f3b6651576caee0a630b452e2816b2d404d4b65",
+    "jinja2": "3.1.6"
+  },
+  "qwen25": {
+    "file": "template-qwen25.jinja",
+    "source": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/resolve/main/tokenizer_config.json",
+    "fetched": "2026-09-04",
+    "sha256": "cd8e9439f0570856fd70470bf8889ebd8b5d1107207f67a5efb46e342330527f",
+    "jinja2": "3.1.6"
+  },
+  "mistral": {
+    "file": "template-mistral.jinja",
+    "source": "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3/resolve/main/tokenizer_config.json",
+    "fetched": "2026-09-04",
+    "sha256": "e16746b40344d6c5b5265988e0328a0bf7277be86f1c335156eae07e29c82826",
+    "jinja2": "3.1.6"
+  }
+}

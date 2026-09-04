@@ -1,0 +1,1668 @@
+{
+ "oracle": {
+  "repo": "llama.cpp",
+  "commit": "dd1ea524333b1e697489067d7a4c39c60d32beee",
+  "binary": "llama-tokenize",
+  "gguf_py": "0.19.0"
+ },
+ "cases": [
+  {
+   "input": "",
+   "add_special": true,
+   "parse_special": true,
+   "ids": []
+  },
+  {
+   "input": "",
+   "add_special": false,
+   "parse_special": true,
+   "ids": []
+  },
+  {
+   "input": "",
+   "add_special": true,
+   "parse_special": false,
+   "ids": []
+  },
+  {
+   "input": "",
+   "add_special": false,
+   "parse_special": false,
+   "ids": []
+  },
+  {
+   "input": " ",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    32
+   ]
+  },
+  {
+   "input": " ",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    32
+   ]
+  },
+  {
+   "input": " ",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    32
+   ]
+  },
+  {
+   "input": " ",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    32
+   ]
+  },
+  {
+   "input": "  ",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    32,
+    32
+   ]
+  },
+  {
+   "input": "  ",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    32,
+    32
+   ]
+  },
+  {
+   "input": "  ",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    32,
+    32
+   ]
+  },
+  {
+   "input": "  ",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    32,
+    32
+   ]
+  },
+  {
+   "input": "Hello world",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    259,
+    261,
+    114,
+    108,
+    100
+   ]
+  },
+  {
+   "input": "Hello world",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    259,
+    261,
+    114,
+    108,
+    100
+   ]
+  },
+  {
+   "input": "Hello world",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    259,
+    261,
+    114,
+    108,
+    100
+   ]
+  },
+  {
+   "input": "Hello world",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    259,
+    261,
+    114,
+    108,
+    100
+   ]
+  },
+  {
+   "input": " Hello world",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    32,
+    259,
+    261,
+    114,
+    108,
+    100
+   ]
+  },
+  {
+   "input": " Hello world",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    32,
+    259,
+    261,
+    114,
+    108,
+    100
+   ]
+  },
+  {
+   "input": " Hello world",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    32,
+    259,
+    261,
+    114,
+    108,
+    100
+   ]
+  },
+  {
+   "input": " Hello world",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    32,
+    259,
+    261,
+    114,
+    108,
+    100
+   ]
+  },
+  {
+   "input": "Hello, world!",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    259,
+    44,
+    261,
+    114,
+    108,
+    100,
+    33
+   ]
+  },
+  {
+   "input": "Hello, world!",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    259,
+    44,
+    261,
+    114,
+    108,
+    100,
+    33
+   ]
+  },
+  {
+   "input": "Hello, world!",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    259,
+    44,
+    261,
+    114,
+    108,
+    100,
+    33
+   ]
+  },
+  {
+   "input": "Hello, world!",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    259,
+    44,
+    261,
+    114,
+    108,
+    100,
+    33
+   ]
+  },
+  {
+   "input": "don't stop",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    100,
+    111,
+    110,
+    39,
+    116,
+    32,
+    115,
+    116,
+    111,
+    112
+   ]
+  },
+  {
+   "input": "don't stop",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    100,
+    111,
+    110,
+    39,
+    116,
+    32,
+    115,
+    116,
+    111,
+    112
+   ]
+  },
+  {
+   "input": "don't stop",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    100,
+    111,
+    110,
+    39,
+    116,
+    32,
+    115,
+    116,
+    111,
+    112
+   ]
+  },
+  {
+   "input": "don't stop",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    100,
+    111,
+    110,
+    39,
+    116,
+    32,
+    115,
+    116,
+    111,
+    112
+   ]
+  },
+  {
+   "input": "'Twas the night",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    39,
+    84,
+    119,
+    97,
+    115,
+    32,
+    116,
+    104,
+    101,
+    32,
+    110,
+    105,
+    103,
+    104,
+    116
+   ]
+  },
+  {
+   "input": "'Twas the night",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    39,
+    84,
+    119,
+    97,
+    115,
+    32,
+    116,
+    104,
+    101,
+    32,
+    110,
+    105,
+    103,
+    104,
+    116
+   ]
+  },
+  {
+   "input": "'Twas the night",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    39,
+    84,
+    119,
+    97,
+    115,
+    32,
+    116,
+    104,
+    101,
+    32,
+    110,
+    105,
+    103,
+    104,
+    116
+   ]
+  },
+  {
+   "input": "'Twas the night",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    39,
+    84,
+    119,
+    97,
+    115,
+    32,
+    116,
+    104,
+    101,
+    32,
+    110,
+    105,
+    103,
+    104,
+    116
+   ]
+  },
+  {
+   "input": "abc 123 !?!",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    97,
+    98,
+    99,
+    32,
+    49,
+    50,
+    51,
+    32,
+    33,
+    63,
+    33
+   ]
+  },
+  {
+   "input": "abc 123 !?!",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    97,
+    98,
+    99,
+    32,
+    49,
+    50,
+    51,
+    32,
+    33,
+    63,
+    33
+   ]
+  },
+  {
+   "input": "abc 123 !?!",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    97,
+    98,
+    99,
+    32,
+    49,
+    50,
+    51,
+    32,
+    33,
+    63,
+    33
+   ]
+  },
+  {
+   "input": "abc 123 !?!",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    97,
+    98,
+    99,
+    32,
+    49,
+    50,
+    51,
+    32,
+    33,
+    63,
+    33
+   ]
+  },
+  {
+   "input": "trailing space ",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    116,
+    114,
+    97,
+    105,
+    108,
+    271,
+    32,
+    115,
+    112,
+    97,
+    99,
+    101,
+    32
+   ]
+  },
+  {
+   "input": "trailing space ",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    116,
+    114,
+    97,
+    105,
+    108,
+    271,
+    32,
+    115,
+    112,
+    97,
+    99,
+    101,
+    32
+   ]
+  },
+  {
+   "input": "trailing space ",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    116,
+    114,
+    97,
+    105,
+    108,
+    271,
+    32,
+    115,
+    112,
+    97,
+    99,
+    101,
+    32
+   ]
+  },
+  {
+   "input": "trailing space ",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    116,
+    114,
+    97,
+    105,
+    108,
+    271,
+    32,
+    115,
+    112,
+    97,
+    99,
+    101,
+    32
+   ]
+  },
+  {
+   "input": "  leading spaces",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    32,
+    32,
+    108,
+    101,
+    97,
+    100,
+    271,
+    32,
+    115,
+    112,
+    97,
+    99,
+    101,
+    115
+   ]
+  },
+  {
+   "input": "  leading spaces",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    32,
+    32,
+    108,
+    101,
+    97,
+    100,
+    271,
+    32,
+    115,
+    112,
+    97,
+    99,
+    101,
+    115
+   ]
+  },
+  {
+   "input": "  leading spaces",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    32,
+    32,
+    108,
+    101,
+    97,
+    100,
+    271,
+    32,
+    115,
+    112,
+    97,
+    99,
+    101,
+    115
+   ]
+  },
+  {
+   "input": "  leading spaces",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    32,
+    32,
+    108,
+    101,
+    97,
+    100,
+    271,
+    32,
+    115,
+    112,
+    97,
+    99,
+    101,
+    115
+   ]
+  },
+  {
+   "input": "line1\nline2\ttabbed",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    108,
+    270,
+    101,
+    49,
+    10,
+    108,
+    270,
+    101,
+    50,
+    9,
+    116,
+    97,
+    98,
+    98,
+    101,
+    100
+   ]
+  },
+  {
+   "input": "line1\nline2\ttabbed",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    108,
+    270,
+    101,
+    49,
+    10,
+    108,
+    270,
+    101,
+    50,
+    9,
+    116,
+    97,
+    98,
+    98,
+    101,
+    100
+   ]
+  },
+  {
+   "input": "line1\nline2\ttabbed",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    108,
+    270,
+    101,
+    49,
+    10,
+    108,
+    270,
+    101,
+    50,
+    9,
+    116,
+    97,
+    98,
+    98,
+    101,
+    100
+   ]
+  },
+  {
+   "input": "line1\nline2\ttabbed",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    108,
+    270,
+    101,
+    49,
+    10,
+    108,
+    270,
+    101,
+    50,
+    9,
+    116,
+    97,
+    98,
+    98,
+    101,
+    100
+   ]
+  },
+  {
+   "input": "café Äpfel naïve",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    99,
+    97,
+    102,
+    272,
+    32,
+    195,
+    132,
+    112,
+    102,
+    101,
+    108,
+    32,
+    110,
+    97,
+    195,
+    175,
+    118,
+    101
+   ]
+  },
+  {
+   "input": "café Äpfel naïve",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    99,
+    97,
+    102,
+    272,
+    32,
+    195,
+    132,
+    112,
+    102,
+    101,
+    108,
+    32,
+    110,
+    97,
+    195,
+    175,
+    118,
+    101
+   ]
+  },
+  {
+   "input": "café Äpfel naïve",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    99,
+    97,
+    102,
+    272,
+    32,
+    195,
+    132,
+    112,
+    102,
+    101,
+    108,
+    32,
+    110,
+    97,
+    195,
+    175,
+    118,
+    101
+   ]
+  },
+  {
+   "input": "café Äpfel naïve",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    99,
+    97,
+    102,
+    272,
+    32,
+    195,
+    132,
+    112,
+    102,
+    101,
+    108,
+    32,
+    110,
+    97,
+    195,
+    175,
+    118,
+    101
+   ]
+  },
+  {
+   "input": "中文测试",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    274,
+    230,
+    150,
+    135,
+    230,
+    181,
+    139,
+    232,
+    175,
+    149
+   ]
+  },
+  {
+   "input": "中文测试",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    274,
+    230,
+    150,
+    135,
+    230,
+    181,
+    139,
+    232,
+    175,
+    149
+   ]
+  },
+  {
+   "input": "中文测试",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    274,
+    230,
+    150,
+    135,
+    230,
+    181,
+    139,
+    232,
+    175,
+    149
+   ]
+  },
+  {
+   "input": "中文测试",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    274,
+    230,
+    150,
+    135,
+    230,
+    181,
+    139,
+    232,
+    175,
+    149
+   ]
+  },
+  {
+   "input": "Hello中文",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    259,
+    274,
+    230,
+    150,
+    135
+   ]
+  },
+  {
+   "input": "Hello中文",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    259,
+    274,
+    230,
+    150,
+    135
+   ]
+  },
+  {
+   "input": "Hello中文",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    259,
+    274,
+    230,
+    150,
+    135
+   ]
+  },
+  {
+   "input": "Hello中文",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    259,
+    274,
+    230,
+    150,
+    135
+   ]
+  },
+  {
+   "input": "🚀 rocket 😁",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    240,
+    159,
+    154,
+    128,
+    32,
+    114,
+    111,
+    99,
+    107,
+    101,
+    116,
+    32,
+    240,
+    159,
+    152,
+    129
+   ]
+  },
+  {
+   "input": "🚀 rocket 😁",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    240,
+    159,
+    154,
+    128,
+    32,
+    114,
+    111,
+    99,
+    107,
+    101,
+    116,
+    32,
+    240,
+    159,
+    152,
+    129
+   ]
+  },
+  {
+   "input": "🚀 rocket 😁",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    240,
+    159,
+    154,
+    128,
+    32,
+    114,
+    111,
+    99,
+    107,
+    101,
+    116,
+    32,
+    240,
+    159,
+    152,
+    129
+   ]
+  },
+  {
+   "input": "🚀 rocket 😁",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    240,
+    159,
+    154,
+    128,
+    32,
+    114,
+    111,
+    99,
+    107,
+    101,
+    116,
+    32,
+    240,
+    159,
+    152,
+    129
+   ]
+  },
+  {
+   "input": "3 33 333 3333 33333",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    51,
+    32,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    51,
+    51
+   ]
+  },
+  {
+   "input": "3 33 333 3333 33333",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    51,
+    32,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    51,
+    51
+   ]
+  },
+  {
+   "input": "3 33 333 3333 33333",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    51,
+    32,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    51,
+    51
+   ]
+  },
+  {
+   "input": "3 33 333 3333 33333",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    51,
+    32,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    51,
+    32,
+    51,
+    51,
+    51,
+    51,
+    51
+   ]
+  },
+  {
+   "input": "3.3 3..3 test-ing",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    51,
+    46,
+    51,
+    32,
+    51,
+    46,
+    46,
+    51,
+    32,
+    269,
+    45,
+    271
+   ]
+  },
+  {
+   "input": "3.3 3..3 test-ing",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    51,
+    46,
+    51,
+    32,
+    51,
+    46,
+    46,
+    51,
+    32,
+    269,
+    45,
+    271
+   ]
+  },
+  {
+   "input": "3.3 3..3 test-ing",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    51,
+    46,
+    51,
+    32,
+    51,
+    46,
+    46,
+    51,
+    32,
+    269,
+    45,
+    271
+   ]
+  },
+  {
+   "input": "3.3 3..3 test-ing",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    51,
+    46,
+    51,
+    32,
+    51,
+    46,
+    46,
+    51,
+    32,
+    269,
+    45,
+    271
+   ]
+  },
+  {
+   "input": "<|endoftext|> split <|userdef|> here",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    275,
+    32,
+    115,
+    112,
+    108,
+    105,
+    116,
+    32,
+    276,
+    32,
+    104,
+    101,
+    114,
+    101
+   ]
+  },
+  {
+   "input": "<|endoftext|> split <|userdef|> here",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    275,
+    32,
+    115,
+    112,
+    108,
+    105,
+    116,
+    32,
+    276,
+    32,
+    104,
+    101,
+    114,
+    101
+   ]
+  },
+  {
+   "input": "<|endoftext|> split <|userdef|> here",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    60,
+    124,
+    101,
+    110,
+    100,
+    111,
+    102,
+    267,
+    120,
+    116,
+    124,
+    62,
+    32,
+    115,
+    112,
+    108,
+    105,
+    116,
+    32,
+    276,
+    32,
+    104,
+    101,
+    114,
+    101
+   ]
+  },
+  {
+   "input": "<|endoftext|> split <|userdef|> here",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    60,
+    124,
+    101,
+    110,
+    100,
+    111,
+    102,
+    267,
+    120,
+    116,
+    124,
+    62,
+    32,
+    115,
+    112,
+    108,
+    105,
+    116,
+    32,
+    276,
+    32,
+    104,
+    101,
+    114,
+    101
+   ]
+  },
+  {
+   "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97
+   ]
+  },
+  {
+   "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97
+   ]
+  },
+  {
+   "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97
+   ]
+  },
+  {
+   "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97,
+    97
+   ]
+  },
+  {
+   "input": "He He He",
+   "add_special": true,
+   "parse_special": true,
+   "ids": [
+    256,
+    32,
+    256,
+    32,
+    256
+   ]
+  },
+  {
+   "input": "He He He",
+   "add_special": false,
+   "parse_special": true,
+   "ids": [
+    256,
+    32,
+    256,
+    32,
+    256
+   ]
+  },
+  {
+   "input": "He He He",
+   "add_special": true,
+   "parse_special": false,
+   "ids": [
+    256,
+    32,
+    256,
+    32,
+    256
+   ]
+  },
+  {
+   "input": "He He He",
+   "add_special": false,
+   "parse_special": false,
+   "ids": [
+    256,
+    32,
+    256,
+    32,
+    256
+   ]
+  }
+ ]
+}

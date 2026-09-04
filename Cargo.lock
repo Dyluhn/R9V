@@ -158,6 +158,8 @@ dependencies = [
  "r9v-ir",
  "r9v-models",
  "r9v-state",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

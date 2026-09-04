@@ -1,0 +1,9 @@
+{
+  "gguf_py": "0.19.0",
+  "files": [
+    "fixture-bpe.gguf",
+    "fixture-spm.gguf",
+    "fixture-bert.gguf"
+  ],
+  "note": "golden-*.json produced by gen_goldens.sh from the pinned llama.cpp oracle"
+}

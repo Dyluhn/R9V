@@ -216,4 +216,91 @@ pub enum LoaderError {
         /// Allocator refusal rendering.
         detail: String,
     },
+
+    /// `tokenizer.ggml.*` metadata is missing, mistyped, or inconsistent.
+    /// All problems are collected before returning (CONVENTIONS.md §1.4).
+    #[error("tokenizer metadata invalid: {details:?}")]
+    TokenizerMeta {
+        /// Every problem found, not just the first.
+        details: Vec<String>,
+    },
+
+    /// `tokenizer.ggml.model` names a tokenizer family this build does not
+    /// implement. Fail closed: never guess (Spec 9 §7).
+    #[error("unsupported tokenizer model {model:?}; supported: {supported:?}")]
+    UnsupportedTokenizer {
+        /// The `tokenizer.ggml.model` value found.
+        model: String,
+        /// Families this build implements.
+        supported: Vec<String>,
+    },
+
+    /// `tokenizer.ggml.pre` names a pre-tokenizer this build does not
+    /// implement for the tokenizer family. Fail closed (Spec 9 §7).
+    #[error(
+        "unsupported pre-tokenizer {pre:?} for tokenizer model {model:?}; supported: {supported:?}"
+    )]
+    UnsupportedPreTokenizer {
+        /// The `tokenizer.ggml.pre` value found.
+        pre: String,
+        /// The tokenizer model it was requested for.
+        model: String,
+        /// Pre-tokenizers supported for that model.
+        supported: Vec<String>,
+    },
+
+    /// A token id is outside `[0, vocab_size)`.
+    #[error("token id {id} out of range for vocab size {vocab_size}")]
+    TokenIdOutOfRange {
+        /// The offending id.
+        id: u32,
+        /// Vocabulary length.
+        vocab_size: usize,
+    },
+
+    /// A merge line is not exactly `"left right"` with both sides non-empty.
+    #[error("tokenizer.ggml.merges[{index}] is malformed: {line:?}")]
+    MalformedMerge {
+        /// Merge-table index.
+        index: usize,
+        /// The offending line (truncated to 64 chars).
+        line: String,
+    },
+
+    /// A resource bound was exceeded (fail closed; Spec 9 §12).
+    #[error("tokenizer limit exceeded: {what} (limit {limit}, got {got})")]
+    Limit {
+        /// Which bound tripped.
+        what: &'static str,
+        /// The bound.
+        limit: usize,
+        /// The observed value.
+        got: usize,
+    },
+
+    /// The chat template failed to parse.
+    #[error("chat template parse error at byte {offset}: {detail}")]
+    TemplateParse {
+        /// Byte offset of the failure.
+        offset: usize,
+        /// What went wrong.
+        detail: String,
+    },
+
+    /// The chat template failed to render (unknown name, bad type,
+    /// unknown filter/test, budget exhausted, or a `raise_exception` call).
+    #[error("chat template render error: {detail}")]
+    TemplateRender {
+        /// What went wrong, with the failing construct named.
+        detail: String,
+    },
+
+    /// The chat template uses a construct outside the sandboxed subset
+    /// (filesystem, network, time, or code execution). Fail closed
+    /// (Spec 10 §3.1).
+    #[error("chat template uses unsupported construct: {detail}")]
+    TemplateUnsupported {
+        /// The rejected construct.
+        detail: String,
+    },
 }

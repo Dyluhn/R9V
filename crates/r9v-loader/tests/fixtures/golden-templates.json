@@ -1,0 +1,95 @@
+{
+ "jinja2": "3.1.6",
+ "cases": [
+  {
+   "template": "llama3",
+   "context": "plain_user",
+   "status": "ok",
+   "output": "<s><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHello world<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+  },
+  {
+   "template": "llama3",
+   "context": "no_generation_prompt",
+   "status": "ok",
+   "output": "<s><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nHello world<|eot_id|>"
+  },
+  {
+   "template": "llama3",
+   "context": "system_multi",
+   "status": "ok",
+   "output": "<s><|start_header_id|>system<|end_header_id|>\n\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\nYou are helpful.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nWhat is 2+2?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n4<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nThanks!<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+  },
+  {
+   "template": "llama3",
+   "context": "with_tools",
+   "status": "ok",
+   "output": "<s><|start_header_id|>system<|end_header_id|>\n\nEnvironment: ipython\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGiven the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.\n\nRespond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}.Do not use variables.\n\n{\n    \"function\": {\n        \"description\": \"Get the weather\",\n        \"name\": \"get_weather\",\n        \"parameters\": {\n            \"properties\": {\n                \"city\": {\n                    \"type\": \"string\"\n                }\n            },\n            \"type\": \"object\"\n        }\n    },\n    \"type\": \"function\"\n}\n\nWhat is the weather?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+  },
+  {
+   "template": "llama3",
+   "context": "tool_roundtrip",
+   "status": "ok",
+   "output": "<s><|start_header_id|>system<|end_header_id|>\n\nEnvironment: ipython\nCutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n<|eot_id|><|start_header_id|>user<|end_header_id|>\n\nGiven the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.\n\nRespond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}.Do not use variables.\n\n{\n    \"function\": {\n        \"description\": \"Get the weather\",\n        \"name\": \"get_weather\",\n        \"parameters\": {\n            \"properties\": {},\n            \"type\": \"object\"\n        }\n    },\n    \"type\": \"function\"\n}\n\nWhat is the weather in Paris?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n{\"name\": \"get_weather\", \"parameters\": \"{\\\"city\\\": \\\"Paris\\\"}\"}<|eot_id|><|start_header_id|>ipython<|end_header_id|>\n\n\"sunny\"<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+  },
+  {
+   "template": "qwen25",
+   "context": "plain_user",
+   "status": "ok",
+   "output": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello world<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "template": "qwen25",
+   "context": "no_generation_prompt",
+   "status": "ok",
+   "output": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello world<|im_end|>\n"
+  },
+  {
+   "template": "qwen25",
+   "context": "system_multi",
+   "status": "ok",
+   "output": "<|im_start|>system\nYou are helpful.<|im_end|>\n<|im_start|>user\nWhat is 2+2?<|im_end|>\n<|im_start|>assistant\n4<|im_end|>\n<|im_start|>user\nThanks!<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "template": "qwen25",
+   "context": "with_tools",
+   "status": "ok",
+   "output": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"function\": {\"description\": \"Get the weather\", \"name\": \"get_weather\", \"parameters\": {\"properties\": {\"city\": {\"type\": \"string\"}}, \"type\": \"object\"}}, \"type\": \"function\"}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat is the weather?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "template": "qwen25",
+   "context": "tool_roundtrip",
+   "status": "ok",
+   "output": "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"function\": {\"description\": \"Get the weather\", \"name\": \"get_weather\", \"parameters\": {\"properties\": {}, \"type\": \"object\"}}, \"type\": \"function\"}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWhat is the weather in Paris?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": \"{\\\"city\\\": \\\"Paris\\\"}\"}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nsunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "template": "mistral",
+   "context": "plain_user",
+   "status": "ok",
+   "output": "<s>[INST] Hello world[/INST]"
+  },
+  {
+   "template": "mistral",
+   "context": "no_generation_prompt",
+   "status": "ok",
+   "output": "<s>[INST] Hello world[/INST]"
+  },
+  {
+   "template": "mistral",
+   "context": "system_multi",
+   "status": "ok",
+   "output": "<s>[INST] What is 2+2?[/INST] 4</s>[INST] You are helpful.\n\nThanks![/INST]"
+  },
+  {
+   "template": "mistral",
+   "context": "with_tools",
+   "status": "ok",
+   "output": "<s>[AVAILABLE_TOOLS] [{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the weather\", &#34;parameters&#34;: {\"properties\": {\"city\": {\"type\": \"string\"}}, \"type\": \"object\"}}}][/AVAILABLE_TOOLS][INST] What is the weather?[/INST]"
+  },
+  {
+   "template": "mistral",
+   "context": "tool_roundtrip",
+   "status": "error",
+   "output": "UndefinedError: 'raise_exception' is undefined"
+  }
+ ]
+}

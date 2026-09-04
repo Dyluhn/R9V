@@ -13,19 +13,25 @@
 //! 4. [`check_device_budget`] / [`check_host_budget`] — exact checked
 //!    budgets with byte shortfalls and actionable suggestions (Spec 9 §4).
 //!
-//! [`prepare`] runs all four steps cohesively. Materialization (card A2.7),
-//! repack (card A2.8), tokenizers (card A2.9), and the load report
-//! (card A2.10) are explicitly out of scope.
+//! [`prepare`] runs all four steps cohesively. Card A2.9 also implements
+//! tokenizer construction, incremental detokenization, and sandboxed chat
+//! templates from checkpoint metadata (Spec 9 §7, Spec 10 §3.1).
 //!
 //! Repository standards: `CONVENTIONS.md`; engineering bar:
 //! `.agents/skills/r9v-engineering-standards`.
 
 pub mod bind;
 pub mod budget;
+mod detokenizer;
 pub mod error;
 pub mod open;
 pub mod pipeline;
 pub mod plan;
+mod pretokenizer;
+mod template;
+mod tokenizer;
+mod unicode;
+mod unicode_tables;
 pub mod validate;
 
 pub use bind::{
@@ -36,6 +42,7 @@ pub use budget::{
     DeviceBudgetInput, HostBudget, HostBudgetInput, DEFAULT_CHUNK_BYTES, DEFAULT_QUEUE_DEPTH,
     DEFAULT_RESERVE_BYTES, TENSOR_ALIGN_BYTES,
 };
+pub use detokenizer::{Detokenizer, PushOutcome, MAX_STOP_LEN, MAX_STOP_STRINGS};
 pub use error::{BudgetScope, LoaderError, TensorProblem, TensorProblemKind};
 pub use open::{
     open, open_shard_set, open_shard_set_with_file_sizes, open_with_file_size, GgufFileMeta,
@@ -46,6 +53,14 @@ pub use pipeline::{
 };
 pub use plan::{plan_single_device, PlannedDevice};
 pub use r9v_ir::Plan;
+pub use template::{
+    render_template as render_chat_template, render_vars as render_template_vars, ChatContext,
+    ChatMessage, TemplateValue, ToolCall,
+};
+pub use tokenizer::{
+    Tokenizer, TokenizerKind, MAX_ENCODE_BYTES, MAX_ENCODE_TOKENS, MAX_MERGES, MAX_PRE_WORDS,
+    MAX_VOCAB,
+};
 pub use validate::{
     check_fusion_decls, downgrade_absent_mtp, model_id_from_meta, resolve_and_validate,
     ValidatedModel,

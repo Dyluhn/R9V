@@ -1,0 +1,25 @@
+{
+  "inputs": [
+    "",
+    " ",
+    "  ",
+    "Hello world",
+    " Hello world",
+    "Hello, world!",
+    "don't stop",
+    "'Twas the night",
+    "abc 123 !?!",
+    "trailing space ",
+    "  leading spaces",
+    "line1\nline2\ttabbed",
+    "café Äpfel naïve",
+    "中文测试",
+    "Hello中文",
+    "🚀 rocket 😁",
+    "3 33 333 3333 33333",
+    "3.3 3..3 test-ing",
+    "<|endoftext|> split <|userdef|> here",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "He He He"
+  ]
+}

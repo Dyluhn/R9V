@@ -1,0 +1,118 @@
+{
+ "plain_user": {
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hello world"
+   }
+  ],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+ },
+ "no_generation_prompt": {
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hello world"
+   }
+  ],
+  "add_generation_prompt": false,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+ },
+ "system_multi": {
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are helpful."
+   },
+   {
+    "role": "user",
+    "content": "What is 2+2?"
+   },
+   {
+    "role": "assistant",
+    "content": "4"
+   },
+   {
+    "role": "user",
+    "content": "Thanks!"
+   }
+  ],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+ },
+ "with_tools": {
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the weather?"
+   }
+  ],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Get the weather",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "city": {
+        "type": "string"
+       }
+      }
+     }
+    }
+   }
+  ]
+ },
+ "tool_roundtrip": {
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the weather in Paris?"
+   },
+   {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_1",
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "arguments": "{\"city\": \"Paris\"}"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "content": "sunny",
+    "tool_call_id": "call_1"
+   }
+  ],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>",
+  "tools": [
+   {
+    "type": "function",
+    "function": {
+     "name": "get_weather",
+     "description": "Get the weather",
+     "parameters": {
+      "type": "object",
+      "properties": {}
+     }
+    }
+   }
+  ]
+ }
+}
