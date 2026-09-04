@@ -170,6 +170,12 @@ name = "r9v-registry"
 version = "0.1.0"
 dependencies = [
  "r9v-common",
+ "r9v-hip",
+ "r9v-ir",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
