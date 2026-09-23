@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -31,7 +32,16 @@ open(os.environ["TEST_ARGS"], "w").write(json.dumps(sys.argv[1:]))
 """
 
 
-def run_launcher(tmp_path: Path, env: dict[str, str], files=LAUNCH_FILES):
+FAKE_LAYOUT = {
+    "R9V_TARGET_REL": "target/a",
+    "R9V_TARGET_SHARD2_REL": "target/b",
+    "R9V_TARGET_SHARD3_REL": "target/c",
+    "R9V_MMPROJ_REL": "vision/mmproj",
+    "R9V_MANIFEST_REL": "manifests/hot",
+}
+
+
+def run_launcher(tmp_path: Path, env: dict[str, str], files=LAUNCH_FILES, layout=FAKE_LAYOUT):
     """Return (completed process, docker run arguments or None)."""
     model = tmp_path / "models"
     for relative in [*files, "ple"]:
@@ -57,11 +67,7 @@ def run_launcher(tmp_path: Path, env: dict[str, str], files=LAUNCH_FILES):
         "R9V_CACHE_DIR": str(tmp_path / "cache"),
         "R9V_CACHE_NAMESPACE": "test",
         "R9V_PREFLIGHT": "0",
-        "R9V_TARGET_REL": "target/a",
-        "R9V_TARGET_SHARD2_REL": "target/b",
-        "R9V_TARGET_SHARD3_REL": "target/c",
-        "R9V_MMPROJ_REL": "vision/mmproj",
-        "R9V_MANIFEST_REL": "manifests/hot",
+        **layout,
         **env,
     }
     result = subprocess.run(
@@ -157,3 +163,132 @@ def test_launcher_refuses_a_modified_overlay_before_docker_run(tmp_path):
     assert result.returncode == 2
     assert "SHA-256 mismatch" in result.stderr
     assert args is None
+
+
+# Launch parity: the public profile must create the same container as the
+# deployed consolidated 1.3.0 service. The fixture is that service's Docker create
+# payload, normalized by tests/golden/launch/make_deployed_fixture.py.
+DEPLOYED = json.loads(
+    (ROOT / "tests/golden/launch/uncensored-1.3.0-service.json").read_text(encoding="utf-8")
+)
+UNCENSORED = ROOT / "profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored"
+UNCENSORED_FILES = [
+    *[f"target/Qwen3.8-Flash-Next-Uncensored-UD-IQ4_XS-0000{i}-of-00003.gguf" for i in (1, 2, 3)],
+    "metadata/config.json",
+    "mtp/config.json",
+    "mtp/model.safetensors",
+    "vision/mmproj-Qwen3.8-Flash-Next-Uncensored-F16.gguf",
+    "ced/ced-projector-split16.safetensors",
+]
+LOG_CONFIG = {"Type": "json-file", "Config": {"max-file": "5", "max-size": "20m"}}
+
+
+def command_options(command: list[str]) -> dict[str, str | None]:
+    """Model path plus each vLLM option and its value; option order does not matter."""
+    options: dict[str, str | None] = {"model": command[0]}
+    index = 1
+    while index < len(command):
+        has_value = index + 1 < len(command) and not command[index + 1].startswith("--")
+        options[command[index]] = command[index + 1] if has_value else None
+        index += 2 if has_value else 1
+    return options
+
+
+def deployed(env_changes=None, drop_binds=()):
+    """The deployed service in canonical form, with the stated changes applied."""
+    env = {**DEPLOYED["env"], **(env_changes or {})}
+    return {
+        "image": DEPLOYED["image"],
+        "command": command_options(DEPLOYED["command"]),
+        "env": {key: value for key, value in env.items() if value is not None},
+        "binds": sorted(b for b in DEPLOYED["binds"] if b.split(":")[0] not in drop_binds),
+        "host": DEPLOYED["host"],
+    }
+
+
+def launched(tmp_path: Path, env: dict[str, str]):
+    """Run the public uncensored profile and return its container in canonical form."""
+    placeholders = DEPLOYED["placeholders"]
+    result, args = run_launcher(
+        tmp_path,
+        {
+            "R9V_PROFILE": str(UNCENSORED / "profile.env"),
+            "R9V_CACHE_NAMESPACE": placeholders["namespace"],
+            "R9V_CONTAINER_NAME": placeholders["container"],
+            "R9V_EXPECTED_GPU_BDFS": placeholders["bdfs"],
+            **env,
+        },
+        UNCENSORED_FILES,
+        layout={},
+    )
+    assert result.returncode == 0, result.stderr
+    image_index = 1  # args[0] is "run"; --detach is the only option without a value
+    while args[image_index].startswith("--"):
+        image_index += 1 if args[image_index] == "--detach" else 2
+    options, image, command = args[1:image_index], args[image_index], args[image_index + 1:]
+    tokens = {
+        str(tmp_path / "models"): "<model_dir>",
+        str(tmp_path / "models/ple"): "<ple>",
+        str(tmp_path / "cache"): "<cache>",
+        str(UNCENSORED.parents[2] / "packages/placements/qwen38-flash-next/uncensored-iq4-xs/"
+            "dual-r9700/mtp4-warmstart-r1/manifest.json"): "<manifest>",
+        str(RUNTIME_V3.parent / "overlays"): "<overlays>",
+    }
+    binds = []
+    for volume in values(options, "--volume"):
+        source, target, *mode = volume.split(":")
+        parent, _, name = source.rpartition("/")
+        source = tokens.get(source) or f"{tokens[parent]}/{name}"
+        binds.append(f"{source}:{target}:{mode[0] if mode else 'rw'}")
+    image_env = set(DEPLOYED["image_env"])
+    log = dict(value.split("=", 1) for value in values(options, "--log-opt"))
+    return {
+        "image": image,
+        "command": command_options(command),
+        "env": dict(v.split("=", 1) for v in values(options, "--env") if v not in image_env),
+        "binds": sorted(binds),
+        "host": {
+            "IpcMode": values(options, "--ipc")[0],
+            "SecurityOpt": sorted(values(options, "--security-opt")),
+            "Devices": sorted(values(options, "--device")),
+            "LogConfig": {"Type": values(options, "--log-driver")[0], "Config": log},
+        },
+    }
+
+
+def test_launch_with_the_deployed_ced_default_matches_the_deployed_service(tmp_path):
+    # The deployed service ran CED loaded but default off; everything else is the release.
+    assert launched(tmp_path, {"R9V_CED_DEFAULT": "off"}) == deployed()
+
+
+def test_release_defaults_differ_from_the_deployed_service_only_in_ced_default_on(tmp_path):
+    assert launched(tmp_path, {}) == deployed({"R9V_CED_DEFAULT": "on"})
+
+
+def test_ced_off_launch_is_the_deployed_service_without_ced(tmp_path):
+    ced_env = {key: None for key in DEPLOYED["env"] if key.startswith("R9V_CED_")}
+
+    assert launched(tmp_path, {"R9V_CED": "off"}) == deployed(
+        ced_env, drop_binds={"<overlays>/model.py"}
+    )
+
+
+def test_release_pins_equal_the_deployed_overlays_placement_and_projector():
+    runtime = json.loads(RUNTIME_V3.read_text(encoding="utf-8"))
+    placement = json.loads(
+        (ROOT / "packages/placements/qwen38-flash-next/uncensored-iq4-xs/dual-r9700/"
+         "mtp4-full-mutable.json").read_text(encoding="utf-8")
+    )
+    package = json.loads(
+        (ROOT / "packages/models/qwen38-flash-next/uncensored-iq4-xs--mtp-blockfp8--mmproj-f16/"
+         "package.json").read_text(encoding="utf-8")
+    )
+    manifest = ROOT / placement["manifest"]["path"]
+    projector = next(a for a in package["artifacts"] if a["role"] == "ced-projector")
+
+    assert runtime["overlays"]["sha256"] == DEPLOYED["overlay_sha256"]
+    assert runtime["image_id"] == DEPLOYED["image"]
+    assert placement["manifest"]["sha256"] == DEPLOYED["placement_sha256"]
+    assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DEPLOYED["placement_sha256"]
+    assert projector["path"] == "ced/ced-projector-split16.safetensors"
+    assert projector["sha256"] == DEPLOYED["ced_projector_sha256"]

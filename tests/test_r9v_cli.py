@@ -66,6 +66,7 @@ def test_catalog_can_be_grouped_by_topology() -> None:
     assert by_topology["dual-gpu"] == {
         "qwen38-flash-next/ud-iq4-xs/dual-r9700-128k",
         "qwen38-flash-next/ud-iq4-xs/dual-r9700-mtp4-128k",
+        "qwen38-flash-next/uncensored-iq4-xs/dual-r9700-mtp4-128k",
         "qwen38-flash-next/ud-q4-k-xl/dual-r9700-128k",
     }
 
@@ -140,6 +141,29 @@ def test_q4_fetch_and_verify_select_its_own_package():
         assert result.returncode == 0, result.stderr
         assert "ud-q4-k-xl--mtp-blockfp8--mmproj-q8/package.json" in result.stdout
         assert "ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json" not in result.stdout
+
+
+UNCENSORED = ROOT / "profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored/profile.json"
+
+
+def test_uncensored_alias_resolves_to_the_ced_runtime_and_fixed_placement():
+    result = run_cli("show", "qwen38-mtp4-uncensored", "--json")
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["runtime"] == "qwen38-flash-next-gfx1201-mtp4-v3"
+    assert payload["placement"] == "qwen38-uncensored-iq4-xs-dual-r9700-mtp4-full-mutable"
+    assert payload["features"]["ced"]["default"] == "on"
+
+
+def test_uncensored_fetch_and_verify_select_its_own_package_and_it_never_replans():
+    for command in ("fetch", "verify"):
+        result = run_cli(command, "qwen38-mtp4-uncensored", "--dry-run")
+        assert result.returncode == 0, result.stderr
+        assert "uncensored-iq4-xs--mtp-blockfp8--mmproj-f16/package.json" in result.stdout
+    for command in ("plan", "placement"):
+        result = run_cli(command, "qwen38-mtp4-uncensored", "--dry-run")
+        assert result.returncode != 0
+        assert f"does not provide {command!r}" in result.stderr
 
 
 def test_validate_refuses_a_runtime_with_a_modified_overlay(tmp_path):

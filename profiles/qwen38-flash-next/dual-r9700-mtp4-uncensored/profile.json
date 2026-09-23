@@ -1,0 +1,81 @@
+{
+  "schema": "r9v.profile.v1",
+  "id": "qwen38-flash-next/uncensored-iq4-xs/dual-r9700-mtp4-128k",
+  "name": "Qwen3.8 Flash Next Uncensored IQ4_XS \u2014 dual R9700, MTP4, 128K, CED",
+  "status": "experimental",
+  "summary": "Uncensored (abliterated) IQ4_XS on the consolidated 1.3.0 runtime: full mutable expert cache on a fixed placement, and CED long-prompt prefill on by default (--ced off disables it). Experimental; every machine qualifies on first start.",
+  "aliases": [
+    "qwen38-mtp4-uncensored"
+  ],
+  "model_package": "qwen38-flash-next-uncensored-iq4-xs-mtp-blockfp8-mmproj-f16",
+  "runtime": "qwen38-flash-next-gfx1201-mtp4-v3",
+  "hardware": "dual-r9700-32gb-asymmetric",
+  "placement": "qwen38-uncensored-iq4-xs-dual-r9700-mtp4-full-mutable",
+  "legacy_env": "profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored/profile.env",
+  "descriptors": {
+    "model_package": "packages/models/qwen38-flash-next/uncensored-iq4-xs--mtp-blockfp8--mmproj-f16/package.json",
+    "runtime": "runtimes/qwen38-flash-next-gfx1201-mtp4-v3/runtime.json",
+    "hardware": "hardware/dual-r9700/hardware.json",
+    "placement": "packages/placements/qwen38-flash-next/uncensored-iq4-xs/dual-r9700/mtp4-full-mutable.json"
+  },
+  "commands": {
+    "doctor": [
+      "scripts/profile-doctor.sh"
+    ],
+    "fetch": [
+      "tools/fetch_package.py",
+      "packages/models/qwen38-flash-next/uncensored-iq4-xs--mtp-blockfp8--mmproj-f16/package.json"
+    ],
+    "build": [
+      "scripts/build-retained-image.sh"
+    ],
+    "run": [
+      "scripts/launch.sh"
+    ],
+    "verify": [
+      "tools/verify_package.py",
+      "packages/models/qwen38-flash-next/uncensored-iq4-xs--mtp-blockfp8--mmproj-f16/package.json"
+    ],
+    "support": [
+      "scripts/profile-diagnostics.sh",
+      "support"
+    ],
+    "soak": [
+      "scripts/profile-diagnostics.sh",
+      "soak"
+    ],
+    "setup": [
+      "tools/setup_profile.py",
+      "setup"
+    ],
+    "start": [
+      "tools/setup_profile.py",
+      "start"
+    ]
+  },
+  "features": {
+    "openai_api": true,
+    "vision": true,
+    "tools": true,
+    "mtp_depth": 4,
+    "max_context": 131072,
+    "ced": {
+      "default": "on",
+      "split": 16,
+      "min_prompt_tokens": 8192,
+      "tail_tokens": 2048
+    },
+    "uncensored": true
+  },
+  "qualification": {
+    "status": "reference-service-deployed",
+    "integration_notes": "docs/qualification/uncensored-v040.md",
+    "local_qualification_required": true,
+    "public_image": "published-verified-bundle"
+  },
+  "distribution": {
+    "image_bundle": "release/image-bundle-wmma-prefill-20260915.json",
+    "image_id": "sha256:2dac17a215fb5b0e3461e4c3e36a2981eec8ac3d6021e73183d247e819740c03",
+    "transport": "github-release-docker-save"
+  }
+}
