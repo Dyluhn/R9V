@@ -71,6 +71,37 @@ Project: https://huggingface.co/ggml-org/Qwen3.8-Flash-Next-GGUF
 
 The exact source revision and projector hash are pinned in `release/sources.lock.json`.
 
+## orcarouter abliterated Qwen3.8 Flash Next (uncensored profile)
+
+The `qwen38-mtp4-uncensored` model package uses orcarouter's abliterated
+(refusal-removed) build of Qwen3.8 Flash Next: its target shards were quantized
+for R9V from orcarouter's Q8_0 GGUF with Unsloth's `UD-IQ4_XS` per-tensor
+recipe, and its F16 vision projector is orcarouter's, unchanged.
+
+- BF16 source: https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored
+  (revision `8336e613ea508b13c2159bd0f68965d97a606b95`)
+- GGUF source: https://huggingface.co/orcarouter/Qwen3.8-Flash-Next-Uncensored-GGUF
+  (revision `0434906af7b5202b676d43f108cf4f73d25691ef`)
+
+orcarouter's model cards label these weights Apache-2.0, but orcarouter's
+repository `LICENSE` file is the Qwen Community License 1.0 and the weights
+derive from Qwen3.8 Flash Next, so the package follows the Qwen Community
+License 1.0. orcarouter is credited for the abliteration, the Q8_0 source and
+the vision projector; Unsloth for the recipe. Exact hashes are in the package
+descriptor and in the model repository's `sources.lock.json`.
+
+The package also carries R9V's split-16 CED prefill projector (ridge maps fitted
+on activations of this exact quant), published under the Qwen Community License
+1.0 at https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-CED-Projector
+(revision `a588077a52b7c0061f7f38d0b05730a523ecd88d`).
+
+## Runtime overlays (`runtimes/qwen38-flash-next-gfx1201-mtp4-v3`)
+
+The overlay Python files are modified vLLM and vLLM GGUF plugin files (Apache
+License 2.0) or R9V code. The overlay kernels are built from sources that
+include llama.cpp/ggml-derived GGUF code under the MIT License above. See that
+runtime's `THIRD_PARTY_NOTICES.md`.
+
 ## Radiance development lineage
 
 The inspected `StillDeadcode/vllm-radiance` upstream tree does not contain an

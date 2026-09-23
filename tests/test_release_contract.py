@@ -239,3 +239,91 @@ def test_runtime_source_pins_match_checked_out_submodules() -> None:
         ).strip()
         assert runtime["source"][runtime_key] == revision
         assert lock["code"][lock_key]["release_revision"] == revision
+
+
+UNCENSORED_PROFILE = ROOT / "profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored"
+UNCENSORED_PACKAGE = (
+    ROOT / "packages/models/qwen38-flash-next/"
+    "uncensored-iq4-xs--mtp-blockfp8--mmproj-f16/package.json"
+)
+UNCENSORED_RELEASE_FILES = (
+    UNCENSORED_PROFILE,
+    UNCENSORED_PACKAGE.parent,
+    ROOT / "packages/placements/qwen38-flash-next/uncensored-iq4-xs",
+    ROOT / "runtimes/qwen38-flash-next-gfx1201-mtp4-v3",
+    ROOT / "tests/golden/launch",
+)
+
+
+def _profile_settings(profile_env: Path) -> dict[str, str]:
+    result = subprocess.run(
+        ["bash", "-c", 'set -a; source "$1"; env -0', "r9v", str(profile_env)],
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    entries = (entry.split("=", 1) for entry in result.stdout.split("\0") if "=" in entry)
+    return {key: value for key, value in entries if key.startswith("R9V_")}
+
+
+def test_uncensored_package_is_published_and_holds_every_file_the_profile_launches():
+    package = _load(UNCENSORED_PACKAGE)
+    settings = _profile_settings(UNCENSORED_PROFILE / "profile.env")
+    paths = {artifact["path"] for artifact in package["artifacts"]}
+
+    assert package["distribution"]["status"] == "published"
+    assert package["distribution"]["repository"] == (
+        "Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS"
+    )
+    assert package["distribution"]["revision"] == "b06687cb2f83ea38039cadd249341a7bd5b76fa3"
+    assert all(artifact["required"] for artifact in package["artifacts"])
+    for key in (
+        "R9V_TARGET_REL",
+        "R9V_TARGET_SHARD2_REL",
+        "R9V_TARGET_SHARD3_REL",
+        "R9V_MMPROJ_REL",
+        "R9V_CED_PROJECTOR_REL",
+    ):
+        assert settings[key] in paths, key
+    assert {"mtp/model.safetensors", "mtp/config.json", "metadata/config.json"} <= paths
+
+
+def test_uncensored_profile_ships_ced_on_and_never_replans_its_placement():
+    settings = _profile_settings(UNCENSORED_PROFILE / "profile.env")
+    runtime = _load(ROOT / "runtimes/qwen38-flash-next-gfx1201-mtp4-v3/runtime.json")
+
+    assert settings["R9V_CED"] == "on"
+    assert settings["R9V_CED_DEFAULT"] == "on"
+    assert settings["R9V_CED_PRECISION"] == "bf16"
+    assert settings["R9V_MIN_FREE_VRAM_GIB_BY_RANK"] == "1.5,1.5"
+    for key in (
+        "R9V_MEMORY_SEED_PATH",
+        "R9V_EXPERT_CATALOG_PATH",
+        "R9V_PLACEMENT_PLAN",
+        "R9V_HEADROOM_SELECTION",
+        "R9V_PREFIX_CACHE_SCHEDULER_PATCH",
+    ):
+        assert key not in settings, key
+    assert "memory_seed" not in runtime.get("distribution", {})
+
+
+def test_uncensored_docs_state_the_ced_tradeoff_and_switches():
+    for path in ("README.md", "docs/installation.md", "LLM_SETUP_GUIDE.md"):
+        text = (ROOT / path).read_text(encoding="utf-8")
+        assert "qwen38-mtp4-uncensored" in text, path
+        assert "1.70" in text and "1.051" in text and "10%" in text, path
+        assert "--ced off" in text and '"r9v_ced": false' in text, path
+
+
+def test_uncensored_release_files_contain_no_host_paths():
+    offenders = []
+    for root in UNCENSORED_RELEASE_FILES:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path.suffix == ".so":
+                continue
+            text = path.read_text(encoding="utf-8")
+            if any(marker in text for marker in ("/home/", "/var/mnt/", "qwen-storage")):
+                offenders.append(str(path.relative_to(ROOT)))
+    assert offenders == []

@@ -2,6 +2,8 @@
 
 `qwen38-mtp4` (IQ4_XS) and `qwen38-q4-xl` (Q4_K_XL) are experimental profiles with completed ordinary public setup, first-start and unchanged-receipt restart qualification on the dual-R9700 reference host. IQ4 uses the exact-sized image7 cold-host allocator; Q4 retains image6. Original model, target-head and PLE bytes are unchanged. The [public runtime bundle](https://github.com/Dyluhn/R9V/releases/tag/v0.2.0-rc2-images) contains both exact images; setup verifies every part before loading.
 
+The uncensored profile `qwen38-mtp4-uncensored` (consolidated 1.3.0 runtime, CED on by default) has its own [qualification note](qualification/uncensored-v040.md); this page covers the two profiles above.
+
 The [model download links](../README.md#model-downloads) include pinned model shards and shared MTP, vision and tokenizer assets. Follow the [installation guide](installation.md) for setup on your machine.
 
 ## Reference qualification

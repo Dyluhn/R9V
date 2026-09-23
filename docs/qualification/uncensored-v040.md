@@ -1,0 +1,95 @@
+# Uncensored IQ4_XS on the consolidated 1.3.0 runtime (R9V v0.4.0)
+
+Profile `qwen38-mtp4-uncensored`. Status: **experimental**. The runtime it
+launches has served as the reference host's deployed service. The public
+setup → first start → restart flow from a clean checkout has **not** passed
+yet, so this note separates what is proven from what is pending.
+
+## What the profile runs
+
+- Model: [Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS)
+  at revision `b06687cb2f83ea38039cadd249341a7bd5b76fa3`. All 24 published
+  files were remotely size- and SHA-256-verified at that revision. It includes
+  the split-16 CED projector.
+- Runtime `qwen38-flash-next-gfx1201-mtp4-v3`: image
+  `sha256:2dac17a2…` (the `v0.3.0-rc1-images` bundle) plus the consolidated
+  1.3.0 overlays, byte-identical and SHA-256 pinned: nine Python files, the CED
+  model file and four kernels (the mutable expert cache and the Q8 WMMA
+  prefill kernels).
+- Placement: fixed, manifest SHA-256 `d38c5ff3…`, hot experts 62 / 428,
+  160 cache slots on rank 0. The mutable expert cache works only with this
+  placement, so the profile refuses `--headroom`, `--calibration` and
+  `--expert-catalog`.
+- CED on by default: prompts of 8,192 tokens or more, 2,048-token exact tail,
+  bf16 projector. `--ced off` in setup or start turns it off; a request opts
+  out with `"vllm_xargs": {"r9v_ced": false}`.
+
+## Proven on CPU (tests in this repository)
+
+- **Launch parity.** `tests/test_launch_contract.py` runs `scripts/launch.sh`
+  with this profile against a fake Docker and compares the container with the
+  deployed service's create payload (normalized fixture in
+  `tests/golden/launch/`). With the deployed CED default (off), the image,
+  vLLM command, environment, mounts and host settings are identical. The
+  release default differs only in `R9V_CED_DEFAULT=on`. With CED off, the
+  container is the deployed one without the CED model file and the
+  `R9V_CED_*` settings.
+- **Pins.** The overlay hashes equal the 1.3.0 package manifest. The
+  placement manifest equals the one the service mounts. The package's
+  projector hash equals the projector the service loaded.
+- **Refusals.** A modified, missing or extra overlay file stops `./r9v validate`
+  and the launch. Invalid CED settings are all reported together before any
+  container exists. Re-planning options are refused on this profile.
+
+## Measured on the deployed service
+
+Reference host: two Radeon AI PRO R9700 (rank 0 on PCIe Gen5 x16, rank 1 on
+Gen4 x4), 128 GiB RAM, TP2, MTP4, one request at a time. Sources: the
+consolidated 1.3.0 package's performance notes and the
+[CED projector model card](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-CED-Projector).
+
+| Measurement | Result |
+|---|---|
+| CED prefill speedup, 12.5K–19.5K-token prompts | 1.70× median (1.62–1.76×, n=6) |
+| ~12K-token prompts, CED off → on | 1,868 → 3,018 tok/s |
+| ~4K-token prompts (below the 8,192 threshold), CED server vs CED-off server | 1,783 vs 1,789 tok/s (unchanged) |
+| Quality cost on long-context-dependent prompts | ×1.051 perplexity (ΔNLL +0.050 ± 0.037 nats/token, 15 prompts) |
+| MTP tokens per step, first answer after a CED prefill | 0.895× of exact (0.78–0.95×, n=6); follow-up turn 1.02× (n=2) |
+| Decode with the projector loaded vs not, ms/step | short prose 34.56 vs 34.76, short code 37.63 vs 37.78, ~8K 38.98 vs 38.46 (3–4 runs each) |
+| Projector VRAM | 1.76 GiB per GPU (bf16) |
+| Free VRAM with the projector loaded, idle | about 1.7–1.8 GiB (rank 0) and 2.1–2.2 GiB (rank 1) |
+
+An exact request after a CED request of the same prompt matched a fresh exact
+run bit for bit, and there were no recompiles after the first CED request.
+With CED off the service loads the image's own model file, so its compiled
+model and rounding differ from the CED-on build: both are deterministic, but
+not bitwise equal to each other.
+
+## Pending: clean-host qualification
+
+These need the GPUs and are not done yet:
+
+- Fresh clone → setup (downloads and verifies the package, extracts the PLE,
+  loads the image) → start with `--timeout 2400`, because the first start
+  compiles the model.
+- First-start qualification, including the 130,941-token prompt at 131,072
+  context, then an unchanged restart that reuses the receipt.
+- **Headroom.** The profile's free-VRAM target is `1.5,1.5` GiB, below the
+  idle free VRAM above but not yet measured as the workload minimum.
+- **Doctor ceilings.** Doctor counts 222 / 428 experts (manifest hot counts
+  plus cache slots); the mutable cache uses 217 / 427 internally. The ceilings
+  have not been checked against a running server of this profile.
+- **Cold-compile time.** The `--timeout 2400` figure needs confirming.
+- CED on a running server: the projector loads, CED engages on a 12K+ prompt,
+  exact-after-CED is bitwise identical; then a `--ced off` run.
+
+## Known limitations
+
+- CED is text-only: prompts with images, and requests for prompt logprobs, run
+  exactly. The projector was fitted on English-heavy code, docs and prose of up
+  to ~20K tokens, and only a 2,048-token exact tail was graded.
+- `int8` projector precision is accepted but was never run on the GPU.
+- As in the other profiles, the launcher publishes the API port on all
+  interfaces.
+- The model is abliterated: its refusal behavior was removed. Add your own
+  moderation before exposing it to anyone.

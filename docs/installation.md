@@ -1,7 +1,8 @@
 # Install and run Qwen3.8 Flash Next
 
-This guide covers the two newest dual-R9700 MTP4 profiles: `qwen38-mtp4`
-(UD-IQ4_XS, experimental) and `qwen38-q4-xl` (UD-Q4_K_XL, experimental).
+This guide covers the dual-R9700 MTP4 profiles: `qwen38-mtp4`
+(UD-IQ4_XS, experimental), `qwen38-q4-xl` (UD-Q4_K_XL, experimental) and
+`qwen38-mtp4-uncensored` ([its own section](#uncensored-profile-qwen38-mtp4-uncensored)).
 Both require two 32 GiB `gfx1201` Radeon AI PRO R9700 GPUs, ROCm device access,
 Docker, Python 3.10+, Git, `curl`, and storage for the model, 28,800,138,240-byte
 PLE payload, image layers, and runtime cache. Device order is semantic.
@@ -107,6 +108,52 @@ publish prompts, completions, raw token IDs, or logs. Start refuses to replace
 an existing profile container; inspect and deliberately stop that exact
 container before retrying.
 
+## Uncensored profile (`qwen38-mtp4-uncensored`)
+
+This profile serves an abliterated model: its refusal behavior was removed and
+it will comply with harmful requests that the original model refuses. Add your
+own moderation before exposing it to anyone. It is experimental; its public
+setup/start qualification is pending
+([status](qualification/uncensored-v040.md)).
+
+It uses its own model package (about 92.4 GiB, including the CED projector),
+the consolidated 1.3.0 runtime (the IQ4 profile's image plus SHA-256-pinned
+overlays) and a fixed expert placement. Use new model and state directories:
+
+```bash
+export MODEL_DIR=/fast-storage/qwen38-uncensored
+export STATE_DIR=/fast-storage/r9v-state/uncensored
+./r9v setup qwen38-mtp4-uncensored --model-dir "$MODEL_DIR" \
+  --state-dir "$STATE_DIR" --accept-model-license
+./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR" --timeout 2400
+```
+
+Setup downloads and SHA-256 verifies every package file, extracts the PLE
+table, loads the pinned image and checks the host; `fetch` and `verify` work as
+for the other profiles if you prefer to download first. The first start
+compiles the model, so it needs a longer `--timeout` than the default 900
+seconds. It then qualifies the placement once; an unchanged restart reuses the
+receipt.
+
+**CED is on by default.** On prompts of 8,192 tokens or more, layers 0–15 run
+exactly and the split-16 projector predicts the later layers for all but the
+last ~2K prompt tokens. Decode stays exact. Measured on the reference host:
+about 1.70× faster prefill on prompts of 12K+ tokens, about ×1.051 perplexity
+on prompts that depend on their long context, and about 10% fewer MTP tokens
+per step on the first answer after a CED prefill. Prompts with images and
+requests for prompt logprobs always run exactly.
+
+- Turn CED off for the server: add `--ced off` to setup or start. The choice is
+  saved; `--ced on` turns it back on. Switching qualifies the placement again
+  on the next start.
+- Keep one request exact: send `"vllm_xargs": {"r9v_ced": false}` (OpenAI
+  Python client: `extra_body={"vllm_xargs": {"r9v_ced": False}}`).
+
+The projector takes 1.76 GiB of VRAM per GPU, so the profile keeps a 1.5 GiB
+free-VRAM target per card instead of 3 GiB. The expert placement is fixed
+because the runtime's mutable expert cache only works with it: `--headroom`,
+`--calibration` and `--expert-catalog` are refused.
+
 ## Development builds
 
 The public installation path uses the GitHub Release image bundle. Source builds
@@ -122,6 +169,7 @@ not a substitute for the released image identity.
 | Wrong GPU order or BDF mismatch | Run `amd-smi list`, then rerun setup with `--gpu-bdfs BDF0,BDF1`. |
 | Insufficient requested headroom | Preserve the per-rank shortfalls. Adjust the target deliberately or let the release seed plan it; complete local workload qualification afterward. |
 | Host normal-zone pressure | Free host memory or reduce CPU-offloaded residency; swap does not satisfy pinned-RAM requirements. |
-| Startup/JIT timeout | Increase `--timeout`, inspect retained Docker logs, and check image/cache space before retrying. |
+| Startup/JIT timeout | Increase `--timeout` (the uncensored profile's first start needs about `--timeout 2400`), inspect retained Docker logs, and check image/cache space before retrying. |
+| `runtime overlay problem` at launch | An overlay file under `runtimes/` no longer matches its pinned SHA-256. Restore the checkout (`git status`, `git checkout -- runtimes/`) instead of editing the file. |
 | Existing container | Inspect the exact named container, save diagnostics, then deliberately stop/remove it before retrying. |
 | Support needed | Run `./r9v support PROFILE --state-dir DIR`; keep the bundle private. |

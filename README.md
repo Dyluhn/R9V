@@ -8,12 +8,26 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 
 **Current status:** both IQ4_XS and Q4_K_XL MTP4 profiles passed ordinary public setup, first-start workload qualification and unchanged-receipt restart on the dual-R9700 reference host. Both profiles remain experimental. Each first start passed all seven checks at 131,072 context, including a 130,941-token prompt, with at least 3 GiB free VRAM per GPU. Setup selects the profile's runtime image bundle, verifies every part and loads the exact image ID. The Q4 profile uses the [v0.2.0-rc2 bundle](https://github.com/Dyluhn/R9V/releases/tag/v0.2.0-rc2-images); the IQ4 profile's WMMA-prefill image (`release/image-bundle-wmma-prefill-20260915.json`) is published under the [`v0.3.0-rc1-images`](https://github.com/Dyluhn/R9V/releases/tag/v0.3.0-rc1-images) release tag. See [release status and evidence](docs/qwen-release-candidate.md).
 
+**New in v0.4.0:** `qwen38-mtp4-uncensored` runs an uncensored (abliterated) IQ4_XS model on the consolidated 1.3.0 runtime with CED long-prompt prefill on by default. That runtime is the reference host's deployed service; the public setup/start flow for it is still pending. See [its qualification note](docs/qualification/uncensored-v040.md).
+
 ## Profiles and features
 
 | Alias | Model package | Runtime | Status |
 |---|---|---|---|
 | `qwen38-mtp4` | [IQ4_XS model bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
 | `qwen38-q4-xl` | [Q4_K_XL weights](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-Q4_K_XL) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
+| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime: MTP4, dual R9700, 128K context, CED on | Deployed on the reference host; public setup/start pending |
+
+**About `qwen38-mtp4-uncensored`.** Its model had its refusal behavior removed and will comply with harmful requests the original model refuses. Use it for research, and add your own moderation before exposing it to anyone.
+
+It has CED (approximate long-prompt prefill) on by default. On prompts of 8,192 tokens or more, layers 0–15 run exactly and a split-16 projector stands in for the later layers on all but the last ~2K prompt tokens. Decode stays exact. The tradeoff, measured on the reference host:
+
+- About **1.70× faster prefill** on prompts of 12K tokens or more.
+- About **×1.051 perplexity** on prompts that depend on their long context.
+- About **10% fewer MTP tokens per step** on the first answer after a CED prefill; later turns are normal.
+- The projector takes **1.76 GiB of VRAM per GPU**, so the profile's free-VRAM target is 1.5 GiB per card instead of 3 GiB.
+
+Turn CED off for the server with `--ced off` in setup or start; keep a single request exact with `"vllm_xargs": {"r9v_ced": false}`. The profile uses a fixed expert placement, so it does not accept `--headroom`.
 
 Use the explicit MTP4 aliases for the current workflow.
 
@@ -29,6 +43,7 @@ Unobserved experts are explicit ties in the maps. Routing frequency depends on w
 ## Model downloads
 
 - **IQ4_XS:** [R9V model page](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS) · [files at the revision used by setup](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS/tree/bf836f0c20b6c92fcad4226ad3115eb8a19f7582). This bundle includes all three target GGUF shards, the MTP checkpoint, vision projector, tokenizer and configuration files.
+- **Uncensored IQ4_XS:** [R9V model page](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) · [files at the revision used by setup](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS/tree/b06687cb2f83ea38039cadd249341a7bd5b76fa3). The same layout as the IQ4_XS bundle, with orcarouter's abliterated target and F16 vision projector, plus the CED projector.
 - **Q4_K_XL:** [all four target GGUF shards at the revision used by setup](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-Q4_K_XL). The Q4 profile also uses the shared [MTP checkpoint and configuration](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS/tree/bf836f0c20b6c92fcad4226ad3115eb8a19f7582/mtp), [Q8_0 vision projector](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS/tree/bf836f0c20b6c92fcad4226ad3115eb8a19f7582/vision), and [tokenizer and model metadata](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS/tree/bf836f0c20b6c92fcad4226ad3115eb8a19f7582/metadata) from the IQ4 bundle.
 
 The `./r9v setup` commands below download and verify the required files automatically. For manual downloads, keep every shard and the package directory layout; use the [IQ4 package manifest](packages/models/qwen38-flash-next/ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json) or [Q4 package manifest](packages/models/qwen38-flash-next/ud-q4-k-xl--mtp-blockfp8--mmproj-q8/package.json) for exact paths, revisions and hashes. The PLE table is extracted locally from the target GGUF; it is not a separate model download.
@@ -43,7 +58,7 @@ The reference system uses:
 - An asymmetric PCIe layout: rank 0 on Gen5 x16 and rank 1 across Gen4 x4. GPU ordering matters to placement and performance.
 - Git, Python 3.10+, Docker and the Hugging Face CLI described in the [installation guide](docs/installation.md).
 
-The public image bundle plus its containerd image-store footprint measured roughly **50 GiB**; reserve at least **70 GiB** for image and cache import space. The IQ4 package occupies approximately **90.36 GiB**. The four Q4 target shards alone occupy **103.69 GiB**, with auxiliary assets additional. The derived PLE file occupies **26.82 GiB**. Leave further room for compilation caches and diagnostics. Reuse verified assets instead of duplicating model files.
+The public image bundle plus its containerd image-store footprint measured roughly **50 GiB**; reserve at least **70 GiB** for image and cache import space. The IQ4 package occupies approximately **90.36 GiB** and the uncensored package **92.39 GiB**. The four Q4 target shards alone occupy **103.69 GiB**, with auxiliary assets additional. The derived PLE file occupies **26.82 GiB**. Leave further room for compilation caches and diagnostics. Reuse verified assets instead of duplicating model files.
 
 ## Setup and start
 
@@ -68,6 +83,7 @@ The output should identify `io.containerd.snapshotter.v1`. If it does not, follo
 |---|---|
 | `qwen38-mtp4` | `sha256:2dac17a215fb5b0e3461e4c3e36a2981eec8ac3d6021e73183d247e819740c03` |
 | `qwen38-q4-xl` | `sha256:2e50016cfcc9cd22f15d3f69ccf001e4877236e12ebb4ab458cc9c16caaef9e3` |
+| `qwen38-mtp4-uncensored` | `sha256:2dac17a215fb5b0e3461e4c3e36a2981eec8ac3d6021e73183d247e819740c03` plus pinned overlays |
 
 Install the download CLI in an isolated environment if it is not already available:
 
@@ -94,6 +110,15 @@ For Q4, use its own model and state directories:
 ./r9v setup qwen38-q4-xl --model-dir /path/to/qwen-q4 \
   --state-dir /path/to/r9v-state/q4 --headroom 3,3 --accept-model-license
 ./r9v start qwen38-q4-xl --state-dir /path/to/r9v-state/q4
+```
+
+For the uncensored profile, use its own directories and give the first start time to compile the model:
+
+```bash
+./r9v setup qwen38-mtp4-uncensored --model-dir /path/to/qwen-uncensored \
+  --state-dir /path/to/r9v-state/uncensored --accept-model-license
+./r9v start qwen38-mtp4-uncensored --state-dir /path/to/r9v-state/uncensored \
+  --timeout 2400
 ```
 
 Run one profile at a time. Before switching, inspect `docker ps`, save any needed support evidence, and stop the selected R9V container by its exact name using `docker stop NAME`. Setup supports `--reuse-from /path/to/existing/assets` for matching assets and `--ple-path /path/to/existing/ple.bin` for an existing verified PLE file. The profiles select their corresponding expert catalog and reference memory seed automatically.

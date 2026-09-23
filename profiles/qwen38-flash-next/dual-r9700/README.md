@@ -691,3 +691,34 @@ to reject slower links; exact BDF/link locks and invalid path detection remain.
 See [the hardware and headroom review](../../../docs/qualification/qwen38-headroom-design.md)
 for the full ranked-catalog/planner design, non-memory crash candidates and the
 remaining worker-level checks.
+
+## Uncensored profile: runtime overlays, CED and fixed placement
+
+`qwen38-mtp4-uncensored` (`profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored/profile.env`)
+uses these settings on top of the ones above. Setup saves them; change CED with
+`--ced on|off` rather than by editing the saved configuration.
+
+| Setting | Profile value | Meaning |
+|---|---|---|
+| `R9V_RUNTIME_DESCRIPTOR` | `runtimes/qwen38-flash-next-gfx1201-mtp4-v3/runtime.json` | Runtime whose `overlays` block lists the files mounted read-only over the image, with their SHA-256. The launcher refuses to start if any file differs. |
+| `R9V_CED` | `on` | CED (approximate long-prompt prefill). `off` mounts neither the CED model file nor any `R9V_CED_*` setting. |
+| `R9V_CED_PROJECTOR_REL` | `ced/ced-projector-split16.safetensors` | Projector inside the model directory, read at `/models/…`. |
+| `R9V_CED_PRECISION` | `bf16` | `int8` roughly halves the projector's 1.76 GiB per GPU but was never run on the GPU. |
+| `R9V_CED_MIN_PROMPT` | `8192` | With `R9V_CED_DEFAULT=on`, shorter prompts stay exact. At least 0. |
+| `R9V_CED_TAIL` | `2048` | Exact prompt tail in tokens, rounded up to a cache block. At least 512; only 2048 is graded. |
+| `R9V_CED_DEFAULT` | `on` | `on`: requests that do not say get CED above the minimum. `off`: only requests with `r9v_ced: true`. |
+| `R9V_PREFIX_CACHE_RETENTION_INTERVAL` | `1616` | Prefix-cache checkpoint interval, the scheduler's block boundary on this image. |
+| `R9V_MIN_FREE_VRAM_GIB_BY_RANK` | `1.5,1.5` | Lowered from 3,3 because the loaded projector takes 1.76 GiB per GPU. Provisional until the clean-host qualification measures the workload minimum. |
+| `R9V_MIN_HOST_AVAILABLE_BYTES` | `76699664384` | Available RAM before launch: every expert pinned on the host (59.5 GB) plus the 16 GiB PLE reserve. |
+| `R9V_EXPERT_MANIFEST_PATH` | the fixed `mtp4-warmstart-r1/manifest.json` | Pinned by SHA-256 in `mtp4-full-mutable.json`. The mutable expert cache refuses any other placement. |
+
+Requests choose per call with `vllm_xargs`: `r9v_ced` (`true` forces CED even
+below the minimum, `false` keeps the request exact) and `r9v_ced_tail` (this
+request's exact tail). Prompts with images and requests for prompt logprobs run
+exactly. CED requests keep their own prefix cache, so an exact request never
+reuses a CED request's cache.
+
+Because the placement is fixed, `--headroom`, `--calibration` and
+`--expert-catalog` are refused, and the `plan` and `placement` commands are not
+available for this profile. First start qualifies the placement; the receipt
+is keyed on the manifest, runtime descriptor, image and CED setting.

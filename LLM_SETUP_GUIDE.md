@@ -1,7 +1,8 @@
 # Setup guide for AI assistants
 
-This guide covers `qwen38-mtp4` (UD-IQ4_XS, MTP4, 128K, experimental) and `qwen38-q4-xl`
-(UD-Q4_K_XL, MTP4, 128K) on two 32 GiB `gfx1201` Radeon AI PRO R9700 GPUs.
+This guide covers `qwen38-mtp4` (UD-IQ4_XS, MTP4, 128K, experimental), `qwen38-q4-xl`
+(UD-Q4_K_XL, MTP4, 128K) and `qwen38-mtp4-uncensored` (see the end of this guide) on
+two 32 GiB `gfx1201` Radeon AI PRO R9700 GPUs.
 Keep their model packages, catalogs, manifests, runtime descriptors, and
 calibration records separate.
 
@@ -58,5 +59,30 @@ public setup/start/restart and the planned BetterBench speed/latency evaluation
 remain pending. Use
 `./r9v support PROFILE --state-dir DIR` for private diagnostics. Preserve the
 fail-closed checks and pinned recursive submodules.
+
+## Uncensored profile
+
+`qwen38-mtp4-uncensored` (experimental) serves an abliterated model: its
+refusal behavior was removed and it will comply with harmful requests. Confirm
+the user wants that model before installing it, and tell them to add their own
+moderation before exposing it to anyone. It needs its own model directory
+(about 92.4 GiB) and state directory. Setup downloads and verifies the package
+itself; the first start compiles the model, so give it a long timeout:
+
+```bash
+./r9v setup qwen38-mtp4-uncensored --model-dir "$MODEL_DIR" \
+  --state-dir "$STATE_DIR" --accept-model-license
+./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR" --timeout 2400
+```
+
+It runs the consolidated 1.3.0 runtime with CED (approximate long-prompt
+prefill) on by default: about 1.70x faster prefill on prompts of 12K+ tokens,
+about x1.051 perplexity on prompts that depend on long context, and about 10%
+fewer MTP tokens per step on the first answer after a CED prefill. Decode is
+exact. `--ced off` in setup or start turns CED off; one request can stay exact
+with `"vllm_xargs": {"r9v_ced": false}`. The profile uses a fixed expert
+placement: do not pass `--headroom`, `--calibration` or `--expert-catalog`;
+they are refused. Its public setup/start qualification is still pending; see
+[docs/qualification/uncensored-v040.md](docs/qualification/uncensored-v040.md).
 
 Full command details: [docs/installation.md](docs/installation.md).
