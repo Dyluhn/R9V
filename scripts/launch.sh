@@ -184,6 +184,13 @@ case "${R9V_ENABLE_PREFIX_CACHING:-1}" in
     1) prefix_cache_args=(--enable-prefix-caching) ;;
     *) printf 'R9V_ENABLE_PREFIX_CACHING must be 0 or 1\n' >&2; exit 2 ;;
 esac
+if [[ -n ${R9V_PREFIX_CACHE_RETENTION_INTERVAL:-} && ${R9V_ENABLE_PREFIX_CACHING:-1} == 1 ]]; then
+    [[ $R9V_PREFIX_CACHE_RETENTION_INTERVAL =~ ^[0-9]+$ ]] || {
+        printf 'R9V_PREFIX_CACHE_RETENTION_INTERVAL must be a non-negative integer\n' >&2
+        exit 2
+    }
+    prefix_cache_args+=(--prefix-cache-retention-interval "$R9V_PREFIX_CACHE_RETENTION_INTERVAL")
+fi
 route_args=()
 eager_args=()
 if [[ -n ${R9V_ROUTE_PROFILE_DIR:-} ]]; then
