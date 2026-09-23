@@ -1,0 +1,29 @@
+{
+  "module_name": "prefill_q8_wmma_streamed_extension",
+  "arch": "gfx1201",
+  "source_manifest": {
+    "q8_wmma_streamed_kernel.cu": "341ed150a9f5c97579933d5abd6a60284d0367641ed10907de609424c277fa14",
+    "q8_wmma_streamed_kernel.h": "2b5aeb79e63519b38a37528a2fe7f917b73d0939ab1d096e3188af4918c490d6",
+    "native_cpu_shim.cpp": "266de773d3126ffd9f5e39e73da3d1050b6665c07a9df89d39c5ce80a17cbeec",
+    "build_candidate.py": "fcfdf8da1015cb4355a8a17193cfd772300c8b7f0ff5b23b58af1e8d1c97a59c",
+    "csrc/dispatch_utils.h": "7a17e8ac27b25426fbfd2921d2ebcad6410b703736204e55e832037fd9f250cc",
+    "csrc/cuda_compat.h": "959bc9e0e73e020d777530b18bf12160d35cc4eb976335955395729700b2f975",
+    "csrc/hip_compat.h": "25d7d6b1dab03d8d85a71976e5955dd6b91ea6ed6442713145770ebcc5d91abe",
+    "csrc/gguf/mmq_hip.cuh": "0e4a23bb4a8f2f9f7769ead653d9d2d72d16901ad9974d3aa3ba9972ee80ca34",
+    "csrc/gguf/gguf_kernel.hip": "6899c18457784a45f5b2c1bd9e5373e534ccc570a18074eed14ab6a15272172a",
+    "csrc/gguf/vecdotq.cuh": "4972eddb514db4a12a996e667905a86fe8ce0f0f42e9839dd2db75774ad5d326",
+    "csrc/gguf/moe_hip.cuh": "9e3358731eb607a97272f13a02314deb3db6f76026e77622570bfd2a2ae2b7bb",
+    "csrc/gguf/moe_vec.cuh": "1f468f3115b372374d7ccb8fcef246bcb5b6e8e7d5f5d9fc4f09616bd29f47fa",
+    "csrc/gguf/mmvq.cuh": "f46667f8c09a7ca8b90fd4b7c89a5eca54cca99372762c3c2853870874d6e829",
+    "csrc/gguf/dequantize_hip.cuh": "497842aca4744b903c7fd19b6069be33fa50da9d4bb893634eda46ab9cb35ddd",
+    "csrc/gguf/moe_vec_hip.cuh": "1ebc2c11111ae43274da5587283f9b067381627d5a6d89d1209b386d52df81f0",
+    "csrc/gguf/ggml-common_hip.h": "b7d415d0cb626afb330cc67867418943b1ebe39eb648988f637b4f29af8e8a41",
+    "csrc/gguf/moe.cuh": "9e7510e259ed6a4ce9ff18743628b16a9a10f1fcac44553c450bee1684f6bf25",
+    "csrc/gguf/ggml-common.h": "990b6aca44615eaf39a3fa76b65992e1101cf1c4d27ec3a36070074f9f83136b",
+    "csrc/gguf/mmq.cuh": "1a3a8fb8cd9d1682a421bba53df92fdb323f7ba00956ab04bced4865cf9ad030",
+    "csrc/gguf/vecdotq_hip.cuh": "38caef027a395cf9d0285f67beb051e0432d74ef194a8d44b4cb820e927fa013",
+    "csrc/gguf/mmvq_hip.cuh": "38231c4faa337935c65562cf7f336761d13dd06bb19309e3e5a8f68a9f1ad448",
+    "csrc/gguf/dequantize.cuh": "96c25644ffba8ec6b9beffb7b1c30435e9b0e0466def1d4721f7f8aab401c7e5",
+    "csrc/gguf/gguf_kernel.cu": "b95dd5fe9f20e18bde1d9e357922d78a495682dcdc6c1428f5c3131f13bf294c"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "module": "qwen38_full_mutable_device",
+  "so_path": "/src/build/qwen38_full_mutable_device.so",
+  "so_sha256": "7ab65dd56fd3a7d2f05ef279baf976affd90b138f80a018ddf79eac11902b394",
+  "source_sha256": "2c646cf4c63f480e43d832066a14f241bba83c5134593f55a3f41adfc2234c6a",
+  "header_sha256": "d26391659acc69e912e265089b83ee02cc1e32942b47bf90ac088a08a9eee998",
+  "manifest_verified": true,
+  "extracted_symbols": [
+    "PyInit_qwen38_full_mutable_device",
+    "_ZN19full_mutable_device24full_mutable_device_initEN2at6TensorES1_S1_S1_St8optionalIS1_Ell",
+    "_ZN19full_mutable_device24full_mutable_device_stepEN2at6TensorES1_S1_S1_S1_S1_S1_S1_St8optionalIS1_ES3_S3_lll"
+  ],
+  "torch_version": "2.11.0+rocm7.14",
+  "torch_cxx11_abi": true,
+  "gpu_execution": "NOT_RUN",
+  "cuda_initialized": false
+}

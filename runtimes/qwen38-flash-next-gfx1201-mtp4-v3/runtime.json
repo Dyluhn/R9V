@@ -1,0 +1,108 @@
+{
+  "schema": "r9v.runtime.v1",
+  "id": "qwen38-flash-next-gfx1201-mtp4-v3",
+  "name": "consolidated 1.3.0",
+  "engine": "vllm-rocm",
+  "targets": [
+    "gfx1201"
+  ],
+  "capabilities": {
+    "model_architectures": [
+      "qwen4_exp"
+    ],
+    "api": "OpenAI-compatible",
+    "tensor_parallel": [
+      2
+    ],
+    "vision": true,
+    "mtp": true,
+    "ssd_ple": true,
+    "tiered_experts": true,
+    "target_qtypes": [
+      "IQ3_S",
+      "IQ4_XS",
+      "IQ4_NL",
+      "Q8_0",
+      "Q4_K",
+      "Q5_K",
+      "Q5_1",
+      "Q6_K"
+    ],
+    "context_tokens": 131072,
+    "max_cache_slots": 192,
+    "reference_mtp_depth": 4,
+    "expert_channel_partitions": [
+      [
+        320,
+        320
+      ],
+      [
+        416,
+        224
+      ]
+    ],
+    "ced": true,
+    "full_mutable_expert_cache": true
+  },
+  "source": {
+    "vllm_revision": "4b20917386dcdfb619ee62ff24c45efeae176fdf",
+    "gguf_plugin_revision": "09b1199015c6b45de5c13dc4b36857ce27d9b0cd",
+    "kernel_revision": "7905d9e0a3323411ef5d6dfb2f356061a9a491e3",
+    "vllm_package_version": "0.26.1rc0+r9v.g4b20917386dc"
+  },
+  "image_id": "sha256:2dac17a215fb5b0e3461e4c3e36a2981eec8ac3d6021e73183d247e819740c03",
+  "overlays": {
+    "note": "Read-only bind mounts over the pinned image. The directory is mounted whole at directory_target (the overlays load their .so files from there); each file under mounts replaces the image file at its target. The ced group is mounted only with CED on. Every file is SHA-256 pinned and verified before launch.",
+    "directory": "overlays",
+    "directory_target": "/r9v-full-mutable",
+    "sha256": {
+      "candidate.so": "7ab65dd56fd3a7d2f05ef279baf976affd90b138f80a018ddf79eac11902b394",
+      "full_mutable_cache.py": "f7b177f29248ade3437150c963f9ef64b1a9f74811a89641e69eeab2af6e2aa7",
+      "fused_moe.py": "99dd5c4c70b344fd3d260445e41134abac59b45552db255c1f9f7836053c342e",
+      "iq4nl.py": "dad61baf464bc1b6cc0c237e9e65407658ae605ce6b0c3cf52defc0cae3c7efc",
+      "linear.py": "68d523eabc33c6ce2d3b5b50540ccfd7c2b7446a3c1bd0532f9d788ab03c76d9",
+      "model.py": "527e1744d47b0d9c3253ae316da825688c99191b668cea1dc918c8dc3f8032af",
+      "q8_streamed.so": "2cf029ba7ae1f067b1eb99c4738eab676c28a2286ad5b31d2881b81af3ae3714",
+      "q8_token64.so": "f87a06a42744f05833c84f91072427a3f04155c23fe7819150917e89c6c6a092",
+      "q8_wmma.so": "0b1243a30fd2770c6e5d66800e9b6674f7227f2e88accb27bbb1eb802251b5e9",
+      "qsa.py": "8ed2a6479b3a7d6290c76685d916c332a129efbb1ac3ad8fd95a457d0b1ee72b",
+      "scheduler.py": "d83315412eb8a5fa114ec397fde96a4a3a1f906b3f554bf79a1a30315f2c8ea7",
+      "tiered_compaction.py": "9ff7435855dc4ae610f7064998d15024de80099646ab6800ff91a7614588a757",
+      "tiered_experts.py": "cd14175ad8f6b7e5fee8f5ba732358f7b5945ed90c26fbd11d2ab986b4377b86",
+      "vocal_embeds.py": "6a1df6a55125f24113b8e48b089f706b6ffd8ebc339d296bb5d12641bf7ae54f"
+    },
+    "mounts": {
+      "always": {
+        "scheduler.py": "/opt/r9v/lib/python3.12/site-packages/vllm/v1/core/sched/scheduler.py",
+        "tiered_compaction.py": "/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/tiered_compaction.py",
+        "tiered_experts.py": "/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/tiered_experts.py",
+        "fused_moe.py": "/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/fused_moe.py",
+        "full_mutable_cache.py": "/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/full_mutable_cache.py",
+        "linear.py": "/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/linear.py",
+        "qsa.py": "/opt/r9v/lib/python3.12/site-packages/vllm/models/qwen4_exp/amd/ops/qsa.py",
+        "vocal_embeds.py": "/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/vocal_embeds.py",
+        "iq4nl.py": "/opt/r9v/lib/python3.12/site-packages/vllm_gguf_plugin/quantization/iq4nl.py"
+      },
+      "ced": {
+        "model.py": "/opt/r9v/lib/python3.12/site-packages/vllm/models/qwen4_exp/amd/model.py"
+      }
+    },
+    "env": {
+      "always": {
+        "R9V_FULL_MUTABLE_CACHE": "1",
+        "R9V_FULL_MUTABLE_SO": "/r9v-full-mutable/candidate.so",
+        "R9V_Q8_PREFILL_COMBINED": "1",
+        "R9V_Q8_PREFILL_TOKEN64": "1"
+      }
+    }
+  },
+  "safety": {
+    "r4d": "hard-disabled",
+    "display_gpu_headroom_required": true,
+    "profile_compatibility_is_fail_closed": true
+  },
+  "qualification": {
+    "status": "pending",
+    "note": "The overlays are byte-identical to the consolidated 1.3.0 package that runs as the reference host's deployed service. Public setup, first-start qualification and restart from a clean checkout are pending."
+  }
+}
