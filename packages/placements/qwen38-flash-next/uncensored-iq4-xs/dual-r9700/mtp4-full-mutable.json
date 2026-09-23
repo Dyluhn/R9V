@@ -1,0 +1,34 @@
+{
+  "schema": "r9v.placement.v1",
+  "id": "qwen38-uncensored-iq4-xs-dual-r9700-mtp4-full-mutable",
+  "model_package": "qwen38-flash-next-uncensored-iq4-xs-mtp-blockfp8-mmproj-f16",
+  "hardware": "dual-r9700-32gb-asymmetric",
+  "status": "experimental",
+  "fixed": true,
+  "manifest": {
+    "path": "packages/placements/qwen38-flash-next/uncensored-iq4-xs/dual-r9700/mtp4-warmstart-r1/manifest.json",
+    "sha256": "d38c5ff343954f75c1c0e10e82814e20fd59799c9c5885228ee16e317cba5d7f"
+  },
+  "expert_partition": [
+    416,
+    224
+  ],
+  "hot_counts": [
+    62,
+    428
+  ],
+  "cache_slots": 160,
+  "cache_ranks": [
+    0
+  ],
+  "full_mutable_cache": {
+    "runtime": "qwen38-flash-next-gfx1201-mtp4-v3",
+    "capacities": [
+      217,
+      427
+    ],
+    "note": "The runtime's mutable expert cache is built for exactly this manifest: it refuses any other hot counts, uses 155 of the 160 rank-0 cache slots (62 + 155 = 217) and 427 of rank 1's 428 hot experts. Re-planning the placement, a custom headroom target or a different cache configuration is refused before launch."
+  },
+  "qualification": "Hot counts [62,428] derived 2026-09-18 from the package-bound calibration via plan_experts and qualified then at 131072 context on the mtp4-v2 runtime. Served since 2026-09-23 by the consolidated 1.3.0 runtime (mtp4-v3) with the full mutable cache. Every new machine qualifies it on first start.",
+  "image_id": "sha256:2dac17a215fb5b0e3461e4c3e36a2981eec8ac3d6021e73183d247e819740c03"
+}
