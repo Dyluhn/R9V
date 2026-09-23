@@ -394,7 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog = None
         if action == "setup":
             epilog = ("Profile options forwarded to setup_profile.py:\n"
-                      "  --headroom GiB,GiB       requested free VRAM per card\n"
+                      "  --headroom GiB,GiB       requested free VRAM per card (not on fixed placements)\n"
+                      "  --ced on|off            CED long-prompt prefill, for profiles that ship it\n"
                       "  --reuse-from DIR        reuse verified same-filesystem assets\n"
                       "  --calibration FILE      local memory calibration for placement\n"
                       "  --expert-catalog FILE   measured cold-to-hot expert map\n"

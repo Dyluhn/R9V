@@ -39,7 +39,7 @@ def test_help_does_not_overstate_profile_qualification() -> None:
 def test_setup_help_exposes_headroom_and_reuse_options() -> None:
     result = run_cli("setup", "qwen38", "--help")
     assert result.returncode == 0
-    for option in ("--headroom", "--reuse-from", "--calibration", "--expert-catalog", "--state-dir"):
+    for option in ("--headroom", "--ced", "--reuse-from", "--calibration", "--expert-catalog", "--state-dir"):
         assert option in result.stdout
 
 
