@@ -6,10 +6,10 @@
   "license": "Qwen Community License 1.0",
   "license_notice": "Qwen model; orcarouter abliterated derivative (its model card says Apache-2.0, its repository LICENSE file is Qwen Community License 1.0); this package follows the upstream Qwen license",
   "distribution": {
-    "status": "prepared",
+    "status": "published",
     "repository": "Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS",
-    "revision": null,
-    "note": "Local sizes and SHA256 hashes of all 20 artifacts are verified. Public upload, remote verification and revision pinning remain separate release actions."
+    "revision": "b06687cb2f83ea38039cadd249341a7bd5b76fa3",
+    "note": "All 24 published files were remotely size- and SHA256-verified at this immutable revision. A clean-host fetch/verify/build/run remains the final profile qualification gate."
   },
   "artifacts": [
     {
