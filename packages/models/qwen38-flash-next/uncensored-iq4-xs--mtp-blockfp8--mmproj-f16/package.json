@@ -1,0 +1,166 @@
+{
+  "schema": "r9v.model-package.v1",
+  "id": "qwen38-flash-next-uncensored-iq4-xs-mtp-blockfp8-mmproj-f16",
+  "model": "Qwen3.8-Flash-Next-Uncensored",
+  "quant": "UD-IQ4_XS target (Unsloth per-tensor recipe, quantized from orcarouter abliterated Q8_0) + official block-FP8 MTP + orcarouter F16 mmproj + split-16 CED prefill projector",
+  "license": "Qwen Community License 1.0",
+  "license_notice": "Qwen model; orcarouter abliterated derivative (its model card says Apache-2.0, its repository LICENSE file is Qwen Community License 1.0); this package follows the upstream Qwen license",
+  "distribution": {
+    "status": "prepared",
+    "repository": "Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS",
+    "revision": null,
+    "note": "Local sizes and SHA256 hashes of all 20 artifacts are verified. Public upload, remote verification and revision pinning remain separate release actions."
+  },
+  "artifacts": [
+    {
+      "role": "license",
+      "path": "LICENSE",
+      "bytes": 3220,
+      "sha256": "9fc8eea719a230d8eae622605f56b5f094183df8b8d446c57eeb2628bc988313",
+      "required": true
+    },
+    {
+      "role": "third-party-notices",
+      "path": "THIRD_PARTY_NOTICES.md",
+      "bytes": 4299,
+      "sha256": "a6479a52aeba37367a05df21cb4a0c5ea4b048c2a938403e1d922d3a5c130b1c",
+      "required": true
+    },
+    {
+      "role": "target",
+      "path": "target/Qwen3.8-Flash-Next-Uncensored-UD-IQ4_XS-00001-of-00003.gguf",
+      "bytes": 10945792,
+      "sha256": "7542a55ece3f5453f37944055bb2a15440b48686412ddeb94e31830049d72795",
+      "required": true
+    },
+    {
+      "role": "target",
+      "path": "target/Qwen3.8-Flash-Next-Uncensored-UD-IQ4_XS-00002-of-00003.gguf",
+      "bytes": 46907803200,
+      "sha256": "38f8b07593f17dbeefaf1289089c27059dd0b7157617194d0bcecc78ee129d1b",
+      "required": true
+    },
+    {
+      "role": "target",
+      "path": "target/Qwen3.8-Flash-Next-Uncensored-UD-IQ4_XS-00003-of-00003.gguf",
+      "bytes": 46763834432,
+      "sha256": "207b5369d8c50800f64fb5fcb27c4202d589472957a5347ee85e784ff4b8e71a",
+      "required": true
+    },
+    {
+      "role": "mtp-config",
+      "path": "mtp/config.json",
+      "bytes": 66251,
+      "sha256": "5ef62a1b6f873355a1012906329545646d2fb04b6fa3a7d838734a7555fd4dd1",
+      "required": true
+    },
+    {
+      "role": "mtp-checkpoint",
+      "path": "mtp/model.safetensors",
+      "bytes": 2698415880,
+      "sha256": "33c1160579174630f4222882da479b67f1554d84963a991b4f4f0b69237110c1",
+      "required": true
+    },
+    {
+      "role": "mtp-manifest",
+      "path": "mtp/mtp-fp8-block-manifest.json",
+      "bytes": 529,
+      "sha256": "1c65d4e3cbd6954600d9e54ab07b3d01abe6fcda849c625e67a519457b7b4b59",
+      "required": true
+    },
+    {
+      "role": "vision-projector",
+      "path": "vision/mmproj-Qwen3.8-Flash-Next-Uncensored-F16.gguf",
+      "bytes": 907543296,
+      "sha256": "f0f352a97a62a057f3aecdb597cac664762cea2ca23f7b16ec92eee28c5572d9",
+      "required": true
+    },
+    {
+      "role": "ced-projector",
+      "path": "ced/ced-projector-split16.safetensors",
+      "bytes": 1887624760,
+      "sha256": "2d14d57e353491d034f0b75caab69af5afb806c3d6ab46cda054825a6a9c57fc",
+      "required": true
+    },
+    {
+      "role": "tokenizer",
+      "path": "metadata/tokenizer.json",
+      "bytes": 12809320,
+      "sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+      "required": true
+    },
+    {
+      "role": "tokenizer-config",
+      "path": "metadata/tokenizer_config.json",
+      "bytes": 17928,
+      "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+      "required": true
+    },
+    {
+      "role": "model-config",
+      "path": "metadata/config.json",
+      "bytes": 4745,
+      "sha256": "889658f2508e8c61d409b02e70e0d78d8d4452ec65aaafbe129805d213d2e74b",
+      "required": true
+    },
+    {
+      "role": "chat-template",
+      "path": "metadata/chat_template.jinja",
+      "bytes": 8952,
+      "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+      "required": true
+    },
+    {
+      "role": "processor-config",
+      "path": "metadata/preprocessor_config.json",
+      "bytes": 390,
+      "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+      "required": true
+    },
+    {
+      "role": "generation-config",
+      "path": "metadata/generation_config.json",
+      "bytes": 202,
+      "sha256": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+      "required": true
+    },
+    {
+      "role": "tokenizer-merges",
+      "path": "metadata/merges.txt",
+      "bytes": 3353259,
+      "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+      "required": true
+    },
+    {
+      "role": "video-processor-config",
+      "path": "metadata/video_preprocessor_config.json",
+      "bytes": 385,
+      "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+      "required": true
+    },
+    {
+      "role": "tokenizer-vocabulary",
+      "path": "metadata/vocab.json",
+      "bytes": 6722759,
+      "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+      "required": true
+    },
+    {
+      "role": "expert-placement",
+      "path": "manifests/hot-manifest-q4-vision-128k-multiprompt-r1-lru16-neutral.json",
+      "bytes": 332337,
+      "sha256": "51a42dd2c29b5cec5ae1c3c01642a5f9d6d853cabbaff1358b14d24dc310c812",
+      "required": true
+    }
+  ],
+  "derived_artifacts": [
+    {
+      "role": "ple",
+      "path": "per_layer_token_embd.iq4_nl.bin",
+      "source_artifact": "target/Qwen3.8-Flash-Next-Uncensored-UD-IQ4_XS-00002-of-00003.gguf",
+      "tensor_name": "per_layer_token_embd.weight",
+      "tensor_type": "IQ4_NL",
+      "bytes": 28800138240
+    }
+  ]
+}
