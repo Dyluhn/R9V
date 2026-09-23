@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "r9v"
@@ -137,3 +140,27 @@ def test_q4_fetch_and_verify_select_its_own_package():
         assert result.returncode == 0, result.stderr
         assert "ud-q4-k-xl--mtp-blockfp8--mmproj-q8/package.json" in result.stdout
         assert "ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json" not in result.stdout
+
+
+def test_validate_refuses_a_runtime_with_a_modified_overlay(tmp_path):
+    from tools import r9v
+    source = ROOT / "runtimes/qwen38-flash-next-gfx1201-mtp4-v3"
+    shutil.copytree(source / "overlays", tmp_path / "overlays")
+    shutil.copy(source / "runtime.json", tmp_path / "runtime.json")
+    (tmp_path / "overlays/model.py").write_text("# edited\n")
+    runtime = json.loads((tmp_path / "runtime.json").read_text())
+
+    with pytest.raises(r9v.ProfileError, match="SHA-256 mismatch.*model.py"):
+        r9v._verify_runtime_overlays(tmp_path / "runtime.json", runtime)
+
+
+def test_validate_refuses_a_placement_whose_pinned_manifest_differs():
+    from tools import r9v
+    placement = json.loads(
+        (ROOT / "packages/placements/qwen38-flash-next/uncensored-iq4-xs/dual-r9700/"
+         "mtp4-full-mutable.json").read_text()
+    )
+    placement["manifest"]["sha256"] = "0" * 64
+
+    with pytest.raises(r9v.ProfileError, match="expected 0000"):
+        r9v._verify_pinned_manifest(placement)
