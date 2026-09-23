@@ -261,6 +261,14 @@ if [[ -n ${R9V_EXPERT_MANIFEST_PATH:-} ]]; then
     manifest_mount_args=(--volume "$manifest_path:$manifest_container_path:ro")
 fi
 
+# Pinned image overlays (and CED when R9V_CED=on) from the runtime descriptor.
+# Refused before anything starts unless every overlay file matches its SHA-256.
+runtime_overlay_args=()
+if [[ -n ${R9V_RUNTIME_DESCRIPTOR:-} ]]; then
+    overlay_lines=$(python3 "$repo_root/tools/runtime_overlays.py" docker-args "$R9V_RUNTIME_DESCRIPTOR") || exit 2
+    [[ -z $overlay_lines ]] || mapfile -t runtime_overlay_args <<< "$overlay_lines"
+fi
+
 target_files=("$model_dir/$target_rel" "$model_dir/$target_shard2_rel" "$model_dir/$target_shard3_rel")
 [[ -z $target_shard4_rel ]] || target_files+=("$model_dir/$target_shard4_rel")
 for required in \
@@ -333,6 +341,7 @@ docker run --detach \
     --volume "$ple_path:/ple/per_layer_token_embd.iq4_nl.bin:ro" \
     --volume "$cache_dir:/cache" \
     "${manifest_mount_args[@]}" \
+    "${runtime_overlay_args[@]}" \
     "${dev_overlay_args[@]}" \
     "${profiler_mount_args[@]}" \
     "${route_args[@]}" \
