@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -187,3 +188,18 @@ def test_cli_reports_problems_and_exits_2(tmp_path, capsys):
 
     assert runtime_overlays.main(["verify", str(runtime)]) == 2
     assert "SHA-256 mismatch" in capsys.readouterr().err
+
+
+def test_mtp4_v3_kernel_sources_match_their_checksum_list():
+    sources = RUNTIME.parent / "sources"
+    listed = {}
+    for line in (sources / "SHA256SUMS").read_text(encoding="utf-8").splitlines():
+        digest, name = line.split("  ", 1)
+        listed[name] = digest
+    present = {
+        str(path.relative_to(sources)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sources.rglob("*")
+        if path.is_file() and path.name != "SHA256SUMS"
+    }
+
+    assert present == listed
