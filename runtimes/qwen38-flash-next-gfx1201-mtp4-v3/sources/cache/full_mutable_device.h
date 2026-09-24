@@ -25,6 +25,15 @@ constexpr int kRank1HotSlots = 427;
 constexpr int kRank1CacheSlots = 0;
 constexpr int kRank1TotalSlots = 427;
 
+// Permanently resident warmstart slots: slots [0, pinned) are never evicted, so their
+// experts are never read from host and the host copy omits them. Rank 1 pins its 400
+// most-routed experts per layer (full_mutable_pins.json); rank 0 pins none.
+constexpr int kRank0PinnedSlots = 0;
+constexpr int kRank1PinnedSlots = 400;
+FMD_HOST_DEVICE inline int pinned_slots(int rank) {
+  return rank == 0 ? kRank0PinnedSlots : kRank1PinnedSlots;
+}
+
 // Hard admission limit per event
 constexpr int kMaxInsertsPerEvent = 64;
 
@@ -193,7 +202,8 @@ FMD_HOST_DEVICE inline int init_arena_core(
   }
   for (int e = 0; e < kNumExperts; ++e) {
     pool_map[e] = -1;
-    if (cold_map != nullptr) cold_map[e] = e;
+    // cold_map is the host copy's expert -> row index, built by the host with the copy.
+    (void)cold_map;
     if (hot_map != nullptr) hot_map[e] = -1;
     if (cache_map != nullptr) cache_map[e] = -1;
   }
@@ -339,10 +349,10 @@ FMD_HOST_DEVICE inline int device_planner_core(
         }
       }
 
-      // b. Victim selection among non-protected resident slots
+      // b. Victim selection among non-protected, non-pinned resident slots
       if (target < 0) {
         int64_t min_clock = -1;
-        for (int s = 0; s < capacity; ++s) {
+        for (int s = pinned_slots(rank); s < capacity; ++s) {
           if (p.pool_tags[s] >= 0 && !protected_slot[s]) {
             if (min_clock < 0 || p.pool_clock[s] < min_clock) {
               min_clock = p.pool_clock[s];

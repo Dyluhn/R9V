@@ -206,11 +206,12 @@ def test_launcher_refuses_a_modified_overlay_before_docker_run(tmp_path):
     assert args is None
 
 
-# Launch parity: the public profile must create the same container as the
-# deployed consolidated 1.3.0 service. The fixture is that service's Docker create
-# payload, normalized by tests/golden/launch/make_deployed_fixture.py.
+# Launch parity: the public profile must create the same container as the one
+# GPU-tested on the reference host (consolidated 1.3.0 plus host expert dedupe).
+# The fixture is that container's Docker create payload, normalized by
+# tests/golden/launch/make_deployed_fixture.py.
 DEPLOYED = json.loads(
-    (ROOT / "tests/golden/launch/uncensored-1.3.0-service.json").read_text(encoding="utf-8")
+    (ROOT / "tests/golden/launch/uncensored-host-dedupe.json").read_text(encoding="utf-8")
 )
 UNCENSORED = ROOT / "profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored"
 UNCENSORED_FILES = [
@@ -306,7 +307,7 @@ def launched(tmp_path: Path, env: dict[str, str]):
 
 
 def test_launch_with_the_deployed_ced_default_matches_the_deployed_service(tmp_path):
-    # The deployed service ran CED loaded but default off; everything else is the release.
+    # The tested container ran CED loaded but default off; everything else is the release.
     assert launched(tmp_path, {"R9V_CED_DEFAULT": "off"}) == deployed()
 
 

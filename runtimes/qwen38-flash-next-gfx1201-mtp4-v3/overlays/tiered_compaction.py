@@ -117,7 +117,7 @@ def compact_expert_master(
     *,
     cold_empty: HostEmpty = default_pinned_empty,
     stage_empty: HostEmpty = default_stage_empty,
-    retain_full_host_owner: bool = False,
+    host_ids: list[int] | None = None,
 ) -> CompactedExperts:
     """Split one layer's expert master into a hot device set and a cold owner.
 
@@ -131,7 +131,11 @@ def compact_expert_master(
     """
     validate_expert_master(cpu_master, num_experts)
     row_shape = tuple(cpu_master.shape[1:])
-    cold_ids = cold_expert_ids(hot_ids, num_experts)
+    # ``host_ids`` (mutable cache): the host keeps these rows, which may overlap the
+    # hot set; by default it keeps exactly the experts that are not hot.
+    cold_ids = cold_expert_ids(hot_ids, num_experts) if host_ids is None else list(host_ids)
+    if cold_ids != sorted(set(cold_ids)) or set(hot_ids) | set(cold_ids) != set(range(num_experts)):
+        raise ValueError("Every expert must be hot or on host, and host ids must be ascending")
 
     hot_index = torch.tensor(hot_ids, dtype=torch.long, device="cpu")
     stage = stage_empty((len(hot_ids), *row_shape), cpu_master.dtype)
@@ -142,13 +146,8 @@ def compact_expert_master(
     hot.copy_(stage)
     del stage
 
-    if retain_full_host_owner:
-        cold_owner = cold_empty((num_experts, *row_shape), cpu_master.dtype)
-        cold_owner.copy_(cpu_master)
-        hot_map, cold_map = build_expert_maps(hot_ids, list(range(num_experts)), num_experts, device)
-    else:
-        cold_index = torch.tensor(cold_ids, dtype=torch.long, device="cpu")
-        cold_owner = cold_empty((len(cold_ids), *row_shape), cpu_master.dtype)
-        torch.index_select(cpu_master, 0, cold_index, out=cold_owner)
-        hot_map, cold_map = build_expert_maps(hot_ids, cold_ids, num_experts, device)
+    cold_index = torch.tensor(cold_ids, dtype=torch.long, device="cpu")
+    cold_owner = cold_empty((len(cold_ids), *row_shape), cpu_master.dtype)
+    torch.index_select(cpu_master, 0, cold_index, out=cold_owner)
+    hot_map, cold_map = build_expert_maps(hot_ids, cold_ids, num_experts, device)
     return CompactedExperts(hot, cold_owner, hot_map, cold_map)

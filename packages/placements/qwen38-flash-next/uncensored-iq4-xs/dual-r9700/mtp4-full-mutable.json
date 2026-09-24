@@ -27,7 +27,11 @@
       217,
       427
     ],
-    "note": "The runtime's mutable expert cache is built for exactly this manifest: it refuses any other hot counts, uses 155 of the 160 rank-0 cache slots (62 + 155 = 217) and 427 of rank 1's 428 hot experts. Re-planning the placement, a custom headroom target or a different cache configuration is refused before launch."
+    "pinned_slots": [
+      0,
+      400
+    ],
+    "note": "The runtime's mutable expert cache is built for exactly this manifest: it refuses any other hot counts, uses 155 of the 160 rank-0 cache slots (62 + 155 = 217) and 427 of rank 1's 428 hot experts. Rank 1's first 400 slots hold the runtime's pinned experts (full_mutable_pins.json) and are never evicted, so its host copy holds only the other 112 experts per layer. Re-planning the placement, a custom headroom target or a different cache configuration is refused before launch."
   },
   "qualification": "Hot counts [62,428] derived 2026-09-18 from the package-bound calibration via plan_experts and qualified then at 131072 context on the mtp4-v2 runtime. Served since 2026-09-23 by the consolidated 1.3.0 runtime (mtp4-v3) with the full mutable cache. Every new machine qualifies it on first start.",
   "image_id": "sha256:2dac17a215fb5b0e3461e4c3e36a2981eec8ac3d6021e73183d247e819740c03"
