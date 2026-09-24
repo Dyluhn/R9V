@@ -348,7 +348,7 @@ def _det_flush(positions: torch.Tensor, input_ids: torch.Tensor | None) -> None:
 # "ID=path" gives the projector an integer id other than its split (the control's @ID), so two
 # projectors of one split can be compared on one server.
 _CED_PROJECTOR_PATHS = [p for p in os.environ.get("R9V_CED_PROJECTOR", "").split(",") if p]
-_CED = {"approx": False, "split": None, "fill": "lean", "proj": {}, "tokens": 0}
+_CED = {"approx": False, "split": None, "fill": "lean", "tokens": 0}
 # Research only (R9V_CED_CONTROL set): TP rank 0 keeps the running count of tokens that took
 # the approximate branch in this file (next to the scheduler's control file), so a driver can
 # attribute approximate tokens to each request, and times every approximate chunk
@@ -411,6 +411,7 @@ _CED_PRECISION = os.environ.get("R9V_CED_PRECISION", "bf16")
 if _CED_PRECISION not in ("bf16", "int8"):
     raise ValueError(f"R9V_CED_PRECISION must be bf16 or int8, got {_CED_PRECISION!r}")
 _CED_GROUP = 128
+_CED_ROWS = 2560  # int8 map rows dequantized at a time (_ced_apply): one late layer's map
 
 
 def _ced_install_runner_hook() -> None:
@@ -532,34 +533,147 @@ def _ced_load(path: str, device: torch.device) -> dict[str, torch.Tensor]:
     return proj
 
 
-def _ced_projector(device: torch.device, pid: int) -> dict[str, torch.Tensor]:
-    """One projector's maps on the device (_ced_load), by id (its split unless ID=path). One
-    projector is resident per device: asking for another (research) frees the current one and
-    loads the new file (VRAM headroom does not allow all of them next to the expert cache)."""
-    current = _CED["proj"].get(device)
-    if current is None or current[0] != pid:
-        if current is not None:  # free the resident projector (and its cached blocks) before loading the next
-            _CED["proj"][device] = current = None
-            torch.cuda.empty_cache()
-        started = time.perf_counter()
-        _CED["proj"][device] = (pid, _ced_load(_CED_FILES[pid], device))
-        logger.info("CED projector id=%d split=%d sources=%s %s loaded on %s in %.2fs (device free %.2f GiB, "
-                    "torch peak reserved %.2f GiB): %s", pid, _CED_SPLITS[pid], ",".join(_CED_SOURCES[pid]),
-                    _CED_PRECISION, device, time.perf_counter() - started, torch.cuda.mem_get_info(device)[0] / 2**30,
-                    torch.cuda.max_memory_reserved(device) / 2**30, _CED_FILES[pid])
-    return _CED["proj"][device][1]
+# CED quality: the vision encoder's weights and the CED projector share one VRAM region per GPU.
+# No step needs both at once: prompts with images or video stay exact (the scheduler), and a
+# step is approximate only when it holds a single request. Both sets stay in pinned host RAM;
+# the region holds one of them and is refilled from host when the other is needed (the vision
+# encoder: embed_multimodal; the projector: an approximate chunk). Nothing is copied back, the
+# weights never change. Each tensor is a fixed view into the region, so its address is the same
+# every time it is resident; the encoder and the approximate chunk both run eagerly (never
+# compiled or graph-captured) and read the weights through those views. Every TP rank runs the
+# same encoder calls and approximate chunks, so all ranks swap in the same step.
+_VISION: list[nn.Module] = []  # the vision tower, registered by Qwen4ExpForConditionalGeneration
+_SHARED: dict = {}  # "vram": this worker GPU's _SharedVram; "names": each projector's map names, in view order
+
+
+class _SharedVram:
+    """One region on `device` holding one set of tensors at a time: sets maps a name to host
+    tensors (pinned on a GPU), and views[name] are that set's fixed places in the region."""
+
+    ALIGN = 256  # bytes; every view starts aligned for any dtype
+
+    def __init__(self, sets: dict[str, list[torch.Tensor]], device: torch.device) -> None:
+        offsets = {name: self._offsets(tensors) for name, tensors in sets.items()}
+        self.size = max((offsets[name][-1] for name in sets), default=0)
+        self.region = torch.empty(self.size, dtype=torch.uint8, device=device)
+        self.host = sets
+        self.views = {name: [self.region[start:start + t.numel() * t.element_size()].view(t.dtype).view(t.shape)
+                             for start, t in zip(offsets[name], tensors)] for name, tensors in sets.items()}
+        self.resident: str | None = None
+        self.swaps = 0
+
+    @classmethod
+    def _offsets(cls, tensors: list[torch.Tensor]) -> list[int]:
+        """Start of each tensor in the region, then the set's end."""
+        offsets = [0]
+        for t in tensors:
+            offsets.append(offsets[-1] + -(-t.numel() * t.element_size() // cls.ALIGN) * cls.ALIGN)
+        return offsets
+
+    def set_bytes(self, name: str) -> int:
+        return sum(t.numel() * t.element_size() for t in self.host[name])
+
+    def acquire(self, name: str) -> list[torch.Tensor]:
+        """Make `name` resident, copying it in from host if another set is, and return its views.
+        Synchronizes the device before and after a copy: no kernel still reading the previous
+        set overlaps it, and the swap time logged is the copy's."""
+        if self.resident != name:
+            gpu = self.region.is_cuda
+            if gpu:
+                torch.cuda.synchronize(self.region.device)
+            started = time.perf_counter()
+            for view, host in zip(self.views[name], self.host[name]):
+                view.copy_(host, non_blocking=True)
+            if gpu:
+                torch.cuda.synchronize(self.region.device)
+            previous, self.resident = self.resident, name
+            self.swaps += 1
+            logger.info("CED/vision shared VRAM swap %d on %s: %s -> %s, %.3f GiB in %.1f ms (region %.3f GiB)",
+                        self.swaps, self.region.device, previous, name, self.set_bytes(name) / 2**30,
+                        (time.perf_counter() - started) * 1000, self.size / 2**30)
+        return self.views[name]
+
+
+def _pinned(t: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """A host copy of t, pinned when the region is on a GPU (fast, asynchronous copies)."""
+    host = t.detach().to("cpu", copy=True).contiguous()
+    return host.pin_memory() if device.type == "cuda" else host
+
+
+def _share_vision(shared: _SharedVram, params: list[nn.Parameter]) -> None:
+    """Point each vision weight at its view in the region. The loader may still hold the loaded
+    tensor in data_container (single-shard GGUF weights); that reference moves too, or the old
+    copy would stay allocated."""
+    for param, view in zip(params, shared.views["vision"]):
+        old = param.data.data_ptr()
+        param.data = view
+        container = getattr(param, "data_container", None)
+        if container:
+            param.data_container = [view if c.data_ptr() == old else c for c in container]
+
+
+def _shared_vram_setup(device: torch.device) -> _SharedVram:
+    """The region for this GPU: every CED projector's pinned host copy (_ced_load on the CPU) and,
+    with a vision tower, its weights on this GPU, which move into the region and stay resident
+    first (vLLM profiles the encoder at startup)."""
+    started = time.perf_counter()
+    free_before = torch.cuda.mem_get_info(device)[0] if device.type == "cuda" else 0
+    with torch.inference_mode(False):
+        params = [p for module in _VISION for p in module.parameters() if p.device == device]
+        sets = {}
+        for pid in _CED_FILES:
+            projector = _ced_load(_CED_FILES[pid], torch.device("cpu"))
+            _SHARED.setdefault("names", {})[pid] = list(projector)
+            sets[f"ced:{pid}"] = [_pinned(t, device) for t in projector.values()]
+        sets["vision"] = [_pinned(p.data, device) for p in params]
+        shared = _SharedVram(sets, device)
+        _share_vision(shared, params)
+        shared.acquire("vision")
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    free_after = torch.cuda.mem_get_info(device)[0] if device.type == "cuda" else 0
+    for pid in _CED_FILES:
+        logger.info("CED projector id=%d split=%d sources=%s %s: %.3f GiB in pinned host RAM, shares VRAM with the "
+                    "vision encoder: %s", pid, _CED_SPLITS[pid], ",".join(_CED_SOURCES[pid]), _CED_PRECISION,
+                    shared.set_bytes(f"ced:{pid}") / 2**30, _CED_FILES[pid])
+    logger.info("CED/vision shared VRAM on %s: region %.3f GiB (vision encoder %.3f GiB in %d tensors), set up in "
+                "%.2fs; device free %.2f -> %.2f GiB", device, shared.size / 2**30, shared.set_bytes("vision") / 2**30,
+                len(params), time.perf_counter() - started, free_before / 2**30, free_after / 2**30)
+    return shared
+
+
+def _shared_vram() -> _SharedVram:
+    if "vram" not in _SHARED:
+        _SHARED["vram"] = _shared_vram_setup(torch.device("cuda", torch.cuda.current_device()))
+    return _SHARED["vram"]
+
+
+def _ced_projector(pid: int) -> dict[str, torch.Tensor]:
+    """Projector pid's maps (_ced_load's names) in the shared region, made resident."""
+    views = _shared_vram().acquire(f"ced:{pid}")
+    return dict(zip(_SHARED["names"][pid], views))
 
 
 def _ced_apply(proj: dict[str, torch.Tensor], name: str, boundary: torch.Tensor) -> torch.Tensor:
     """One projector map applied to the boundary state. bf16 maps are [out, in + 1] (last column
-    = bias); int8 maps (_ced_quantize) are dequantized one map at a time, as
-    kva/quantize_projector.py does offline."""
+    = bias); int8 maps (_ced_quantize) are dequantized as kva/quantize_projector.py does offline,
+    at most _CED_ROWS output rows at a time and in place, so the bf16 copy is never larger than
+    one late layer's map. A late layer's map is a single block: its product, which becomes KV
+    and GDN state, is bitwise the whole-map product. "final" (4 blocks) differs from the
+    whole-map product only in rounding; it feeds the MTP drafter and the discarded logits of
+    approximated positions, never a sampled token."""
     weights = proj[name]
     if weights.dtype != torch.int8:
         return torch.addmm(weights[:, -1], boundary, weights[:, :-1].t())
-    scale = proj[f"scale.{name}"]
-    matrix = (weights.view(weights.shape[0], scale.shape[1], -1).to(torch.bfloat16) * scale[:, :, None]).view(weights.shape)
-    return torch.addmm(proj[f"bias.{name}"], boundary, matrix.t())
+    scale, bias = proj[f"scale.{name}"], proj[f"bias.{name}"]
+    parts = []
+    for start in range(0, weights.shape[0], _CED_ROWS):
+        rows = weights[start:start + _CED_ROWS]
+        matrix = rows.view(rows.shape[0], scale.shape[1], -1).to(torch.bfloat16)
+        matrix.mul_(scale[start:start + _CED_ROWS, :, None])
+        parts.append(torch.addmm(bias[start:start + _CED_ROWS], boundary, matrix.view(rows.shape).t()))
+        del matrix  # free this block's bf16 copy before the next one is made
+    return parts[0] if len(parts) == 1 else torch.cat(parts, 1)
 
 
 def _ced_rows(linear: nn.Module, x: torch.Tensor, start: int, end: int) -> torch.Tensor:
@@ -1090,7 +1204,7 @@ class Qwen4ExpModel(nn.Module):
                                   for k in sources], 1)
         _CED_KEEP.clear()
         _ced_kept.clear()
-        proj = _ced_projector(boundary.device, pid)
+        proj = _ced_projector(pid)
         lean = _CED["fill"] != "full"
         spans = []  # research: (start, after projector, after fill, layer type) per late layer
         for idx in range(split, len(layers)):
@@ -1150,12 +1264,8 @@ class Qwen4ExpModel(nn.Module):
             weights,
             mapper=self.hf_to_vllm_mapper,
         )
-        if _CED_FILES:
-            from vllm.model_executor.layers.ple_offload_layer import is_offload_process
-
-            if not is_offload_process():
-                # Load the first listed projector now, not on the first long prompt.
-                _ced_projector(torch.device("cuda", torch.cuda.current_device()), next(iter(_CED_FILES)))
+        # The CED projector loads with the shared VRAM region (_shared_vram), after the vision
+        # encoder's weights are final: at vLLM's encoder profiling during startup.
         return loaded
 
 
@@ -1459,6 +1569,7 @@ class Qwen4ExpForConditionalGeneration(
                     quant_config=quant_config,
                     prefix=maybe_prefix(prefix, "visual"),
                 )
+            _VISION[:] = [self.visual]  # its weights share VRAM with the CED projector
 
         self.use_deepstack = (
             not self.language_model_only
@@ -1500,6 +1611,11 @@ class Qwen4ExpForConditionalGeneration(
                 "len(deepstack_visual_indexes)"
             )
         self.set_moe_parameters(self.language_model.model.layers)
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
+        if _CED_FILES:  # the vision weights share VRAM with the CED projector
+            _shared_vram().acquire("vision")
+        return super().embed_multimodal(**kwargs)
 
     def embed_input_ids(
         self,
