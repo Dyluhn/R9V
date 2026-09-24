@@ -91,7 +91,14 @@ about 1.8x at 32K tokens and above,
 about x1.051 perplexity on prompts that depend on long context, and about 10%
 fewer MTP tokens per step on the first answer after a CED prefill. Decode is
 exact. `--ced off` in setup or start turns CED off; one request can stay exact
-with `"vllm_xargs": {"r9v_ced": false}`. The profile uses a fixed expert
+with `"vllm_xargs": {"r9v_ced": false}`. `--ced quality` is opt-in: a
+multi-source projector that lost 10% of the long-context gain (x1.029
+perplexity) where the default lost 17% (x1.049), for 1.55x instead of 1.68x
+prefill, in one GPU grade of both. Only suggest it when the user cares more
+about long-prompt accuracy than prefill speed. Setup downloads its 1.8 GB
+projector only with `setup --ced quality`; `start --ced quality` before that is
+refused with that instruction. It has not yet run in the clean-install GPU
+test. The profile uses a fixed expert
 placement: do not pass `--headroom`, `--calibration` or `--expert-catalog`;
 they are refused. Its v0.4.0 public setup, first start and restart passed on
 the reference host; see

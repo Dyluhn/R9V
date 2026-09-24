@@ -8,6 +8,8 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 
 **Current status:** both IQ4_XS and Q4_K_XL MTP4 profiles passed ordinary public setup, first-start workload qualification and unchanged-receipt restart on the dual-R9700 reference host. Both profiles remain experimental. Each first start passed all seven checks at 131,072 context, including a 130,941-token prompt, with at least 3 GiB free VRAM per GPU. Setup selects the profile's runtime image bundle, verifies every part and loads the exact image ID. The Q4 profile uses the [v0.2.0-rc2 bundle](https://github.com/Dyluhn/R9V/releases/tag/v0.2.0-rc2-images); the IQ4 profile's WMMA-prefill image (`release/image-bundle-wmma-prefill-20260915.json`) is published under the [`v0.3.0-rc1-images`](https://github.com/Dyluhn/R9V/releases/tag/v0.3.0-rc1-images) release tag. See [release status and evidence](docs/qwen-release-candidate.md).
 
+**New in v0.4.2:** `qwen38-mtp4-uncensored` has an opt-in CED quality mode, `--ced quality`, that gives up less long-context quality for less prefill speedup (below). Right after a first start, `./r9v doctor --runtime` no longer fails its KV-pressure check because of qualification's own long prompt. See the [changelog](CHANGELOG.md).
+
 **New in v0.4.1:** `qwen38-mtp4-uncensored` keeps rank 1's 400 most-used experts per layer in VRAM for good, so its host copy of the experts drops from 55.4 to 40.3 GiB and it needs 56.3 GiB of free RAM at start instead of 71.4. In the GPU test its outputs matched 1.3.0 bit for bit on the test prompts and decode speed was unchanged. `./r9v doctor` also checks disk space, VRAM held by other programs, API exposure, the runtime's pinned files and the CED projector. See the [changelog](CHANGELOG.md).
 
 **New in v0.4.0:** `qwen38-mtp4-uncensored` runs an uncensored (abliterated) IQ4_XS model on the consolidated 1.3.0 runtime with CED long-prompt prefill on by default. Its public fetch, setup, first-start qualification and restart passed from a clean checkout on the reference host, with CED on and off. See [its qualification note](docs/qualification/uncensored-v040.md).
@@ -29,7 +31,16 @@ It has CED (approximate long-prompt prefill) on by default. On prompts of 8,192 
 - About **10% fewer MTP tokens per step** on the first answer after a CED prefill; later turns are normal.
 - The projector takes **1.76 GiB of VRAM per GPU**, so the profile's free-VRAM target is 1.5 GiB per card instead of 3 GiB.
 
-Turn CED off for the server with `--ced off` in setup or start; keep a single request exact with `"vllm_xargs": {"r9v_ced": false}`. The profile uses a fixed expert placement, so it does not accept `--headroom`.
+Turn CED off for the server with `--ced off` in setup or start; keep a single request exact with `"vllm_xargs": {"r9v_ced": false}`.
+
+**CED quality (opt-in, `--ced quality`).** A multi-source projector reads the layer-16 state plus the inputs of full-attention layers 3, 7, 11 and 15. In one GPU grade of both projectors (both loaded as int8; the default ships bf16), on the 16 prompts that depend on their long context:
+
+| `--ced` | Perplexity | Long-context gain lost | Prefill speedup (median) | Projector VRAM per GPU |
+|---|---|---|---|---|
+| `on` (default) | ×1.049 | 17% | 1.68× | 1.76 GiB (bf16) |
+| `quality` | ×1.029 | 10% | 1.55× | 1.79 GiB (stored int8) |
+
+The projector math costs 56 ms per 1K approximated tokens instead of 24 ms. Setup downloads the quality projector (1.8 GB) only when you pick it: run `setup --ced quality` once, then `start` keeps the choice. It has not yet run in the full clean-install GPU test; `on` stays the default. The profile uses a fixed expert placement, so it does not accept `--headroom`.
 
 Use the explicit MTP4 aliases for the current workflow.
 
