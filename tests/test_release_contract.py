@@ -278,13 +278,15 @@ def test_uncensored_package_is_published_and_holds_every_file_the_profile_launch
         "Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS"
     )
     assert package["distribution"]["revision"] == "b06687cb2f83ea38039cadd249341a7bd5b76fa3"
-    assert all(artifact["required"] for artifact in package["artifacts"])
+    optional = [artifact["path"] for artifact in package["artifacts"] if not artifact["required"]]
+    assert optional == [settings["R9V_CED_QUALITY_PROJECTOR_REL"]]  # fetched only for --ced quality
     for key in (
         "R9V_TARGET_REL",
         "R9V_TARGET_SHARD2_REL",
         "R9V_TARGET_SHARD3_REL",
         "R9V_MMPROJ_REL",
         "R9V_CED_PROJECTOR_REL",
+        "R9V_CED_QUALITY_PROJECTOR_REL",
     ):
         assert settings[key] in paths, key
     assert {"mtp/model.safetensors", "mtp/config.json", "metadata/config.json"} <= paths

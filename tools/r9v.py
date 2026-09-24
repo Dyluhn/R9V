@@ -395,7 +395,7 @@ def build_parser() -> argparse.ArgumentParser:
         if action == "setup":
             epilog = ("Profile options forwarded to setup_profile.py:\n"
                       "  --headroom GiB,GiB       requested free VRAM per card (not on fixed placements)\n"
-                      "  --ced on|off            CED long-prompt prefill, for profiles that ship it\n"
+                      "  --ced on|off|quality    CED long-prompt prefill, for profiles that ship it\n"
                       "  --reuse-from DIR        reuse verified same-filesystem assets\n"
                       "  --calibration FILE      local memory calibration for placement\n"
                       "  --expert-catalog FILE   measured cold-to-hot expert map\n"
@@ -405,7 +405,7 @@ def build_parser() -> argparse.ArgumentParser:
             epilog = ("Profile options forwarded to setup_profile.py:\n"
                       "  --timeout SECONDS       readiness wait: 900, or 2400 for a full mutable\n"
                       "                          expert cache (qwen38-mtp4-uncensored)\n"
-                      "  --ced on|off            CED long-prompt prefill, for profiles that ship it\n"
+                      "  --ced on|off|quality    CED long-prompt prefill, for profiles that ship it\n"
                       "  --state-dir DIR         the state directory setup used")
         elif action == "soak":
             epilog = ("Soak options forwarded to soak_runtime.py:\n"

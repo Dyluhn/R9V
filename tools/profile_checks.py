@@ -32,16 +32,21 @@ def descriptor(repo_root: Path, profile: dict, key: str) -> dict:
     return json.loads((repo_root / profile["descriptors"][key]).read_text(encoding="utf-8"))
 
 
+def _ced_switch() -> str:
+    return os.environ.get("R9V_CED", "off")
+
+
 def _pinned_projector(package: dict) -> dict | None:
-    relative = os.environ.get("R9V_CED_PROJECTOR_REL")
+    relative = os.environ.get(runtime_overlays.projector_setting(_ced_switch()))
     return next((artifact for artifact in package.get("artifacts", [])
                  if artifact.get("role") == "ced-projector" and artifact.get("path") == relative), None)
 
 
 def ced_projector_vram(repo_root: Path, profile: dict | None) -> int:
     """Bytes the CED projector takes on each GPU once loaded: the pinned bf16 file,
-    about half of it at int8. 0 when CED is off or no projector is pinned."""
-    if os.environ.get("R9V_CED", "off") != "on" or profile is None:
+    about half of it at int8; the quality projector is stored as int8 and loads as
+    stored. 0 when CED is off or no projector is pinned."""
+    if _ced_switch() == "off" or profile is None:
         return 0
     try:
         pinned = _pinned_projector(descriptor(repo_root, profile, "model_package"))
@@ -49,7 +54,9 @@ def ced_projector_vram(repo_root: Path, profile: dict | None) -> int:
         return 0
     if pinned is None:
         return 0
-    return pinned["bytes"] // 2 if os.environ.get("R9V_CED_PRECISION") == "int8" else pinned["bytes"]
+    if _ced_switch() == "on" and os.environ.get("R9V_CED_PRECISION") == "int8":
+        return pinned["bytes"] // 2
+    return pinned["bytes"]
 
 
 def projector_split(path: Path) -> tuple[int | None, str | None]:
@@ -75,17 +82,19 @@ def _sha256(path: Path) -> str:
 
 
 def check_ced_projector(reporter, repo_root: Path, profile: dict | None) -> None:
-    """CED on: the projector the runtime will load is the pinned file, of the profile's split."""
+    """CED on or quality: the projector the runtime will load is the pinned file, of the
+    profile's split."""
     # Without a model directory the model-package check already reports the missing install.
-    if os.environ.get("R9V_CED", "off") != "on" or profile is None or not os.environ.get("R9V_MODEL_DIR"):
+    switch = _ced_switch()
+    if switch == "off" or profile is None or not os.environ.get("R9V_MODEL_DIR"):
         return
-    fix = ("Rerun setup to download the pinned projector and keep the profile's R9V_CED_* "
-           "values, or start with --ced off. Never substitute another projector.")
-    _, problems = runtime_overlays.ced_environment(dict(os.environ))
+    fix = (f"Rerun setup with --ced {switch} to download the pinned projector and keep the "
+           "profile's R9V_CED_* values, or start with --ced off. Never substitute another projector.")
+    environment, problems = runtime_overlays.ced_environment(dict(os.environ))
     if problems:
         reporter.fail("ced-projector", "; ".join(problems), fix)
         return
-    relative = os.environ["R9V_CED_PROJECTOR_REL"]
+    relative = os.environ[runtime_overlays.projector_setting(switch)]
     path = Path(os.environ["R9V_MODEL_DIR"]) / relative
     try:
         pinned = _pinned_projector(descriptor(repo_root, profile, "model_package"))
@@ -111,12 +120,12 @@ def check_ced_projector(reporter, repo_root: Path, profile: dict | None) -> None
     if problems:
         reporter.fail("ced-projector", "; ".join(problems), fix)
         return
-    precision = os.environ["R9V_CED_PRECISION"]
+    precision = environment["R9V_CED_PRECISION"]
     vram = ced_projector_vram(repo_root, profile)
     reporter.passed(
         "ced-projector",
-        f"{relative} matches its pinned sha256 {digest[:12]}..., split {keyed}, precision "
-        f"{precision}; it takes {vram / GIB:.2f} GiB on each GPU once loaded",
+        f"CED {switch}: {relative} matches its pinned sha256 {digest[:12]}..., split {keyed}, "
+        f"precision {precision}; it takes {vram / GIB:.2f} GiB on each GPU once loaded",
         sha256=digest, split=keyed, precision=precision, vram_bytes_per_gpu=vram,
     )
 
@@ -142,8 +151,8 @@ def check_runtime_overlays(reporter) -> None:
             "editing an overlay; the launcher refuses to start until every file matches.",
         )
         return
-    ced = os.environ.get("R9V_CED", "off")
-    groups = ["always", "ced"] if ced == "on" else ["always"]
+    ced = _ced_switch()
+    groups = runtime_overlays.CED_GROUPS.get(ced, ["always"])
     mounted = sorted(name for group in groups for name in overlays["mounts"].get(group, {}))
     reporter.passed(
         "runtime-overlays",

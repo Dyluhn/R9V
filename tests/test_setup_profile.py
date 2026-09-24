@@ -483,3 +483,130 @@ def test_start_timeout_defaults_to_2400_s_only_for_the_full_mutable_cache_and_ke
         assert setup.main() == 0
 
     assert waits == [default, 600]
+
+
+QUALITY = 'ced/quality-int8.safetensors'
+
+
+def quality_repo(tmp_path, monkeypatch, published):
+    """A repo whose package holds one present required file and the optional CED quality
+    projector (published at a pinned revision, or only prepared), with setup's host checks faked."""
+    root, model = tmp_path / 'repo', tmp_path / 'models'
+    root.mkdir()
+    (model / 'target').mkdir(parents=True)
+    item = artifact()
+    (model / item['path']).write_bytes(b'weights')
+    quality = dict(artifact(b'quality'), path=QUALITY, role='ced-projector', required=False,
+                   distribution={'repository': 'test/repo', 'revision': 'b' * 40 if published else None,
+                                 'note': 'not published yet'})
+    (root / 'package.json').write_text(json.dumps({
+        'artifacts': [item, quality], 'distribution': {'repository': 'test/repo', 'revision': 'a' * 40}}))
+    (root / 'runtime.json').write_text('{"overlays": {"mounts": {"ced": {}, "ced-quality": {}}}}')
+    profile = root / 'profile.json'
+    profile.write_text(json.dumps({'id': 'qwen38-flash-next/ud-iq4-xs/dual-r9700-128k', 'descriptors': {
+        'model_package': 'package.json', 'runtime': 'runtime.json'}}))
+    monkeypatch.setattr(setup, 'ROOT', root)
+    monkeypatch.setattr(setup, 'PROFILE', profile)
+    monkeypatch.setattr(setup, 'PLE_BYTES', 1)
+    monkeypatch.delenv('R9V_CONFIG_FILE', raising=False)
+    monkeypatch.delenv('R9V_PROFILE_ROOT', raising=False)
+    monkeypatch.delenv('R9V_PROFILE_ID', raising=False)
+    monkeypatch.setattr(setup, 'profile_settings', lambda: {
+        'R9V_CED': 'on', 'R9V_CED_QUALITY_PROJECTOR_REL': QUALITY})
+    monkeypatch.setattr(setup, 'container_user_args', lambda: ['--user', '0:0'])
+    monkeypatch.setattr(setup, 'select_devices', lambda b: {})
+    monkeypatch.setattr(setup.shutil, 'which', lambda name: '/usr/bin/' + name)
+    calls = []
+    def run(command, **kwargs):
+        command = [str(c) for c in command]
+        calls.append(command)
+        if command[:2] == ['hf', 'download']:
+            (model / command[3]).parent.mkdir(parents=True, exist_ok=True)
+            (model / command[3]).write_bytes(b'quality')
+        return SimpleNamespace(stdout='sha256:image\n')
+    monkeypatch.setattr(setup, 'run', run)
+    args = SimpleNamespace(image='local:test', local_image=True, build=False, accept_model_license=True,
+                           gpu_bdfs=None, model_dir=str(model), data_dir=None, ple_path=None, hash=False)
+    return args, model, calls
+
+
+def downloads(calls):
+    return [command[3] for command in calls if command[:2] == ['hf', 'download']]
+
+
+def test_setup_with_ced_quality_downloads_only_then_its_projector(tmp_path, monkeypatch):
+    args, model, calls = quality_repo(tmp_path, monkeypatch, published=True)
+    state = {}
+
+    setup.setup(SimpleNamespace(**vars(args), ced='quality'), state, tmp_path / 'setup.json')
+
+    assert downloads(calls) == [QUALITY]
+    assert state['config']['R9V_CED'] == 'quality'
+    assert QUALITY in state['artifacts']
+
+
+def test_setup_without_ced_quality_never_downloads_its_projector(tmp_path, monkeypatch):
+    args, model, calls = quality_repo(tmp_path, monkeypatch, published=True)
+    state = {}
+
+    setup.setup(SimpleNamespace(**vars(args), ced=None), state, tmp_path / 'setup.json')
+
+    assert downloads(calls) == []
+    assert state['config']['R9V_CED'] == 'on'
+    assert QUALITY not in state['artifacts']
+
+
+def test_setup_with_an_unpublished_quality_projector_refuses_before_any_download(tmp_path, monkeypatch):
+    args, model, calls = quality_repo(tmp_path, monkeypatch, published=False)
+
+    with pytest.raises(ValueError, match=f'Cannot download {QUALITY}: not published yet'):
+        setup.setup(SimpleNamespace(**vars(args), ced='quality'), {}, tmp_path / 'setup.json')
+
+    assert downloads(calls) == []
+    assert not any(command[:2] == ['docker', 'run'] for command in calls)
+
+
+def test_start_with_ced_quality_before_setup_fetched_it_refuses_and_keeps_the_saved_mode(tmp_path, monkeypatch):
+    select_uncensored(monkeypatch)
+    monkeypatch.setattr(setup, 'run', lambda *a, **k: pytest.fail('launched without the quality projector'))
+    state = {'ready': True, 'artifacts': {}, 'config': {
+        'R9V_CED': 'on', 'R9V_CED_QUALITY_PROJECTOR_REL': QUALITY}}
+
+    with pytest.raises(ValueError, match='Run setup again with --ced quality'):
+        setup.start(SimpleNamespace(ced='quality', timeout=10, state_dir=tmp_path), state, tmp_path / 'setup.json')
+
+    assert state['config']['R9V_CED'] == 'on'
+
+
+def test_ced_quality_is_refused_for_a_runtime_without_it(tmp_path, monkeypatch):
+    monkeypatch.setenv('R9V_PROFILE_ROOT', str(UNCENSORED.parent / 'dual-r9700-mtp4'))
+    monkeypatch.setenv('R9V_PROFILE_ID', 'qwen38-flash-next/ud-iq4-xs/dual-r9700-mtp4-128k')
+    monkeypatch.setattr(setup, 'run', lambda *a, **k: pytest.fail('side effect before refusal'))
+
+    with pytest.raises(ValueError, match='--ced quality: .* has no CED quality'):
+        setup.start(SimpleNamespace(ced='quality', timeout=10, state_dir=tmp_path),
+                    {'ready': True, 'config': {}}, tmp_path / 'setup.json')
+
+
+@pytest.mark.parametrize('value', ['quality', 'on', 'off'])
+def test_cli_accepts_each_ced_mode(tmp_path, monkeypatch, value):
+    import sys
+    select_uncensored(monkeypatch)
+    seen = []
+    monkeypatch.setattr(setup, 'start', lambda args, state, path: seen.append(args.ced))
+    monkeypatch.setattr(sys, 'argv', ['setup_profile.py', 'start', '--state-dir', str(tmp_path), '--ced', value])
+
+    assert setup.main() == 0
+    assert seen == [value]
+
+
+def test_cli_refuses_an_unknown_ced_mode_with_the_choices(tmp_path, monkeypatch, capsys):
+    import sys
+    select_uncensored(monkeypatch)
+    monkeypatch.setattr(sys, 'argv', ['setup_profile.py', 'start', '--state-dir', str(tmp_path), '--ced', 'high'])
+
+    with pytest.raises(SystemExit):
+        setup.main()
+    error = capsys.readouterr().err
+    assert "argument --ced: invalid choice: 'high'" in error
+    assert "quality" in error

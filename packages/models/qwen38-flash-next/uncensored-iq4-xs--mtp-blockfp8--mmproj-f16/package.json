@@ -83,6 +83,19 @@
       "required": true
     },
     {
+      "role": "ced-projector",
+      "path": "ced/ced-projector-split16-msfa-int8.safetensors",
+      "bytes": 1917121464,
+      "sha256": "516299a812ed8f988b23dd0091135e33c919e549d0769cb2ab5f2da89ddbf2eb",
+      "required": false,
+      "distribution": {
+        "status": "prepared",
+        "repository": "Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS",
+        "revision": null,
+        "note": "Only for --ced quality. Hashed locally from the file staged for upload; not published yet, so setup refuses --ced quality until a revision is pinned here."
+      }
+    },
+    {
       "role": "tokenizer",
       "path": "metadata/tokenizer.json",
       "bytes": 12809320,

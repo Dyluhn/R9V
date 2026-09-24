@@ -14,7 +14,7 @@ from pathlib import Path
 PLE_NAME = "per_layer_token_embd.iq4_nl.bin"
 PLE_BYTES = 28_800_138_240
 # One compiled configuration took 0.9-1.2 GiB in the reference host's vLLM
-# cache; CED on and CED off compile separately, so allow for both.
+# cache; CED off, on and quality compile separately, so allow for all three.
 COMPILE_CACHE_BYTES = 4 * 1024**3
 # The README's measured ~50 GiB for the public bundle plus its containerd image
 # store, less the ~10.6 GiB of bundle parts that setup keeps in its data directory.
