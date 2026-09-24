@@ -8,6 +8,8 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 
 **Current status:** both IQ4_XS and Q4_K_XL MTP4 profiles passed ordinary public setup, first-start workload qualification and unchanged-receipt restart on the dual-R9700 reference host. Both profiles remain experimental. Each first start passed all seven checks at 131,072 context, including a 130,941-token prompt, with at least 3 GiB free VRAM per GPU. Setup selects the profile's runtime image bundle, verifies every part and loads the exact image ID. The Q4 profile uses the [v0.2.0-rc2 bundle](https://github.com/Dyluhn/R9V/releases/tag/v0.2.0-rc2-images); the IQ4 profile's WMMA-prefill image (`release/image-bundle-wmma-prefill-20260915.json`) is published under the [`v0.3.0-rc1-images`](https://github.com/Dyluhn/R9V/releases/tag/v0.3.0-rc1-images) release tag. See [release status and evidence](docs/qwen-release-candidate.md).
 
+**New in v0.4.1:** `qwen38-mtp4-uncensored` keeps rank 1's 400 most-used experts per layer in VRAM for good, so its host copy of the experts drops from 55.4 to 40.3 GiB and it needs 56.3 GiB of free RAM at start instead of 71.4. In the GPU test its outputs matched 1.3.0 bit for bit on the test prompts and decode speed was unchanged. `./r9v doctor` also checks disk space, VRAM held by other programs, API exposure, the runtime's pinned files and the CED projector. See the [changelog](CHANGELOG.md).
+
 **New in v0.4.0:** `qwen38-mtp4-uncensored` runs an uncensored (abliterated) IQ4_XS model on the consolidated 1.3.0 runtime with CED long-prompt prefill on by default. Its public fetch, setup, first-start qualification and restart passed from a clean checkout on the reference host, with CED on and off. See [its qualification note](docs/qualification/uncensored-v040.md).
 
 ## Profiles and features
@@ -16,7 +18,7 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 |---|---|---|---|
 | `qwen38-mtp4` | [IQ4_XS model bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
 | `qwen38-q4-xl` | [Q4_K_XL weights](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-Q4_K_XL) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
-| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime: MTP4, dual R9700, 128K context, CED on | Reference setup/start/restart passed |
+| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime with host expert dedupe: MTP4, dual R9700, 128K context, CED on; needs 56.3 GiB free RAM at start | v0.4.0 reference setup/start/restart passed; v0.4.1 runtime GPU-tested, clean install pending |
 
 **About `qwen38-mtp4-uncensored`.** Its model had its refusal behavior removed and will comply with harmful requests the original model refuses. Use it for research, and add your own moderation before exposing it to anyone. R9V serves it on 127.0.0.1 only; setting `R9V_HOST_BIND` to expose it gives anyone who can reach the port an unauthenticated model with no refusals.
 
@@ -54,7 +56,7 @@ The reference system uses:
 
 - Two **32 GiB Radeon AI PRO R9700** cards (`gfx1201`).
 - Linux with working AMD GPU drivers, `amd-smi`, `/dev/kfd` and `/dev/dri` access.
-- **128 GiB host RAM**. Smaller hosts are untested; cold expert allocations use host memory.
+- **128 GiB host RAM**. Smaller hosts are untested; cold expert allocations use host memory. `qwen38-mtp4-uncensored` checks for **56.3 GiB available** before start (was 71.4 GiB in v0.4.0): its host expert copy is 40.3 GiB plus a 16 GiB PLE reserve.
 - An asymmetric PCIe layout: rank 0 on Gen5 x16 and rank 1 across Gen4 x4. GPU ordering matters to placement and performance.
 - Git, Python 3.10+, Docker and the Hugging Face CLI described in the [installation guide](docs/installation.md).
 

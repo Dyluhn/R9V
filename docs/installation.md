@@ -125,8 +125,13 @@ setup, first start and restart passed on the reference host
 ([results](qualification/uncensored-v040.md)).
 
 It uses its own model package (about 92.4 GiB, including the CED projector),
-the consolidated 1.3.0 runtime (the IQ4 profile's image plus SHA-256-pinned
-overlays) and a fixed expert placement. Use new model and state directories:
+the consolidated 1.3.0 runtime with host expert dedupe (the IQ4 profile's image
+plus SHA-256-pinned overlays) and a fixed expert placement. Start needs
+56.3 GiB of RAM available: the host copy of the experts takes 40.3 GiB (rank 1
+keeps its 400 most-used experts per layer in VRAM, so the host holds only the
+rest), plus a 16 GiB reserve for the PLE table. Nothing on the host has to be
+changed for it; it runs on stock rootless Docker. Use new model and state
+directories:
 
 ```bash
 export MODEL_DIR=/fast-storage/qwen38-uncensored
