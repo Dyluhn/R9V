@@ -131,8 +131,8 @@
     "ced_on": true,
     "ced_off": true
   },
-  "short_decode_ms_per_step": {
-    "method": "3 greedy 400-token answers, one run each, streamed; wall time between first and last content chunk divided by MTP draft steps",
+  "decode_after_start_ms_per_step": {
+    "method": "first 3 greedy 400-token answers after start and qualification, one run each, streamed; wall time between first and last content chunk divided by MTP draft steps",
     "ced_on": [
       47.18,
       48.88,
@@ -143,7 +143,20 @@
       37.97,
       39.53
     ],
-    "note": "CED on was slower at the same MTP acceptance; the earlier deployed-service A/B did not show this; not yet explained"
+    "note": "The first ~1,200 decode tokens after a fresh start run slower while caches warm up (about 45–49 ms/step with CED on, 38–41 with CED off). Warm decode with CED on measured 34.3 ms/step, matching the deployed service, where loading the projector showed no steady-state decode cost. Warm CED-off decode was not re-measured in the clean install.",
+    "warm_ced_on_rerun": {
+      "ms_per_step": [
+        34.43,
+        34.05,
+        34.76,
+        34.31,
+        34.27,
+        34.29
+      ],
+      "median": 34.3,
+      "method": "same 3 prompts x 2 rounds in the same CED-on container, identical accepted tokens per step",
+      "saved_to_file": false
+    }
   },
   "scope": "Reference host (2x Radeon AI PRO R9700, 128 GiB RAM) with its deployed service stopped. Fresh recursive clone, new model, data, cache and state directories, public package downloaded without a Hugging Face token. First start qualified the fixed placement with CED on; switching to --ced off qualified again; an unchanged restart reused its receipt. The launcher at this commit published the API on all interfaces; later v0.4.0 commits publish on 127.0.0.1."
 }

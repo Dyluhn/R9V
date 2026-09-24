@@ -92,10 +92,15 @@ Summary with hashes:
 | `--ced off` | qualified again on the next start and passed (minimum free VRAM 3.824 / 4.115 GiB); no projector loaded, no CED on the 12,960-token prompt |
 | Unchanged restart | reused the receipt: no second qualification, ready in 167 s |
 
-Short decode in the same checks (three 400-token greedy answers, one run each)
-took 47.2 ms/step (median) with CED on and 39.5 ms/step with CED off, at the
-same MTP acceptance. The deployed-service comparison above found no decode cost
-from the projector; this gap is not explained yet.
+The first ~1,200 decode tokens after a fresh start run slower while caches warm
+up (about 45–49 ms/step with CED on, 38–41 with CED off). Warm decode with CED
+on measured 34.3 ms/step, matching the deployed service, where loading the
+projector showed no steady-state decode cost. (The first three 400-token
+answers after start and qualification took 47.18 / 48.88 / 44.78 ms/step with
+CED on and 40.52 / 37.97 / 39.53 with CED off; the same three prompts, run
+twice more in the CED-on container with identical tokens, took 34.05–34.76,
+median 34.30. That re-run was not saved to a file, and warm CED-off decode was
+not re-measured in the clean install.)
 
 ## Known limitations
 
@@ -103,9 +108,9 @@ from the projector; this gap is not explained yet.
   exactly. The projector was fitted on English-heavy code, docs and prose of up
   to ~20K tokens, and only a 2,048-token exact tail was graded.
 - `int8` projector precision is accepted but was never run on the GPU.
-- Short decode was slower with CED on than off in the clean-host checks (see
-  above), measured once. If decode speed matters more than long-prompt
-  prefill, compare with `--ced off` on your host.
+- Decode warm-up after start: the first ~1,200 decode tokens after a fresh
+  start run slower (about 45–49 ms/step with CED on, 38–41 with CED off) until
+  caches warm up.
 - The API has no authentication. R9V publishes it on 127.0.0.1 only unless
   `R9V_HOST_BIND` names another address; do not expose this model without
   authentication and moderation in front of it.
