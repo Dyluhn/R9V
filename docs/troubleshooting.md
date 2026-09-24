@@ -22,7 +22,7 @@ profile state.
 | Rootless Docker is in use | Follow Docker's [rootless mode guide](https://docs.docker.com/engine/security/rootless/), confirm the selected context/socket with `docker info`, and verify the containerd image-store check above. |
 | Normal-zone pressure warning | Free host memory or reduce CPU-offloaded residency. Swap does not satisfy pinned-RAM requirements. |
 | Requested headroom shortfall | Preserve every per-rank shortfall. Change the target deliberately or use the release seed to plan it; the resulting placement still needs local workload qualification. |
-| Startup or JIT timeout | Increase `--timeout`, inspect `docker logs --tail 200 r9v-qwen38-flash-next`, and check image, model, PLE, and cache space. |
+| Startup or JIT timeout | Start waits 900 seconds by default, 2,400 for `qwen38-mtp4-uncensored`. Increase `--timeout`, inspect `docker logs --tail 200 r9v-qwen38-flash-next`, and check image, model, PLE, and cache space. |
 | Existing container blocks startup | Inspect the exact named container, save diagnostics, then deliberately stop/remove that container before retrying. |
 | Runtime worker or transport failure | Keep the container running long enough to collect startup evidence; run `./r9v doctor PROFILE -- --runtime` and inspect worker identity and HIP-visible BDFs. |
 | Support request | Run `./r9v doctor PROFILE --state-dir DIR` first, then `./r9v support PROFILE --state-dir DIR`; treat the bundle as private and do not publish prompts, completions, raw token IDs, or logs. |

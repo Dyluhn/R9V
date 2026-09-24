@@ -401,6 +401,12 @@ def build_parser() -> argparse.ArgumentParser:
                       "  --expert-catalog FILE   measured cold-to-hot expert map\n"
                       "  --state-dir DIR         isolated resumable state directory\n"
                       "  --image IMAGE [--local-image]  select a pinned/prebuilt runtime")
+        elif action == "start":
+            epilog = ("Profile options forwarded to setup_profile.py:\n"
+                      "  --timeout SECONDS       readiness wait: 900, or 2400 for a full mutable\n"
+                      "                          expert cache (qwen38-mtp4-uncensored)\n"
+                      "  --ced on|off            CED long-prompt prefill, for profiles that ship it\n"
+                      "  --state-dir DIR         the state directory setup used")
         elif action == "support":
             epilog = ("Support options forwarded to support_bundle.py:\n"
                       "  --state-dir DIR         select the profile's setup state\n"

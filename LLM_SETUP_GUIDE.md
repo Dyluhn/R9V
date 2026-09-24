@@ -73,12 +73,13 @@ moderation before exposing it to anyone. Leave it on 127.0.0.1: do not set
 `R9V_HOST_BIND` for this profile unless authentication and moderation stand in
 front of the port. It needs its own model directory
 (about 92.4 GiB) and state directory. Setup downloads and verifies the package
-itself; the first start compiles the model, so give it a long timeout:
+itself; the first start compiles the model, and start waits up to 2,400
+seconds for this profile by default (`--timeout` overrides it):
 
 ```bash
 ./r9v setup qwen38-mtp4-uncensored --model-dir "$MODEL_DIR" \
   --state-dir "$STATE_DIR" --accept-model-license
-./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR" --timeout 2400
+./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR"
 ```
 
 It runs the consolidated 1.3.0 runtime with CED (approximate long-prompt

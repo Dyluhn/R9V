@@ -112,13 +112,12 @@ For Q4, use its own model and state directories:
 ./r9v start qwen38-q4-xl --state-dir /path/to/r9v-state/q4
 ```
 
-For the uncensored profile, use its own directories and give the first start time to compile the model:
+For the uncensored profile, use its own directories. Its first start compiles the model, so start waits up to 2,400 seconds for it by default (`--timeout` changes that):
 
 ```bash
 ./r9v setup qwen38-mtp4-uncensored --model-dir /path/to/qwen-uncensored \
   --state-dir /path/to/r9v-state/uncensored --accept-model-license
-./r9v start qwen38-mtp4-uncensored --state-dir /path/to/r9v-state/uncensored \
-  --timeout 2400
+./r9v start qwen38-mtp4-uncensored --state-dir /path/to/r9v-state/uncensored
 ```
 
 Run one profile at a time. Before switching, inspect `docker ps`, save any needed support evidence, and stop the selected R9V container by its exact name using `docker stop NAME`. Setup supports `--reuse-from /path/to/existing/assets` for matching assets and `--ple-path /path/to/existing/ple.bin` for an existing verified PLE file. The profiles select their corresponding expert catalog and reference memory seed automatically.

@@ -202,6 +202,13 @@ def fixed_placement(profile):
     return bool(relative) and json.loads((ROOT / relative).read_text()).get('fixed') is True
 
 
+def default_timeout(profile):
+    """Seconds start waits for readiness. A full mutable expert cache compiles cold on first start."""
+    relative = profile.get('descriptors', {}).get('placement')
+    placement = json.loads((ROOT / relative).read_text()) if relative else {}
+    return 2400 if 'full_mutable_cache' in placement else 900
+
+
 def check_profile_options(args, profile):
     """Refuse options this profile cannot honor, before any side effect."""
     replanning = [option for option, name in (('--headroom', 'headroom'), ('--calibration', 'calibration'),
@@ -529,7 +536,9 @@ def main():
     parser.add_argument('--ced', choices=['on', 'off'], help='CED long-prompt prefill for profiles that ship it; saved for later starts')
     parser.add_argument('--accept-model-license', action='store_true')
     parser.add_argument('--hash', action='store_true', help='rehash all artifacts, ignoring verification receipts')
-    parser.add_argument('--timeout', type=int, default=900)
+    parser.add_argument('--timeout', type=int, default=default_timeout(selected),
+                        help='seconds start waits for readiness: 900, or 2400 for a profile with a '
+                             'full mutable expert cache, whose first start compiles cold')
     args = parser.parse_args()
     if not 1 <= args.timeout <= 86400:
         parser.error('--timeout must be 1..86400 seconds')
