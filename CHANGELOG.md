@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.4.1 (unreleased)
+## v0.4.1 (2026-09-24)
 
 ### `qwen38-mtp4-uncensored`: smaller host expert copy
 
@@ -45,7 +45,32 @@ New checks, each with a fix that needs no root or host changes:
 - `tools/image_bundle.py --verify-only` downloads and verifies an image
   bundle without loading it.
 
-### Before release
+- `./r9v COMMAND PROFILE --state-dir DIR -- ARGS` no longer passes the `--` on to
+  the tool; before, `soak ... -- --decode-speed FILE` and
+  `doctor ... -- --runtime` failed with "unrecognized arguments".
 
-- The clean-install GPU test of this runtime (fetch, setup, first start with
-  CED on and off, restart) has not run yet.
+### Upgrading from v0.4.0
+
+- The runtime changed, so an existing install qualifies again once on its
+  first start (a few minutes); later restarts reuse the new receipt.
+
+### Clean-install GPU test (reference host, 2026-09-24)
+
+Fresh clone, fetch, verify, setup, first start with CED on and off, and an
+unchanged restart all passed:
+
+- First start (cold compile, CED on): ready in 387 s; qualification passed
+  all 7 checks, including a 130,941-token prompt. Peak shared host memory
+  41.7 GiB.
+- Warm decode 36.8 ms/step on the soak prompt mix (prose about 35.8).
+- CED prefill speedup 1.52x at 12,970 tokens and 1.82x at 32,145 tokens. An
+  exact request after a CED request was bitwise identical to a fresh exact run.
+- Unchanged restart reused the receipt and was ready in 177 s; the
+  running-server doctor had 0 FAIL.
+
+### Known issue
+
+- Right after a first start, `./r9v doctor --runtime` can report
+  `runtime-kv-pressure` FAIL: qualification's own 130,941-token prompt is
+  preempted a few times (it still completes and passes). The counter resets on
+  restart, and the doctor is then clean. Planned for v0.4.2.
