@@ -336,6 +336,32 @@ def test_start_qualifies_new_placement_once_and_rechecks_changed_evidence(tmp_pa
     assert sum('--qualify' in command for command in calls) == 2
 
 
+def test_start_records_the_rewinds_qualification_caused_in_this_container(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    monkeypatch.setenv('R9V_CAPTURE_AUTO', '0')
+    placement = tmp_path / 'plan.json'
+    placement.write_text('{"schema":"fixture","counts":[300,310]}')
+    state = {'ready': True, 'config': {'R9V_PLACEMENT_PLAN': str(placement)}}
+    def run(command, **kwargs):
+        command = list(map(str, command))
+        if '--qualify' in command:
+            output = Path(command[command.index('--output') + 1])
+            output.mkdir()
+            (output / 'result.json').write_text('{"passed":true}')
+        if command[:2] == ['docker', 'exec']:
+            return SimpleNamespace(stdout='{"total_preemptions": 7}')
+        if '{{.Id}}' in command:
+            return SimpleNamespace(stdout='abc123\n')
+        return SimpleNamespace(stdout='running')
+    monkeypatch.setattr(setup, 'run', run)
+    monkeypatch.setattr(setup.urllib.request, 'urlopen', lambda *a, **k: nullcontext(SimpleNamespace(status=200)))
+
+    setup.start(SimpleNamespace(timeout=10, state_dir=tmp_path), state, tmp_path / 'setup.json')
+
+    saved = json.loads((tmp_path / 'setup.json').read_text())
+    assert saved['qualification']['preemptions'] == {'container_id': 'abc123', 'count': 7}
+
+
 def test_reuse_across_quants_links_only_hash_matching_assets(tmp_path):
     old, new = tmp_path / 'old', tmp_path / 'new'
     old.mkdir()
