@@ -1,5 +1,63 @@
 # Changelog
 
+## v0.4.3 (2026-09-24)
+
+### `qwen38-mtp4-uncensored`: `--ced quality` now fits next to the vision encoder
+
+- `--ced quality` now passes first-start qualification on the reference host,
+  with image support kept. In v0.4.2 it failed there: GPU 0 fell to 0.90 GiB
+  free against the 1.5 GiB target.
+- Measured on the compiled server, two things made the difference:
+  - The vision encoder's weights (0.42 GiB per GPU) and the quality projector
+    (1.79 GiB per GPU) were both in VRAM all the time, although no step ever
+    uses both: image and video prompts never use CED. They now take turns in
+    one VRAM region per GPU, sized for the projector. Both stay in pinned host
+    RAM, and the region is refilled when the other one is needed: the
+    projector before an approximate prefill chunk, the vision encoder before
+    an image is encoded. A swap takes 36 ms (projector) and 9 ms (vision) on
+    GPU 0 (PCIe Gen5 x16), and 266 ms and 63 ms on GPU 1 (Gen4 x4); it happens
+    only when a CED prompt follows an image or the other way round.
+  - Each approximate chunk made two 400 MiB bf16 copies of the projector's
+    int8 "final" map. The maps are now dequantized at most 2,560 rows at a
+    time, in place. The KV and GDN state CED writes is bitwise unchanged;
+    the "final" output, which only the MTP drafter reads, differs in rounding.
+
+  The region alone brought GPU 0 from 0.84 to 1.25 GiB free; the smaller
+  dequantization buffers did the rest.
+- Clean-install GPU test on the reference host (fresh clone, setup and first
+  start with `--ced quality`, desktop apps holding 1.23 GiB of GPU 0):
+
+  | | v0.4.3 `quality` | v0.4.2 `quality` | v0.4.3 `on` |
+  |---|---|---|---|
+  | Min free VRAM in qualification, GPU 0 / GPU 1 | **2.04 / 2.49 GiB** (passes) | 0.90 / 1.77 GiB (failed) | 1.65 / 2.12 GiB |
+  | Prefill speedup, ~12.8K tokens | 1.47× | 1.49× | 1.58× |
+  | Prefill speedup, ~32K tokens | 1.62× | 1.64× | 1.76× |
+  | Warm decode (ms/step) | 35.8–41.6 | 38.4–39.1 | 36.0–43.2 |
+  | MTP tokens/step, answer after a CED prefill vs exact | −6% | −6% | |
+
+  Decode is the same path in every mode; the spread is host noise. 24
+  alternating long-CED and image requests (a new image each time) swapped 24
+  times with VRAM flat (GPU 0 free 2,088 MiB throughout) and read every
+  image's text correctly. A long CED request with 3 image requests sent
+  during it: all completed (the images waited for the prefill, about 11 s).
+  The vision encoder's output was bitwise identical to `--ced on`'s (no
+  shared region) for 8 test images, before and after swaps (checked with a
+  development build that logs a hash of it); the text answers to the same
+  image vary slightly between server starts in every mode, as exact outputs
+  already did. Exact requests after a CED request were bitwise identical to
+  fresh exact runs, repeated greedy runs were identical, and nothing compiled
+  after the first CED request. `on` and `off` qualified in the same session
+  and an unchanged restart reused its receipt (ready in 177 s).
+- Start needs 4.50 GiB more available RAM with `--ced quality` (60.8 GiB
+  instead of 56.3): every TP rank keeps pinned host copies of the projector
+  and of its share of the vision encoder, in 64 MiB slabs. The doctor adds
+  them to the start check and says so. Measured: 4.2 GiB less available RAM
+  at peak than `on`.
+- `on` and `off` are unchanged: the shared region is only in the CED quality
+  model file, which is mounted only with `--ced quality`.
+- Upgrading: the runtime descriptor changed, so an existing install qualifies
+  again once on its next start, in any CED mode.
+
 ## v0.4.2 (2026-09-24)
 
 ### `qwen38-mtp4-uncensored`: CED quality mode (opt-in)
