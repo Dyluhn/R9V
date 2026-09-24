@@ -33,6 +33,7 @@ try:
     from tools.expert_budget import expert_memory, headroom_bytes, cost_catalog, runtime_cache_limit, validate_cost_contract
     from tools.profile_checks import (
         ced_projector_vram,
+        ced_quality_host_bytes,
         check_ced_projector,
         check_expert_limits,
         check_runtime_overlays,
@@ -51,6 +52,7 @@ except ModuleNotFoundError:
     from expert_budget import expert_memory, headroom_bytes, cost_catalog, runtime_cache_limit, validate_cost_contract
     from profile_checks import (
         ced_projector_vram,
+        ced_quality_host_bytes,
         check_ced_projector,
         check_expert_limits,
         check_runtime_overlays,
@@ -834,6 +836,9 @@ def _check_host_memory(
             "Use non-negative integer byte counts for the named RAM setting.",
         )
         return
+    ced_host = ced_quality_host_bytes()
+    if minimum_available and ced_host:
+        minimum_available += ced_host  # CED quality's pinned projector and vision weights
     message = f"total {_human_bytes(total)}, available {_human_bytes(available)}"
     if minimum_total and total < minimum_total:
         reporter.fail(
@@ -846,10 +851,14 @@ def _check_host_memory(
         reporter.fail(
             "host-memory",
             f"{message}; below the {_human_bytes(minimum_available)} this profile needs "
-            "available before start",
+            "available before start"
+            + (f" (with CED quality's {_human_bytes(ced_host)} of pinned host copies)" if ced_host else ""),
             "Close memory-heavy programs (including another model server) and rerun. "
             "Lowering R9V_MIN_HOST_AVAILABLE_BYTES risks swapping during the model load.",
         )
+    elif ced_host and not runtime:
+        reporter.passed("host-memory", f"{message}; start needs {_human_bytes(minimum_available)}, with CED "
+                        f"quality's {_human_bytes(ced_host)} of pinned host copies")
     else:
         reporter.passed("host-memory", message)
     if reference and total < reference:

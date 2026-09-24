@@ -875,3 +875,35 @@ def test_decode_policy_accepts_wmma_prefill_group_32(monkeypatch, group_size, st
 
     decode = [check for check in reporter.checks if check.name == "decode-policy"]
     assert [check.status for check in decode] == [status]
+
+
+def test_ced_quality_raises_the_available_ram_start_needs_by_its_host_copies(tmp_path, monkeypatch):
+    from tools import profile_doctor as doctor
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "meminfo").write_text(f"MemTotal: {120 * 1024**2} kB\nMemAvailable: {58 * 1024**2} kB\n")
+    monkeypatch.setenv("R9V_MIN_HOST_AVAILABLE_BYTES", str(56 * 1024**3))
+    monkeypatch.setattr(doctor, "ced_quality_host_bytes", lambda: 4 * 1024**3)
+    reporter = doctor.Reporter()
+
+    doctor._check_host_memory(reporter, proc)
+
+    check = next(c for c in reporter.checks if c.name == "host-memory")
+    assert check.status == "FAIL"
+    assert "below the 60.00 GiB" in check.message and "CED quality's 4.00 GiB" in check.message
+
+
+def test_ced_quality_host_copies_leave_a_start_with_enough_ram_passing(tmp_path, monkeypatch):
+    from tools import profile_doctor as doctor
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "meminfo").write_text(f"MemTotal: {120 * 1024**2} kB\nMemAvailable: {61 * 1024**2} kB\n")
+    monkeypatch.setenv("R9V_MIN_HOST_AVAILABLE_BYTES", str(56 * 1024**3))
+    monkeypatch.setattr(doctor, "ced_quality_host_bytes", lambda: 4 * 1024**3)
+    reporter = doctor.Reporter()
+
+    doctor._check_host_memory(reporter, proc)
+
+    check = next(c for c in reporter.checks if c.name == "host-memory")
+    assert check.status == "PASS"
+    assert "start needs 60.00 GiB" in check.message

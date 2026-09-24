@@ -503,3 +503,31 @@ def test_disk_space_without_a_model_directory_is_a_note(monkeypatch):
     host_preflight.check_disk_space(reporter, ROOT, UNCENSORED, lambda command: completed())
 
     assert statuses(reporter, "disk-space") == ["NOTE"]
+
+
+def test_ced_quality_says_its_projector_shares_vram_with_the_vision_encoder(tmp_path, monkeypatch):
+    repo = quality_setup(tmp_path, monkeypatch, safetensors(SPLIT16, {"split": "16", "sources": MSFA_SOURCES}))
+    reporter = Reporter()
+
+    profile_checks.check_ced_projector(reporter, repo, UNCENSORED)
+
+    assert "shares with the vision encoder's weights" in only(reporter, "ced-projector").message
+
+
+def test_ced_quality_host_copies_are_the_projector_per_rank_plus_the_mmproj(tmp_path, monkeypatch):
+    payload = safetensors(SPLIT16)
+    quality_setup(tmp_path, monkeypatch, payload)
+    mmproj = Path(os.environ["R9V_MODEL_DIR"]) / "vision/mmproj.gguf"
+    mmproj.parent.mkdir()
+    mmproj.write_bytes(b"\0" * 1000)
+    monkeypatch.setenv("R9V_MMPROJ_REL", "vision/mmproj.gguf")
+    monkeypatch.setenv("R9V_TENSOR_PARALLEL_SIZE", "2")
+
+    assert profile_checks.ced_quality_host_bytes() == 2 * len(payload) + 1000
+
+
+def test_ced_on_holds_no_host_copies(tmp_path, monkeypatch):
+    projector_setup(tmp_path, monkeypatch, safetensors(SPLIT16))
+    monkeypatch.setenv("R9V_MMPROJ_REL", "vision/mmproj.gguf")
+
+    assert profile_checks.ced_quality_host_bytes() == 0
