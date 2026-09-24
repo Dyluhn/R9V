@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -305,3 +306,129 @@ def test_load_timeout_bounds_child_that_never_reads(tmp_path):
     script.chmod(0o755)
     with pytest.raises(image_bundle.ImageBundleError, match="timed out"):
         image_bundle.load_bundle(value, cache, docker=(str(script),), timeout=0.05)
+
+
+class _Body:
+    """A urlopen response that returns one body, then EOF."""
+
+    status = 200
+    headers: dict = {}
+
+    def __init__(self, body):
+        self.body = body
+
+    def read(self, n):
+        chunk, self.body = self.body, b""
+        return chunk
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+def _two_part_manifest(tmp_path, first=b"docker-save-", second=b"payload"):
+    value, _ = _manifest(tmp_path)
+    part = dict(value["parts"][0])
+    value["parts"] = [
+        {**part, "name": "part-000.gz", "bytes": len(first),
+         "sha256": hashlib.sha256(first).hexdigest()},
+        {**part, "name": "part-001.gz", "bytes": len(second),
+         "sha256": hashlib.sha256(second).hexdigest(),
+         "url": part["url"].replace("part-000", "part-001")},
+    ]
+    value["bytes"] = len(first + second)
+    value["sha256"] = hashlib.sha256(first + second).hexdigest()
+    path = tmp_path / "bundle.json"
+    path.write_text(json.dumps(value))
+    return path, {"part-000.gz": first, "part-001.gz": second}
+
+
+def _serve(monkeypatch, bodies):
+    monkeypatch.setattr(
+        image_bundle.urllib.request, "urlopen",
+        lambda request, timeout=60: _Body(bodies[request.full_url.rsplit("/", 1)[1]]),
+    )
+
+
+def _forbid_docker(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("--verify-only must not run docker")
+
+    monkeypatch.setattr(image_bundle.subprocess, "Popen", refuse)
+    monkeypatch.setattr(image_bundle.subprocess, "run", refuse)
+
+
+def test_verify_only_downloads_and_verifies_every_part_without_docker(tmp_path, monkeypatch, capsys):
+    manifest, bodies = _two_part_manifest(tmp_path)
+    _serve(monkeypatch, bodies)
+    _forbid_docker(monkeypatch)
+    cache = tmp_path / "cache"
+
+    code = image_bundle.main([str(manifest), "--cache-dir", str(cache), "--verify-only"])
+
+    assert code == 0
+    assert (cache / "part-000.gz").read_bytes() == b"docker-save-"
+    assert (cache / "part-001.gz").read_bytes() == b"payload"
+    out = capsys.readouterr().out
+    assert "Downloading image bundle part 2/2: part-001.gz" in out
+    assert "PASS 2 parts and the reassembled archive" in out
+    assert "not loaded into Docker" in out
+
+
+def test_verify_only_rejects_a_corrupt_part_and_keeps_nothing(tmp_path, monkeypatch, capsys):
+    manifest, bodies = _two_part_manifest(tmp_path)
+    _serve(monkeypatch, {**bodies, "part-001.gz": b"PAYLOAD"})
+    _forbid_docker(monkeypatch)
+    cache = tmp_path / "cache"
+
+    code = image_bundle.main([str(manifest), "--cache-dir", str(cache), "--verify-only"])
+
+    assert code == 1
+    assert "downloaded part failed verification: part-001.gz" in capsys.readouterr().err
+    assert not (cache / "part-001.gz").exists()
+    assert not (cache / "part-001.gz.part").exists()
+
+
+def test_verify_only_rejects_parts_whose_reassembled_archive_differs(tmp_path, monkeypatch, capsys):
+    manifest, bodies = _two_part_manifest(tmp_path)
+    value = json.loads(manifest.read_text())
+    value["sha256"] = hashlib.sha256(b"payloaddocker-save-").hexdigest()  # parts swapped
+    manifest.write_text(json.dumps(value))
+    _serve(monkeypatch, bodies)
+    _forbid_docker(monkeypatch)
+
+    code = image_bundle.main([str(manifest), "--cache-dir", str(tmp_path / "cache"), "--verify-only"])
+
+    assert code == 1
+    assert "concatenated image bundle failed verification" in capsys.readouterr().err
+
+
+def test_command_without_verify_only_loads_the_verified_parts(tmp_path, monkeypatch, capsys):
+    manifest, bodies = _two_part_manifest(tmp_path)
+    image = json.loads(manifest.read_text())["image_ids"][0]
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    for name, body in bodies.items():
+        (cache / name).write_bytes(body)
+    capture = tmp_path / "loaded"
+    docker = tmp_path / "bin/docker"
+    docker.parent.mkdir()
+    docker.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$2" = load ]; then cat > "{capture}"; exit 0; fi\n'
+        f'[ -f "{capture}" ] && echo {image} && exit 0\n'
+        "exit 1\n"
+    )
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{docker.parent}:{os.environ['PATH']}")
+
+    code = image_bundle.main([str(manifest), "--cache-dir", str(cache)])
+
+    assert code == 0
+    assert capture.read_bytes() == b"docker-save-payload"
+    assert f"PASS Docker has {image}" in capsys.readouterr().out
