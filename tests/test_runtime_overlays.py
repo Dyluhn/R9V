@@ -45,8 +45,14 @@ def test_committed_mtp4_v3_overlays_match_their_pins():
     overlays = runtime_overlays.load(RUNTIME)
 
     assert runtime_overlays.verify(RUNTIME, overlays) == []
-    assert len(overlays["sha256"]) == 15
-    assert set(overlays["mounts"]) == {"always", "ced"}
+    assert len(overlays["sha256"]) == 16
+    assert set(overlays["mounts"]) == {"always", "ced", "ced-quality"}
+
+
+def test_both_ced_model_files_replace_the_same_image_file():
+    mounts = runtime_overlays.load(RUNTIME)["mounts"]
+
+    assert list(mounts["ced"].values()) == list(mounts["ced-quality"].values())
 
 
 def test_tampered_overlays_are_refused_with_every_problem(tmp_path):

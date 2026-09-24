@@ -6,7 +6,8 @@ deployed service, copied byte for byte, except the mutable expert cache (see
 [Host expert dedupe](#host-expert-dedupe)).
 
 - `overlays/`: nine Python files that replace image files on every launch, the
-  CED model file (`model.py`, mounted only with CED on), and four compiled
+  CED model file (`model.py`, mounted only with CED on), the CED quality model
+  file (`model_ced_quality.py`, mounted instead with CED quality), and four compiled
   kernels loaded from the directory mount at `/r9v-full-mutable`: the mutable
   expert cache (`candidate.so`) and the Q8 WMMA prefill kernels (`q8_*.so`).
   `full_mutable_pins.json` lists the experts the cache keeps in VRAM for good.
@@ -47,6 +48,31 @@ sessions: bitwise-identical prompt logprobs on 5 prompts (3K–15K tokens) and
 identical 48-token greedy probes with top-5 logprobs on 2; short-prompt decode
 34.87 vs 34.83 ms/step; a 127,238-token prompt ran; peak shared host memory
 41 GiB instead of 56 GiB.
+
+## CED quality model file
+
+`model_ced_quality.py` replaces the same image file as `model.py`, and only
+with `--ced quality`. It reads the multi-source projector: the split-16
+boundary state plus the block inputs of the full-attention layers 3, 7, 11
+and 15 (the projector file's `sources` metadata). During an approximate chunk
+it keeps those earlier block inputs as they are computed and joins them with
+the boundary state in the declared order. A single-source projector takes the
+unchanged path.
+
+It is the file the multi-source projector was GPU-graded with on 2026-09-24
+(research branch `ced-multisource`, commit `df3d457`, SHA-256
+`d31b7b7f27050df7e98175bedd36a63726d3f14103c0a870497a024e8e7c30f2`), with one
+change in `_ced_load`: a projector file already stored as int8 (int8 maps plus
+`scale.*` and `bias.*`, as `kva/quantize_projector.py` writes them) loads as
+stored instead of being quantized again. The grade loaded the bf16 file and
+quantized it at load. For the shipped int8 file, every tensor the new
+`_ced_load` puts on the GPU is bit-identical to what the graded one did (all
+99 checked on the CPU in the pinned image). `tests/test_ced_quality_overlay.py`
+checks the same on a small projector.
+
+Its only other difference from `model.py` is the research capture's `layers`
+option (inactive unless `R9V_KVA_CAPTURE_DIR` is set, which the launcher never
+sets).
 
 ## Differences from the 1.3.0 package
 
