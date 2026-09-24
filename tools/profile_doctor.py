@@ -845,9 +845,10 @@ def _check_host_memory(
     elif not runtime and minimum_available and available < minimum_available:
         reporter.fail(
             "host-memory",
-            f"{message}; available is below configured minimum",
-            "Stop memory-heavy processes or reduce the explicit "
-            "R9V_MIN_HOST_AVAILABLE_BYTES policy.",
+            f"{message}; below the {_human_bytes(minimum_available)} this profile needs "
+            "available before start",
+            "Close memory-heavy programs (including another model server) and rerun. "
+            "Lowering R9V_MIN_HOST_AVAILABLE_BYTES risks swapping during the model load.",
         )
     else:
         reporter.passed("host-memory", message)
@@ -2050,11 +2051,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         reporter.note("setup-assets", "Model, placement and PLE checks pending installation")
     if not args.runtime and profile_id.startswith("qwen38-flash-next/"):
-        if need is None:
-            try:
-                need = headroom_bytes(os.environ.get("R9V_MIN_FREE_VRAM_GIB_BY_RANK", "3,3"), expected_count)
-            except ValueError:
-                need = None  # vram-headroom-policy already names the bad value
         gpu_ids = {gpu.bdf: gpu.gpu_id for gpu in discover_kfd_gpus(sys_root)}
         check_vram_other_processes(reporter, selected, gpu_ids, sys_root, proc_root, need)
     if args.runtime:

@@ -306,7 +306,7 @@ def _process_name(proc_root: Path, pid: int) -> str:
 def check_vram_other_processes(reporter, selected, gpu_ids, sys_root: Path, proc_root: Path, need) -> None:
     """Before start: name the processes holding VRAM on the selected GPUs. A warning,
     unless the VRAM they leave free is below what R9V needs before launch (need, bytes
-    per rank), which fails."""
+    per rank, or None when unknown without a model directory), which fails."""
     usage = gpu_process_vram(sys_root, proc_root, {gpu.bdf: gpu_ids.get(gpu.bdf) for _, gpu, *_ in selected})
     busy = False
     for rank, gpu, *_ in selected:
@@ -335,6 +335,8 @@ def check_vram_other_processes(reporter, selected, gpu_ids, sys_root: Path, proc
                 + (f" CED is on: {CED_HEADROOM_FIX}." if os.environ.get("R9V_CED") == "on" else ""),
             )
         else:
+            if need is None:
+                message += "; pass --model-dir to compare that with what R9V needs"
             reporter.warn(
                 "vram-other-processes",
                 message,

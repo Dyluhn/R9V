@@ -132,6 +132,16 @@ def test_ced_off_skips_the_projector_check_and_its_vram(tmp_path, monkeypatch):
     assert profile_checks.ced_projector_vram(repo, UNCENSORED) == 0
 
 
+def test_ced_projector_check_waits_for_a_model_directory(tmp_path, monkeypatch):
+    repo = projector_setup(tmp_path, monkeypatch, safetensors(SPLIT16))
+    monkeypatch.delenv("R9V_MODEL_DIR")
+    reporter = Reporter()
+
+    profile_checks.check_ced_projector(reporter, repo, UNCENSORED)
+
+    assert reporter.checks == []
+
+
 def test_int8_projector_takes_half_the_file_in_vram(tmp_path, monkeypatch):
     payload = safetensors(SPLIT16)
     repo = projector_setup(tmp_path, monkeypatch, payload)
@@ -286,6 +296,17 @@ def test_other_process_leaving_too_little_vram_fails(tmp_path):
     check = only(reporter, "vram-other-processes")
     assert check.status == "FAIL"
     assert "below the 20.00 GiB R9V needs" in check.message
+
+
+def test_other_process_without_a_known_need_is_a_warning_that_asks_for_the_model_dir(tmp_path):
+    sys_root, proc_root = fake_gpu_host(tmp_path, {4242: ("VLLM::Worker_TP", 28 * GIB)}, free_bytes=3 * GIB)
+    reporter = Reporter()
+
+    host_preflight.check_vram_other_processes(reporter, SELECTED, IDS, sys_root, proc_root, None)
+
+    check = only(reporter, "vram-other-processes")
+    assert check.status == "WARN"
+    assert "pass --model-dir" in check.message
 
 
 def test_no_other_process_on_the_gpu_passes(tmp_path):

@@ -76,7 +76,8 @@ def _sha256(path: Path) -> str:
 
 def check_ced_projector(reporter, repo_root: Path, profile: dict | None) -> None:
     """CED on: the projector the runtime will load is the pinned file, of the profile's split."""
-    if os.environ.get("R9V_CED", "off") != "on" or profile is None:
+    # Without a model directory the model-package check already reports the missing install.
+    if os.environ.get("R9V_CED", "off") != "on" or profile is None or not os.environ.get("R9V_MODEL_DIR"):
         return
     fix = ("Rerun setup to download the pinned projector and keep the profile's R9V_CED_* "
            "values, or start with --ced off. Never substitute another projector.")
