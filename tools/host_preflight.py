@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import platform
@@ -10,9 +11,18 @@ import shutil
 from pathlib import Path
 
 try:
+    from tools import disk_space
     from tools.expert_budget import headroom_bytes
+    from tools.image_bundle import ImageBundleError, read_manifest
+    from tools.runtime_overlays import CED_HEADROOM_FIX
 except ModuleNotFoundError:
+    import disk_space
     from expert_budget import headroom_bytes
+    from image_bundle import ImageBundleError, read_manifest
+    from runtime_overlays import CED_HEADROOM_FIX
+
+GIB = 1024**3
+MIB = 1024**2
 
 
 def check_resources(
@@ -231,3 +241,172 @@ def check_runtime_arguments(reporter, run, container: str) -> None:
             "runtime-arguments",
             "configured context/concurrency/prefill/KV/TP flags match container launch arguments; this does not inspect worker-internal state",
         )
+
+
+def _read_int(path: Path) -> int | None:
+    try:
+        return int(path.read_text().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _fdinfo_bytes(value: str) -> int:
+    """A DRM fdinfo memory value such as '33828 KiB' in bytes."""
+    number, _, unit = value.strip().partition(" ")
+    scale = {"": 1, "KiB": 1024, "MiB": MIB, "GiB": GIB}.get(unit.strip())
+    return int(number) * scale if number.isdigit() and scale else 0
+
+
+def gpu_process_vram(sys_root: Path, proc_root: Path, gpu_ids: dict[str, int | None]) -> dict[str, dict[int, int]]:
+    """VRAM bytes each process holds on each GPU BDF: compute memory from the KFD
+    per-process sysfs files, graphics memory (desktop, browser) from DRM fdinfo.
+    A compute process appears in both; the larger reading counts. Processes this
+    user cannot inspect are missing."""
+    usage: dict[str, dict[int, int]] = {bdf: {} for bdf in gpu_ids}
+    for process in (sys_root / "class/kfd/kfd/proc").glob("*"):
+        for bdf, gpu_id in gpu_ids.items():
+            value = _read_int(process / f"vram_{gpu_id}") if process.name.isdigit() and gpu_id else None
+            if value:
+                usage[bdf][int(process.name)] = value
+    for process in proc_root.glob("*"):
+        if not process.name.isdigit():
+            continue
+        clients: dict[tuple[str, str], int] = {}
+        try:
+            descriptors = list((process / "fd").iterdir())
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                if not os.readlink(descriptor).startswith("/dev/dri/"):
+                    continue
+                lines = (process / "fdinfo" / descriptor.name).read_text().splitlines()
+            except OSError:
+                continue
+            fields = {key.strip(): value.strip() for key, _, value in (line.partition(":") for line in lines)}
+            bdf = fields.get("drm-pdev")
+            if bdf in usage:
+                size = _fdinfo_bytes(fields.get("drm-total-vram") or fields.get("drm-memory-vram") or "")
+                clients[(bdf, fields.get("drm-client-id", descriptor.name))] = size
+        pid = int(process.name)
+        for bdf in usage:
+            size = sum(value for (client_bdf, _), value in clients.items() if client_bdf == bdf)
+            if size > usage[bdf].get(pid, 0):
+                usage[bdf][pid] = size
+    return usage
+
+
+def _process_name(proc_root: Path, pid: int) -> str:
+    try:
+        return (proc_root / str(pid) / "comm").read_text().strip() or "?"
+    except OSError:
+        return "?"
+
+
+def check_vram_other_processes(reporter, selected, gpu_ids, sys_root: Path, proc_root: Path, need) -> None:
+    """Before start: name the processes holding VRAM on the selected GPUs. A warning,
+    unless the VRAM they leave free is below what R9V needs before launch (need, bytes
+    per rank), which fails."""
+    usage = gpu_process_vram(sys_root, proc_root, {gpu.bdf: gpu_ids.get(gpu.bdf) for _, gpu, *_ in selected})
+    busy = False
+    for rank, gpu, *_ in selected:
+        holders = sorted(((size, pid) for pid, size in usage[gpu.bdf].items()
+                          if size >= MIB and pid != os.getpid()), reverse=True)
+        if not holders:
+            continue
+        busy = True
+        pci = sys_root / "bus/pci/devices" / gpu.bdf
+        total, used = _read_int(pci / "mem_info_vram_total"), _read_int(pci / "mem_info_vram_used")
+        free = total - used if total is not None and used is not None else None
+        named = ", ".join(f"{_process_name(proc_root, pid)} (pid {pid}) {size / GIB:.2f} GiB"
+                          for size, pid in holders[:5])
+        if len(holders) > 5:
+            named += f" and {len(holders) - 5} more"
+        message = (f"rank {rank} {gpu.bdf}: other processes hold {sum(size for size, _ in holders) / GIB:.2f} "
+                   f"GiB: {named}")
+        if free is not None:
+            message += f"; {free / GIB:.2f} GiB free now"
+        if free is not None and need and free < need[rank]:
+            reporter.fail(
+                "vram-other-processes",
+                f"{message}, below the {need[rank] / GIB:.2f} GiB R9V needs free before launch",
+                "Close the apps holding VRAM on this GPU before start, including any R9V or other "
+                "model server that is still running."
+                + (f" CED is on: {CED_HEADROOM_FIX}." if os.environ.get("R9V_CED") == "on" else ""),
+            )
+        else:
+            reporter.warn(
+                "vram-other-processes",
+                message,
+                "Close apps using this GPU (browsers, games, another model server) before start if you "
+                "can; R9V's free-VRAM target has to hold while they keep running.",
+            )
+    if selected and not busy:
+        reporter.passed("vram-other-processes", "no other process holds VRAM on the selected GPUs")
+
+
+def check_api_exposure(reporter, uncensored: bool) -> None:
+    """The API has no authentication: say loudly when it is published beyond this machine."""
+    bind = os.environ.get("R9V_HOST_BIND", "127.0.0.1")
+    port = os.environ.get("R9V_HOST_PORT", "8004")
+    try:
+        address = ipaddress.ip_address(bind)
+    except ValueError:
+        reporter.fail(
+            "api-exposure",
+            f"R9V_HOST_BIND={bind!r} is not an IPv4 or IPv6 address; the launcher refuses it",
+            "Set R9V_HOST_BIND to 127.0.0.1 (this machine only) or to one interface's address, then rerun setup.",
+        )
+        return
+    if address.is_loopback:
+        reporter.passed("api-exposure", f"the API is published on {bind}:{port}, this machine only")
+        return
+    where = "every interface" if address.is_unspecified else f"{bind}"
+    message = (f"THE API IS OPEN TO THE NETWORK: published on {where}, port {port}, with no "
+               "authentication; anyone who can reach this machine can use it")
+    fix = "Put authentication in front of the port, or set R9V_HOST_BIND=127.0.0.1 and rerun setup."
+    if uncensored:
+        message += (". This model's refusals were removed: it will help anyone who reaches the port "
+                    "with harmful requests")
+        fix = ("Do not expose this model without authentication and moderation in front of it; "
+               "otherwise set R9V_HOST_BIND=127.0.0.1 and rerun setup.")
+    reporter.warn("api-exposure", message, fix)
+
+
+def check_disk_space(reporter, repo_root: Path, profile, run) -> None:
+    """Before fetch and setup: the free space the package, PLE table, image bundle
+    and compile cache still need, per filesystem."""
+    model = os.environ.get("R9V_MODEL_DIR")
+    if not model or not profile:
+        reporter.note("disk-space", "no model directory selected; pass --model-dir to check the space fetch and setup need")
+        return
+    model_dir = Path(model).expanduser().resolve()
+    data_dir = Path(os.environ.get("R9V_DATA_DIR") or model_dir / "r9v-data").expanduser()
+    ple = Path(os.environ.get("R9V_PLE_PATH") or data_dir / disk_space.PLE_NAME).expanduser()
+    cache = Path(os.environ.get("R9V_CACHE_DIR") or data_dir / "cache").expanduser()
+    reuse = os.environ.get("R9V_REUSE_FROM")
+    fix = ("Free space on the named filesystem or choose directories with room: --model-dir, "
+           "--data-dir and --ple-path for setup, R9V_CACHE_DIR for the compile cache.")
+    try:
+        package = json.loads((repo_root / profile["descriptors"]["model_package"]).read_text())
+        distribution = profile.get("distribution", {})
+        bundle = docker_root = None
+        if distribution.get("image_bundle"):
+            loaded = run(["docker", "image", "inspect", "--format", "{{.Id}}", distribution["image_id"]])
+            if loaded.returncode != 0:
+                bundle = read_manifest(repo_root / distribution["image_bundle"])
+                info = run(["docker", "info", "--format", "{{.DockerRootDir}}"])
+                docker_root = Path(info.stdout.strip()) if info.returncode == 0 and info.stdout.strip() else None
+        groups = disk_space.by_filesystem(disk_space.install_needs(
+            package, model_dir, data_dir, ple, cache, bundle=bundle, docker_root=docker_root,
+            reuse_dir=Path(reuse).expanduser().resolve() if reuse else None))
+    except (OSError, KeyError, TypeError, ValueError, ImageBundleError) as error:
+        reporter.fail("disk-space", f"cannot estimate the space the installation needs: {error}", fix)
+        return
+    short = [group for group in groups if not group["fits"]]
+    if short:
+        reporter.fail("disk-space", "not enough free space: " + "; ".join(map(disk_space.describe, short)), fix)
+    elif groups:
+        reporter.passed("disk-space", "; ".join(map(disk_space.describe, groups)))
+    else:
+        reporter.passed("disk-space", "package, PLE table, image and compile cache are already in place")

@@ -22,6 +22,8 @@ from pathlib import Path, PurePosixPath
 # ced_config(); the projector comes from the model package instead of a host path.
 CED_CHOICES = {"R9V_CED_PRECISION": ("bf16", "int8"), "R9V_CED_DEFAULT": ("on", "off")}
 CED_MINIMUMS = {"R9V_CED_MIN_PROMPT": 0, "R9V_CED_TAIL": 512}
+# The fix every headroom failure names while the projector is loaded on each GPU.
+CED_HEADROOM_FIX = "the CED projector needs VRAM on each GPU; start with --ced off to leave it unloaded"
 
 
 class OverlayError(ValueError):

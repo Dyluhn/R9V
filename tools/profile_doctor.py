@@ -23,18 +23,40 @@ from typing import Any
 
 try:
     from tools.host_preflight import (
+        check_api_exposure,
+        check_disk_space,
         check_resources,
         check_container_limits,
         check_runtime_arguments,
+        check_vram_other_processes,
     )
     from tools.expert_budget import expert_memory, headroom_bytes, cost_catalog, runtime_cache_limit, validate_cost_contract
+    from tools.profile_checks import (
+        ced_projector_vram,
+        check_ced_projector,
+        check_expert_limits,
+        check_runtime_overlays,
+        load_profile,
+    )
+    from tools.runtime_overlays import CED_HEADROOM_FIX
 except ModuleNotFoundError:
     from host_preflight import (
+        check_api_exposure,
+        check_disk_space,
         check_resources,
         check_container_limits,
         check_runtime_arguments,
+        check_vram_other_processes,
     )
     from expert_budget import expert_memory, headroom_bytes, cost_catalog, runtime_cache_limit, validate_cost_contract
+    from profile_checks import (
+        ced_projector_vram,
+        check_ced_projector,
+        check_expert_limits,
+        check_runtime_overlays,
+        load_profile,
+    )
+    from runtime_overlays import CED_HEADROOM_FIX
 
 
 PLE_EXPECTED_BYTES = 28_800_138_240
@@ -109,6 +131,8 @@ class KfdGpu:
     gfx_target: int
     render_minor: int | None
     node_id: int | None = None
+    # KFD's own GPU id; names the per-process VRAM files under /sys/class/kfd/kfd/proc.
+    gpu_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -238,6 +262,7 @@ def discover_kfd_gpus(sys_root: Path = Path("/sys")) -> list[KfdGpu]:
                     if properties.parent.name.isdigit()
                     else None
                 ),
+                gpu_id=_read_first_int(properties.parent / "gpu_id"),
             )
         )
     # Numeric HIP_VISIBLE_DEVICES/ROCR_VISIBLE_DEVICES values address GPU
@@ -1234,10 +1259,13 @@ def _check_manifest_budget(
     sys_root: Path = Path("/sys"),
     proc_root: Path = Path("/proc"),
     runtime: bool = False,
-) -> None:
+    ced_vram: int = 0,
+) -> list[int] | None:
+    """Expert counts and byte budgets. Returns the VRAM each rank needs free before
+    launch (experts, KV, the CED projector when loaded, and the requested margin)."""
     model_dir = os.environ.get("R9V_MODEL_DIR")
     if not model_dir or expected_count < 2:
-        return
+        return None
     relative = os.environ.get(
         "R9V_MANIFEST_REL",
         "manifests/hot-manifest-q4-vision-128k-multiprompt-r1-lru16-neutral.json",
@@ -1257,7 +1285,7 @@ def _check_manifest_budget(
             "Use the manifest shipped in the model package or set "
             "R9V_MANIFEST_REL to a compatible packaged manifest.",
         )
-        return
+        return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         slots = int(os.environ.get("R9V_TIERED_EXPERT_CACHE_SLOTS", "0"))
@@ -1289,7 +1317,7 @@ def _check_manifest_budget(
             f"cannot validate {path}: {error}",
             "Restore the verified package manifest; do not hand-edit expert IDs or counts.",
         )
-        return
+        return None
     effective = [
         count + budgets[rank]["cache_physical_slots"] for rank, count in enumerate(hot)
     ]
@@ -1332,13 +1360,18 @@ def _check_manifest_budget(
             str(error),
             "Correct the byte count or per-rank GiB values.",
         )
-        return
+        return None
     if kv:
         reporter.warn(
             "manual-kv-budget",
             f"fixed KV allocation is {kv / 1024**3:.3f} GiB per rank; this bypasses vLLM's normal available-memory sizing",
             "Qualify peak memory with the exact context, prefill batch, MTP, image size and graph settings. Changing gpu_memory_utilization alone does not cap this configuration.",
         )
+    floors = [
+        budget["static_packed_bytes"] + budget["cache_packed_bytes"] + kv + ced_vram + margins[rank]
+        for rank, budget in enumerate(budgets)
+    ]
+    parts = "experts + KV + CED projector + requested free margin" if ced_vram else "experts + KV + requested free margin"
     for rank, gpu, *_ in selected:
         total = _read_first_int(
             sys_root / "bus/pci/devices" / gpu.bdf / "mem_info_vram_total"
@@ -1348,23 +1381,18 @@ def _check_manifest_budget(
         )
         if total is None or used is None or runtime:
             continue
-        budget = budgets[rank]
-        floor = (
-            budget["static_packed_bytes"]
-            + budget["cache_packed_bytes"]
-            + kv
-            + margins[rank]
-        )
+        floor = floors[rank]
         if floor > total - used:
             reporter.fail(
                 "vram-budget-floor",
-                f"rank {rank}: experts + KV + requested free margin already need {floor / 1024**3:.2f} GiB, but only {(total - used) / 1024**3:.2f} GiB is free before launch",
-                "Reduce hot residency/cache use or free other GPU allocations; dense/MTP/vision weights and temporary allocations still need additional space.",
+                f"rank {rank}: {parts} already need {floor / 1024**3:.2f} GiB, but only {(total - used) / 1024**3:.2f} GiB is free before launch",
+                "Reduce hot residency/cache use or free other GPU allocations; dense/MTP/vision weights and temporary allocations still need additional space."
+                + (f" CED is on: {CED_HEADROOM_FIX}." if ced_vram else ""),
             )
         else:
             reporter.note(
                 "vram-budget-unallocated",
-                f"rank {rank}: {(total - used - floor) / 1024**3:.2f} GiB remains for dense/MTP/vision weights, graphs, workspaces and allocator overhead after experts, KV and requested margin; fit is not certified",
+                f"rank {rank}: {(total - used - floor) / 1024**3:.2f} GiB remains for dense/MTP/vision weights, graphs, workspaces and allocator overhead after {parts.replace(' + ', ', ')}; fit is not certified",
             )
     pinned = sum(b["cold_pinned_packed_bytes"] for b in budgets)
     if os.environ.get("R9V_PLE_RESIDENCY_MODE", "ssd") == "pinned":
@@ -1393,6 +1421,7 @@ def _check_manifest_budget(
         f"cold experts plus pinned PLE: {pinned / 1024**3:.2f} GiB; {master_note}",
         note="These are components at different loading phases, not a measured peak or complete host budget. PLE is not counted twice from GGUF file size.",
     )
+    return floors
 
 
 def _check_model_package(reporter: Reporter, repo_root: Path, profile_id: str) -> None:
@@ -1988,21 +2017,46 @@ def main(argv: list[str] | None = None) -> int:
     _check_normal_zone_pressure(reporter, proc_root)
     _check_host_cpu(reporter, sys_root, proc_root)
     _check_profile_policy(reporter, expected_count, selected)
+    try:
+        profile = load_profile()
+    except (OSError, ValueError) as error:
+        profile = None
+        reporter.fail(
+            "profile-descriptor",
+            f"cannot read the selected profile: {error}",
+            "Run the doctor through ./r9v doctor PROFILE, or restore R9V_PROFILE_ROOT/profile.json.",
+        )
+    check_runtime_overlays(reporter)
+    check_expert_limits(reporter, repo_root, profile)
+    check_api_exposure(reporter, bool((profile or {}).get("features", {}).get("uncensored")))
+    if not args.runtime:
+        check_disk_space(reporter, repo_root, profile, _run)
+    need = None
     if not args.host_only:
         _check_release_assets(reporter, repo_root)
         _check_placement_plan(reporter, runtime=args.runtime)
-        _check_manifest_budget(
+        need = _check_manifest_budget(
             reporter,
             expected_count,
             selected=selected,
             sys_root=sys_root,
             proc_root=proc_root,
             runtime=args.runtime,
+            ced_vram=ced_projector_vram(repo_root, profile),
         )
         _check_ple_storage(reporter, args.hash_ple)
         _check_model_package(reporter, repo_root, profile_id)
+        check_ced_projector(reporter, repo_root, profile)
     else:
         reporter.note("setup-assets", "Model, placement and PLE checks pending installation")
+    if not args.runtime and profile_id.startswith("qwen38-flash-next/"):
+        if need is None:
+            try:
+                need = headroom_bytes(os.environ.get("R9V_MIN_FREE_VRAM_GIB_BY_RANK", "3,3"), expected_count)
+            except ValueError:
+                need = None  # vram-headroom-policy already names the bad value
+        gpu_ids = {gpu.bdf: gpu.gpu_id for gpu in discover_kfd_gpus(sys_root)}
+        check_vram_other_processes(reporter, selected, gpu_ids, sys_root, proc_root, need)
     if args.runtime:
         _check_runtime(reporter, expected_count)
         _check_runtime_identity(reporter, selected)
