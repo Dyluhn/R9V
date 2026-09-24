@@ -135,6 +135,23 @@ def test_doctor_uses_setup_state_and_preserves_explicit_overrides(tmp_path, monk
     assert env['R9V_HOST_PORT'] == '8124'
 
 
+def test_state_dir_before_separator_is_not_forwarded_with_the_separator(tmp_path, monkeypatch):
+    # The documented form: `./r9v soak PROFILE --state-dir DIR -- --decode-speed FILE`.
+    from tools import r9v
+    from types import SimpleNamespace
+    monkeypatch.delenv('R9V_CONFIG_FILE', raising=False)
+    observed = []
+    monkeypatch.setattr(r9v.subprocess, 'run', lambda command, **kwargs:
+                        observed.append(command) or SimpleNamespace(returncode=0))
+    for action, tool_args in (('soak', ['--decode-speed', 'speed.json']), ('doctor', ['--runtime'])):
+        observed.clear()
+        assert r9v.main([action, 'qwen38-mtp4-uncensored', '--state-dir', str(tmp_path),
+                         '--', *tool_args]) == 0
+        command = observed[0]
+        assert '--' not in command and '--state-dir' not in command
+        assert command[-len(tool_args):] == tool_args
+
+
 def test_q4_fetch_and_verify_select_its_own_package():
     for command in ("fetch", "verify"):
         result = run_cli(command, "qwen38-q4-xl", "--dry-run")

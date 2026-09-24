@@ -1,7 +1,7 @@
 {
   "schema": "r9v.runtime.v1",
   "id": "qwen38-flash-next-gfx1201-mtp4-v3",
-  "name": "consolidated 1.3.0",
+  "name": "consolidated 1.3.0 with host expert dedupe",
   "engine": "vllm-rocm",
   "targets": [
     "gfx1201"
@@ -56,8 +56,9 @@
     "directory": "overlays",
     "directory_target": "/r9v-full-mutable",
     "sha256": {
-      "candidate.so": "7ab65dd56fd3a7d2f05ef279baf976affd90b138f80a018ddf79eac11902b394",
-      "full_mutable_cache.py": "f7b177f29248ade3437150c963f9ef64b1a9f74811a89641e69eeab2af6e2aa7",
+      "candidate.so": "ebd7bd39c59f9a54aa6945b636906b1ecc16ed63f62fe39639078c6dc225b4f7",
+      "full_mutable_cache.py": "974acf6f49c347c61ce8d95c6dc8c79c8df9714f58d991622b1c099f1b77068e",
+      "full_mutable_pins.json": "537d7d5b1368fe31057fa07f1114ed1ceec89cff8172192ad6e8945ed7c05cff",
       "fused_moe.py": "99dd5c4c70b344fd3d260445e41134abac59b45552db255c1f9f7836053c342e",
       "iq4nl.py": "dad61baf464bc1b6cc0c237e9e65407658ae605ce6b0c3cf52defc0cae3c7efc",
       "linear.py": "68d523eabc33c6ce2d3b5b50540ccfd7c2b7446a3c1bd0532f9d788ab03c76d9",
@@ -67,8 +68,8 @@
       "q8_wmma.so": "0b1243a30fd2770c6e5d66800e9b6674f7227f2e88accb27bbb1eb802251b5e9",
       "qsa.py": "8ed2a6479b3a7d6290c76685d916c332a129efbb1ac3ad8fd95a457d0b1ee72b",
       "scheduler.py": "d83315412eb8a5fa114ec397fde96a4a3a1f906b3f554bf79a1a30315f2c8ea7",
-      "tiered_compaction.py": "9ff7435855dc4ae610f7064998d15024de80099646ab6800ff91a7614588a757",
-      "tiered_experts.py": "cd14175ad8f6b7e5fee8f5ba732358f7b5945ed90c26fbd11d2ab986b4377b86",
+      "tiered_compaction.py": "ccb353a29512feddf68d43029ac8df6afe070e722c76fbedd7eb7236379edc0d",
+      "tiered_experts.py": "5ae84c3c168e7739fe1bbfa2e032c4022ef415269a3bc23c52741c62d4b3017c",
       "vocal_embeds.py": "6a1df6a55125f24113b8e48b089f706b6ffd8ebc339d296bb5d12641bf7ae54f"
     },
     "mounts": {
@@ -90,6 +91,7 @@
     "env": {
       "always": {
         "R9V_FULL_MUTABLE_CACHE": "1",
+        "R9V_FULL_MUTABLE_PINS": "/r9v-full-mutable/full_mutable_pins.json",
         "R9V_FULL_MUTABLE_SO": "/r9v-full-mutable/candidate.so",
         "R9V_Q8_PREFILL_COMBINED": "1",
         "R9V_Q8_PREFILL_TOKEN64": "1"
@@ -103,6 +105,6 @@
   },
   "qualification": {
     "status": "pending",
-    "note": "The overlays are byte-identical to the consolidated 1.3.0 package that runs as the reference host's deployed service. Public setup, first-start qualification and restart from a clean checkout are pending."
+    "note": "The consolidated 1.3.0 overlays, byte for byte, except the full mutable expert cache: rank 1 pins its 400 most-routed experts per layer (full_mutable_pins.json) and its host copy holds only the other 112. That runtime was GPU-tested on the reference host on 2026-09-24 against 1.3.0: bitwise-identical outputs on 5 prompts and 2 greedy probes, unchanged decode, a 127K-token prompt, and peak shared host memory 41 GiB instead of 56 GiB. Public setup, first-start qualification and restart from a clean checkout are pending."
   }
 }

@@ -734,8 +734,9 @@ uses these settings on top of the ones above. Setup saves them; change CED with
 | `R9V_CED_DEFAULT` | `on` | `on`: requests that do not say get CED above the minimum. `off`: only requests with `r9v_ced: true`. |
 | `R9V_PREFIX_CACHE_RETENTION_INTERVAL` | `1616` | Prefix-cache checkpoint interval, the scheduler's block boundary on this image. |
 | `R9V_MIN_FREE_VRAM_GIB_BY_RANK` | `1.5,1.5` | Lowered from 3,3 because the loaded projector takes 1.76 GiB per GPU. The clean-host first-start qualification measured a minimum of 1.771 / 2.087 GiB free with CED on. |
-| `R9V_MIN_HOST_AVAILABLE_BYTES` | `76699664384` | Available RAM before launch: every expert pinned on the host (59.5 GB) plus the 16 GiB PLE reserve. |
+| `R9V_MIN_HOST_AVAILABLE_BYTES` | `60424720384` | Available RAM before launch, 56.3 GiB: the mutable cache's host expert copy (40.3 GiB: every expert for rank 0, the 112 per layer rank 1 does not pin) plus the 16 GiB PLE reserve. The GPU test's peak draw was 49 GiB, so about 7 GiB stays spare. Was 71.4 GiB before v0.4.1. |
 | `R9V_EXPERT_MANIFEST_PATH` | the fixed `mtp4-warmstart-r1/manifest.json` | Pinned by SHA-256 in `mtp4-full-mutable.json`. The mutable expert cache refuses any other placement. |
+| `R9V_FULL_MUTABLE_PINS` (set by the runtime) | `/r9v-full-mutable/full_mutable_pins.json` | The experts rank 1 keeps in VRAM for good, 400 per layer; its host copy omits them. SHA-256 pinned in `runtime.json` and again in the runtime, which refuses any other list. |
 
 Requests choose per call with `vllm_xargs`: `r9v_ced` (`true` forces CED even
 below the minimum, `false` keeps the request exact) and `r9v_ced_tail` (this

@@ -125,23 +125,38 @@ setup, first start and restart passed on the reference host
 ([results](qualification/uncensored-v040.md)).
 
 It uses its own model package (about 92.4 GiB, including the CED projector),
-the consolidated 1.3.0 runtime (the IQ4 profile's image plus SHA-256-pinned
-overlays) and a fixed expert placement. Use new model and state directories:
+the consolidated 1.3.0 runtime with host expert dedupe (the IQ4 profile's image
+plus SHA-256-pinned overlays) and a fixed expert placement. Start needs
+56.3 GiB of RAM available: the host copy of the experts takes 40.3 GiB (rank 1
+keeps its 400 most-used experts per layer in VRAM, so the host holds only the
+rest), plus a 16 GiB reserve for the PLE table. Nothing on the host has to be
+changed for it; it runs on stock rootless Docker. Use new model and state
+directories:
 
 ```bash
 export MODEL_DIR=/fast-storage/qwen38-uncensored
 export STATE_DIR=/fast-storage/r9v-state/uncensored
 ./r9v setup qwen38-mtp4-uncensored --model-dir "$MODEL_DIR" \
   --state-dir "$STATE_DIR" --accept-model-license
-./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR" --timeout 2400
+./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR"
 ```
 
 Setup downloads and SHA-256 verifies every package file, extracts the PLE
 table, loads the pinned image and checks the host; `fetch` and `verify` work as
 for the other profiles if you prefer to download first. The first start
-compiles the model, so it needs a longer `--timeout` than the default 900
-seconds. It then qualifies the placement once; an unchanged restart reuses the
-receipt.
+compiles the model, so for this profile start waits up to 2,400 seconds by
+default instead of 900 (`--timeout SECONDS` changes it). It then qualifies the
+placement once; an unchanged restart reuses the receipt.
+
+To record decode speed, run this right after start; it saves the numbers
+right after start and once warm as JSON (a new file):
+
+```bash
+./r9v soak qwen38-mtp4-uncensored --state-dir "$STATE_DIR" -- --decode-speed decode-speed.json
+```
+
+The first ~1,200 decode tokens after a fresh start run slower while caches
+warm up, so compare the warm median, not the first round.
 
 **CED is on by default.** On prompts of 8,192 tokens or more, layers 0–15 run
 exactly and the split-16 projector predicts the later layers for all but the
@@ -178,7 +193,7 @@ not a substitute for the released image identity.
 | Wrong GPU order or BDF mismatch | Run `amd-smi list`, then rerun setup with `--gpu-bdfs BDF0,BDF1`. |
 | Insufficient requested headroom | Preserve the per-rank shortfalls. Adjust the target deliberately or let the release seed plan it; complete local workload qualification afterward. |
 | Host normal-zone pressure | Free host memory or reduce CPU-offloaded residency; swap does not satisfy pinned-RAM requirements. |
-| Startup/JIT timeout | Increase `--timeout` (the uncensored profile's first start needs about `--timeout 2400`), inspect retained Docker logs, and check image/cache space before retrying. |
+| Startup/JIT timeout | Start waits 900 seconds by default, 2,400 for the uncensored profile. Increase `--timeout`, inspect retained Docker logs, and check image/cache space before retrying. |
 | `runtime overlay problem` at launch | An overlay file under `runtimes/` no longer matches its pinned SHA-256. Restore the checkout (`git status`, `git checkout -- runtimes/`) instead of editing the file. |
 | Existing container | Inspect the exact named container, save diagnostics, then deliberately stop/remove it before retrying. |
 | Support needed | Run `./r9v support PROFILE --state-dir DIR`; keep the bundle private. |

@@ -17,9 +17,11 @@ from pathlib import Path
 
 try:
     from tools import capture_runtime as capture
+    from tools import decode_speed
     from tools.support_bundle import collect
 except ModuleNotFoundError:
     import capture_runtime as capture
+    import decode_speed
     from support_bundle import collect
 
 
@@ -113,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
         help="comma-separated corpus sizes, not token counts",
     )
     parser.add_argument("--max-tokens", type=int, default=256)
+    parser.add_argument(
+        "--decode-speed",
+        type=Path,
+        metavar="FILE",
+        help="instead of a soak: measure decode ms/step after start and warm, save it to FILE (new)",
+    )
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--sequence", type=int, default=0, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -136,6 +144,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         )
+        return 0
+    if args.decode_speed is not None:
+        try:
+            result = decode_speed.measure(args.port, args.model, args.decode_speed,
+                                          os.environ.get("R9V_PROFILE_ID"), os.environ.get("R9V_CED"))
+        except (OSError, RuntimeError, ValueError, KeyError, http.client.HTTPException) as error:
+            print(f"Decode measurement failed: {error}")
+            return 1
+        print(f"warm decode median {result['warm_median_ms_per_step']} ms/step; saved to {args.decode_speed}")
         return 0
     if args.output is None:
         parser.error("--output is required")

@@ -401,6 +401,18 @@ def build_parser() -> argparse.ArgumentParser:
                       "  --expert-catalog FILE   measured cold-to-hot expert map\n"
                       "  --state-dir DIR         isolated resumable state directory\n"
                       "  --image IMAGE [--local-image]  select a pinned/prebuilt runtime")
+        elif action == "start":
+            epilog = ("Profile options forwarded to setup_profile.py:\n"
+                      "  --timeout SECONDS       readiness wait: 900, or 2400 for a full mutable\n"
+                      "                          expert cache (qwen38-mtp4-uncensored)\n"
+                      "  --ced on|off            CED long-prompt prefill, for profiles that ship it\n"
+                      "  --state-dir DIR         the state directory setup used")
+        elif action == "soak":
+            epilog = ("Soak options forwarded to soak_runtime.py:\n"
+                      "  --output DIR            new evidence directory for a soak\n"
+                      "  --duration SECONDS      soak length (default 7200)\n"
+                      "  --decode-speed FILE     instead: decode ms/step right after start and\n"
+                      "                          warm, saved as JSON to FILE (run right after start)")
         elif action == "support":
             epilog = ("Support options forwarded to support_bundle.py:\n"
                       "  --state-dir DIR         select the profile's setup state\n"
@@ -533,8 +545,11 @@ def main(argv: list[str] | None = None) -> int:
 
         profile = resolve_profile(args.profile, profiles)
         verify_profile_graph(profile)
-        if remainder and remainder[0] == "--":
-            remainder = remainder[1:]
+        # Options such as --state-dir may come before the `--` separator
+        # (`soak P --state-dir DIR -- --decode-speed FILE`); drop the separator
+        # wherever it is, or the forwarded tool rejects everything after it.
+        if "--" in remainder:
+            remainder.remove("--")
         return run_profile_command(
             profile,
             args.command,

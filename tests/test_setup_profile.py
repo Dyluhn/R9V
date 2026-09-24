@@ -439,3 +439,21 @@ def test_fixed_placement_qualifies_first_start_and_requalifies_when_ced_changes(
     assert saved['config']['R9V_CED'] == 'off'
     assert saved['qualification']['ced'] == 'off'
     assert saved['qualification']['placement_sha256'] == hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(('profile', 'default'), [('dual-r9700-mtp4-uncensored', 2400),
+                                                  ('dual-r9700-mtp4', 900)])
+def test_start_timeout_defaults_to_2400_s_only_for_the_full_mutable_cache_and_keeps_the_override(
+        tmp_path, monkeypatch, profile, default):
+    import sys
+    root = UNCENSORED.parent / profile
+    monkeypatch.setenv('R9V_PROFILE_ROOT', str(root))
+    monkeypatch.setenv('R9V_PROFILE_ID', json.loads((root / 'profile.json').read_text())['id'])
+    monkeypatch.delenv('R9V_CONFIG_FILE', raising=False)
+    waits = []
+    monkeypatch.setattr(setup, 'start', lambda args, state, path: waits.append(args.timeout))
+    for override in ([], ['--timeout', '600']):
+        monkeypatch.setattr(sys, 'argv', ['setup_profile.py', 'start', '--state-dir', str(tmp_path), *override])
+        assert setup.main() == 0
+
+    assert waits == [default, 600]

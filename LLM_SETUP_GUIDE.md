@@ -73,24 +73,31 @@ moderation before exposing it to anyone. Leave it on 127.0.0.1: do not set
 `R9V_HOST_BIND` for this profile unless authentication and moderation stand in
 front of the port. It needs its own model directory
 (about 92.4 GiB) and state directory. Setup downloads and verifies the package
-itself; the first start compiles the model, so give it a long timeout:
+itself; the first start compiles the model, and start waits up to 2,400
+seconds for this profile by default (`--timeout` overrides it):
 
 ```bash
 ./r9v setup qwen38-mtp4-uncensored --model-dir "$MODEL_DIR" \
   --state-dir "$STATE_DIR" --accept-model-license
-./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR" --timeout 2400
+./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR"
 ```
 
-It runs the consolidated 1.3.0 runtime with CED (approximate long-prompt
-prefill) on by default: about 1.5x faster prefill at ~13K tokens, rising to
+Start needs 56.3 GiB of RAM available (the host copy of the experts is
+40.3 GiB, plus a 16 GiB PLE reserve); if the doctor's `host-memory` check
+fails, ask the user to close memory-heavy programs rather than lowering the
+floor. It runs the consolidated 1.3.0 runtime with host expert dedupe and CED
+(approximate long-prompt prefill) on by default: about 1.5x faster prefill at ~13K tokens, rising to
 about 1.8x at 32K tokens and above,
 about x1.051 perplexity on prompts that depend on long context, and about 10%
 fewer MTP tokens per step on the first answer after a CED prefill. Decode is
 exact. `--ced off` in setup or start turns CED off; one request can stay exact
 with `"vllm_xargs": {"r9v_ced": false}`. The profile uses a fixed expert
 placement: do not pass `--headroom`, `--calibration` or `--expert-catalog`;
-they are refused. Its public setup, first start and restart passed on the
-reference host; see
+they are refused. Its v0.4.0 public setup, first start and restart passed on
+the reference host; see
 [docs/qualification/uncensored-v040.md](docs/qualification/uncensored-v040.md).
+To record decode speed for the user, run
+`./r9v soak qwen38-mtp4-uncensored --state-dir "$STATE_DIR" -- --decode-speed FILE`
+right after start.
 
 Full command details: [docs/installation.md](docs/installation.md).

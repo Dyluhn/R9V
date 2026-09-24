@@ -26,7 +26,7 @@ build.mkdir(parents=True, exist_ok=True)
 spec_file = root / "BUILD_SPEC.json"
 assert spec_file.exists(), f"BUILD_SPEC.json missing at {spec_file}"
 spec = json.loads(spec_file.read_text())
-EXPECTED_SOURCES = {'full_mutable_device.h': 'd26391659acc69e912e265089b83ee02cc1e32942b47bf90ac088a08a9eee998', 'full_mutable_device.cu': '2c646cf4c63f480e43d832066a14f241bba83c5134593f55a3f41adfc2234c6a', 'native_cpu_shim.cpp': '1c39efd85f3d50e022f8e02efb7918c75b68ef40f9053add3d8d20c013f9d665', 'coop_choice.h': 'c1c3a828a389b3a0a07ca56d6061e02b66626844edd3dbd249b3ad38db1604d1'}
+EXPECTED_SOURCES = {'full_mutable_device.h': '50ec939e29bda017c2c5d63fbde276bc28701f843d5a79dc6e74aa0814b27fb7', 'full_mutable_device.cu': '64d47d052de98b8591e457dce0cdb927a586e7fae05263808636882c31afdb90', 'native_cpu_shim.cpp': '1c39efd85f3d50e022f8e02efb7918c75b68ef40f9053add3d8d20c013f9d665', 'coop_choice.h': 'c1c3a828a389b3a0a07ca56d6061e02b66626844edd3dbd249b3ad38db1604d1'}
 manifest = spec.get("source_manifest")
 assert manifest == EXPECTED_SOURCES, "Exact source manifest missing or altered"
 for filename, expected_sha in manifest.items():

@@ -123,7 +123,7 @@ __global__ void device_planner_kernel(
     CoopChoice best{INT64_MAX, INT_MAX, 2};
     for (int s = t; s < capacity; s += THREADS) {
       if (tags[s] < 0) best = better_choice(best, CoopChoice{0, s, 0});
-      else if (!protected_slot[s]) best = better_choice(best, CoopChoice{clocks[s], s, 1});
+      else if (s >= pinned_slots(rank) && !protected_slot[s]) best = better_choice(best, CoopChoice{clocks[s], s, 1});
     }
     choices[t] = best;
     __syncthreads();
@@ -180,6 +180,7 @@ __global__ void parallel_gather_kernel(
     const uint8_t* __restrict__ arena_ptr,
     const uint8_t* __restrict__ cold_w13,
     const uint8_t* __restrict__ cold_w2,
+    const int* __restrict__ cold_map,
     uint8_t* __restrict__ hot_w13,
     uint8_t* __restrict__ hot_w2,
     uint8_t* __restrict__ cache_w13,
@@ -208,9 +209,15 @@ __global__ void parallel_gather_kernel(
     return;
   }
 
-  // Resolve source pointers (from full 512 UVA host backing)
-  const uint8_t* src_w13 = cold_w13 + static_cast<int64_t>(cand) * w13_expert_bytes;
-  const uint8_t* src_w2 = cold_w2 + static_cast<int64_t>(cand) * w2_expert_bytes;
+  // Resolve source pointers through the host copy's row index. Pinned experts have no
+  // host row; the planner never admits them because their slots are never evicted.
+  const int row = cold_map[cand];
+  if (row < 0) {
+    if (blockIdx.x == 0 && threadIdx.x == 0) atomicAdd(reinterpret_cast<unsigned long long*>(&p.counters[kCounterIdxInvalidRouteCount]), 1ULL);
+    return;
+  }
+  const uint8_t* src_w13 = cold_w13 + static_cast<int64_t>(row) * w13_expert_bytes;
+  const uint8_t* src_w2 = cold_w2 + static_cast<int64_t>(row) * w2_expert_bytes;
 
   // Resolve destination pointers (hot buffer or cache buffer)
   uint8_t* dst_w13 = nullptr;
@@ -456,8 +463,9 @@ void full_mutable_device_step(
   TORCH_CHECK(cold_w13.dim() == 3 && cold_w2.dim() == 3 &&
               hot_w13.dim() == 3 && hot_w2.dim() == 3,
               "weight tensors must be 3D [slots, rows, bytes_per_row]");
-  TORCH_CHECK(cold_w13.size(0) == kNumExperts && cold_w2.size(0) == kNumExperts,
-              "cold weights must have full 512 expert backing");
+  TORCH_CHECK(cold_w13.size(0) == kNumExperts - pinned_slots(rank) &&
+              cold_w2.size(0) == kNumExperts - pinned_slots(rank),
+              "host expert copy must hold every expert except this rank's pinned ones");
 
   const int expected_hot = (rank == 0) ? kRank0HotSlots : kRank1HotSlots;
   TORCH_CHECK(hot_w13.size(0) == expected_hot && hot_w2.size(0) == expected_hot,
@@ -525,6 +533,7 @@ void full_mutable_device_step(
       arena.data_ptr<uint8_t>(),
       cold_w13.data_ptr<uint8_t>(),
       cold_w2.data_ptr<uint8_t>(),
+      cold_map.data_ptr<int>(),
       hot_w13.data_ptr<uint8_t>(),
       hot_w2.data_ptr<uint8_t>(),
       cache_w13_ptr,

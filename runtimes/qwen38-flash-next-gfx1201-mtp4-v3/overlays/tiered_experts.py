@@ -300,6 +300,7 @@ def _compact_expert_parameter(
     parameter: torch.nn.Parameter,
     hot_ids: list[int],
     num_experts: int,
+    host_ids: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
     validate_expert_master(parameter, num_experts)
     if not getattr(parameter, "_vllm_is_uva_offloaded", False):
@@ -316,7 +317,7 @@ def _compact_expert_parameter(
         hot_ids,
         num_experts,
         device,
-        retain_full_host_owner=full_mutable_cache.enabled(),
+        host_ids=host_ids,
         cold_empty=(
             allocate_tiered_cold_host_empty
             if _stream_compaction_enabled()
@@ -407,12 +408,14 @@ def materialize_hot_expert_cache(
             if hasattr(module, "_gguf_cache_w13"):
                 dynamic_cache_bytes += module._gguf_cache_w13.numel() + module._gguf_cache_w2.numel()
             continue
-        hot_ids = full_mutable_cache.hot_ids_for_rank(hot_lists[layer_id], rank)
+        hot_ids = full_mutable_cache.hot_ids_for_rank(hot_lists[layer_id], rank, layer_id)
+        host_ids = (full_mutable_cache.host_ids(rank, layer_id)
+                    if full_mutable_cache.enabled() else None)
         hot_w13, hot_map, cold_map, w13_hot, w13_cold = _compact_expert_parameter(
-            module.w13_qweight, hot_ids, num_experts
+            module.w13_qweight, hot_ids, num_experts, host_ids
         )
         hot_w2, w2_hot_map, w2_cold_map, w2_hot, w2_cold = _compact_expert_parameter(
-            module.w2_qweight, hot_ids, num_experts
+            module.w2_qweight, hot_ids, num_experts, host_ids
         )
         if not torch.equal(hot_map, w2_hot_map) or not torch.equal(
             cold_map, w2_cold_map

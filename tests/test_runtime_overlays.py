@@ -45,7 +45,7 @@ def test_committed_mtp4_v3_overlays_match_their_pins():
     overlays = runtime_overlays.load(RUNTIME)
 
     assert runtime_overlays.verify(RUNTIME, overlays) == []
-    assert len(overlays["sha256"]) == 14
+    assert len(overlays["sha256"]) == 15
     assert set(overlays["mounts"]) == {"always", "ced"}
 
 
@@ -88,6 +88,7 @@ def test_ced_off_mounts_the_always_group_without_ced_files_or_environment():
     assert not any("model.py" in volume for volume in volumes)
     assert sorted(environment) == [
         "R9V_FULL_MUTABLE_CACHE=1",
+        "R9V_FULL_MUTABLE_PINS=/r9v-full-mutable/full_mutable_pins.json",
         "R9V_FULL_MUTABLE_SO=/r9v-full-mutable/candidate.so",
         "R9V_Q8_PREFILL_COMBINED=1",
         "R9V_Q8_PREFILL_TOKEN64=1",

@@ -1,7 +1,14 @@
-"""Verified, streaming loader for Docker save archives split into parts."""
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Verified, streaming loader for Docker save archives split into parts.
+
+Setup calls load_bundle(). As a command, it downloads and verifies a bundle and
+loads it into Docker, or with --verify-only stops before Docker.
+"""
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -9,6 +16,7 @@ import re
 import selectors
 import shutil
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -220,7 +228,8 @@ def ensure_parts(
     if root.is_symlink():
         raise ImageBundleError("cache directory must not be a symlink")
     root = root.resolve()
-    for part in manifest["parts"]:
+    count = len(manifest["parts"])
+    for number, part in enumerate(manifest["parts"], start=1):
         path = root / part["name"]
         if path.is_symlink() or (path.exists() and not path.is_file()):
             raise ImageBundleError(f"cache path is not a regular file: {part['name']}")
@@ -241,6 +250,11 @@ def ensure_parts(
                     os.replace(partial, path)
                     continue
                 partial.unlink()
+            print(
+                f"Downloading image bundle part {number}/{count}: {part['name']} "
+                f"({part['bytes'] / 1024**3:.2f} GiB)",
+                flush=True,
+            )
             _download(part["url"], partial, part["bytes"])
             with partial.open("rb") as stream:
                 digest, size = _sha256(stream)
@@ -356,3 +370,34 @@ def load_bundle(
             f"loaded image ID mismatch: expected {expected}, got {found}"
         )
     return expected
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("manifest", type=Path, help="bundle descriptor, e.g. release/image-bundle-*.json")
+    parser.add_argument("--cache-dir", type=Path, required=True,
+                        help="directory for the downloaded parts; needs the bundle's size free")
+    parser.add_argument("--verify-only", action="store_true",
+                        help="download missing parts, verify every part and the reassembled "
+                             "archive, and stop before docker image load")
+    parser.add_argument("--image-id", help="image to load from a bundle that holds two")
+    args = parser.parse_args(argv)
+    try:
+        manifest = read_manifest(args.manifest)
+        if args.verify_only:
+            ensure_parts(manifest, args.cache_dir)
+            print(f"PASS {len(manifest['parts'])} parts and the reassembled archive "
+                  f"({manifest['bytes']} bytes, sha256 {manifest['sha256']}) match "
+                  f"{args.manifest}; not loaded into Docker")
+        else:
+            image = load_bundle(manifest, args.cache_dir, expected_image_id=args.image_id,
+                                allow_existing=True, timeout=900)
+            print(f"PASS Docker has {image}")
+    except ImageBundleError as error:
+        print(f"FAIL {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

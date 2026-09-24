@@ -1,9 +1,9 @@
 {
   "module": "qwen38_full_mutable_device",
   "so_path": "/src/build/qwen38_full_mutable_device.so",
-  "so_sha256": "7ab65dd56fd3a7d2f05ef279baf976affd90b138f80a018ddf79eac11902b394",
-  "source_sha256": "2c646cf4c63f480e43d832066a14f241bba83c5134593f55a3f41adfc2234c6a",
-  "header_sha256": "d26391659acc69e912e265089b83ee02cc1e32942b47bf90ac088a08a9eee998",
+  "so_sha256": "ebd7bd39c59f9a54aa6945b636906b1ecc16ed63f62fe39639078c6dc225b4f7",
+  "source_sha256": "64d47d052de98b8591e457dce0cdb927a586e7fae05263808636882c31afdb90",
+  "header_sha256": "50ec939e29bda017c2c5d63fbde276bc28701f843d5a79dc6e74aa0814b27fb7",
   "manifest_verified": true,
   "extracted_symbols": [
     "PyInit_qwen38_full_mutable_device",
