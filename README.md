@@ -8,7 +8,7 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 
 **Current status:** both IQ4_XS and Q4_K_XL MTP4 profiles passed ordinary public setup, first-start workload qualification and unchanged-receipt restart on the dual-R9700 reference host. Both profiles remain experimental. Each first start passed all seven checks at 131,072 context, including a 130,941-token prompt, with at least 3 GiB free VRAM per GPU. Setup selects the profile's runtime image bundle, verifies every part and loads the exact image ID. The Q4 profile uses the [v0.2.0-rc2 bundle](https://github.com/Dyluhn/R9V/releases/tag/v0.2.0-rc2-images); the IQ4 profile's WMMA-prefill image (`release/image-bundle-wmma-prefill-20260915.json`) is published under the [`v0.3.0-rc1-images`](https://github.com/Dyluhn/R9V/releases/tag/v0.3.0-rc1-images) release tag. See [release status and evidence](docs/qwen-release-candidate.md).
 
-**New in v0.4.0:** `qwen38-mtp4-uncensored` runs an uncensored (abliterated) IQ4_XS model on the consolidated 1.3.0 runtime with CED long-prompt prefill on by default. That runtime is the reference host's deployed service; the public setup/start flow for it is still pending. See [its qualification note](docs/qualification/uncensored-v040.md).
+**New in v0.4.0:** `qwen38-mtp4-uncensored` runs an uncensored (abliterated) IQ4_XS model on the consolidated 1.3.0 runtime with CED long-prompt prefill on by default. Its public fetch, setup, first-start qualification and restart passed from a clean checkout on the reference host, with CED on and off. See [its qualification note](docs/qualification/uncensored-v040.md).
 
 ## Profiles and features
 
@@ -16,7 +16,7 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 |---|---|---|---|
 | `qwen38-mtp4` | [IQ4_XS model bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
 | `qwen38-q4-xl` | [Q4_K_XL weights](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-Q4_K_XL) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
-| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime: MTP4, dual R9700, 128K context, CED on | Deployed on the reference host; public setup/start pending |
+| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime: MTP4, dual R9700, 128K context, CED on | Reference setup/start/restart passed |
 
 **About `qwen38-mtp4-uncensored`.** Its model had its refusal behavior removed and will comply with harmful requests the original model refuses. Use it for research, and add your own moderation before exposing it to anyone. R9V serves it on 127.0.0.1 only; setting `R9V_HOST_BIND` to expose it gives anyone who can reach the port an unauthenticated model with no refusals.
 

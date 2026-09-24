@@ -68,7 +68,7 @@
     "uncensored": true
   },
   "qualification": {
-    "status": "reference-service-deployed",
+    "status": "reference-workload-passed",
     "integration_notes": "docs/qualification/uncensored-v040.md",
     "local_qualification_required": true,
     "public_image": "published-verified-bundle"

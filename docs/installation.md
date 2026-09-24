@@ -121,8 +121,8 @@ it will comply with harmful requests that the original model refuses. Add your
 own moderation before exposing it to anyone. R9V serves it on 127.0.0.1 only;
 do not set `R9V_HOST_BIND` for this profile unless authentication and
 moderation stand in front of the port. It is experimental; its public
-setup/start qualification is pending
-([status](qualification/uncensored-v040.md)).
+setup, first start and restart passed on the reference host
+([results](qualification/uncensored-v040.md)).
 
 It uses its own model package (about 92.4 GiB, including the CED projector),
 the consolidated 1.3.0 runtime (the IQ4 profile's image plus SHA-256-pinned

@@ -1,9 +1,9 @@
 # Uncensored IQ4_XS on the consolidated 1.3.0 runtime (R9V v0.4.0)
 
 Profile `qwen38-mtp4-uncensored`. Status: **experimental**. The runtime it
-launches has served as the reference host's deployed service. The public
-setup → first start → restart flow from a clean checkout has **not** passed
-yet, so this note separates what is proven from what is pending.
+launches has served as the reference host's deployed service, and the public
+fetch → setup → first start → restart flow from a clean checkout passed on the
+reference host with CED on and off ([results](#clean-host-qualification-passed)).
 
 ## What the profile runs
 
@@ -71,23 +71,29 @@ With CED off the service loads the image's own model file, so its compiled
 model and rounding differ from the CED-on build: both are deterministic, but
 not bitwise equal to each other.
 
-## Pending: clean-host qualification
+## Clean-host qualification: passed
 
-These need the GPUs and are not done yet:
+On 2026-09-23, on the reference host with the deployed service stopped, a
+fresh recursive clone at commit `34285b2` ran the public flow with new model,
+data, cache and state directories. The commits after it change only the
+published address (now 127.0.0.1 by default) and documentation.
 
-- Fresh clone → setup (downloads and verifies the package, extracts the PLE,
-  loads the image) → start with `--timeout 2400`, because the first start
-  compiles the model.
-- First-start qualification, including the 130,941-token prompt at 131,072
-  context, then an unchanged restart that reuses the receipt.
-- **Headroom.** The profile's free-VRAM target is `1.5,1.5` GiB, below the
-  idle free VRAM above but not yet measured as the workload minimum.
-- **Doctor ceilings.** Doctor counts 222 / 428 experts (manifest hot counts
-  plus cache slots); the mutable cache uses 217 / 427 internally. The ceilings
-  have not been checked against a running server of this profile.
-- **Cold-compile time.** The `--timeout 2400` figure needs confirming.
-- CED on a running server: the projector loads, CED engages on a 12K+ prompt,
-  exact-after-CED is bitwise identical; then a `--ced off` run.
+| Check | Result |
+|---|---|
+| `fetch`, `verify --hash` | all 20 package artifacts downloaded without a token and SHA-256 verified |
+| `setup` | passed in 133 s: PLE extracted, pinned image loaded, host checks passed |
+| First start, CED on, cold compile cache | ready in 337 s including qualification, well inside `--timeout 2400` |
+| First-start qualification, CED on | passed, including the 130,941-token prompt at 131,072 context; minimum free VRAM 1.771 / 2.087 GiB against the 1.5 / 1.5 GiB target |
+| Runtime doctor | no failures; the expert ceilings (222 / 428) pass on the running server |
+| CED on the running server | projector loaded on both GPUs; CED engaged on 12,960- and 31,987-token prompts; an exact request after a CED request matched a fresh exact run bit for bit; repeated greedy requests matched in text and logprobs |
+| CED prefill speedup | 1.47× at 12,960 tokens (exact tail rounded up to 3,264), 1.80× at 31,987 tokens (2 runs each) |
+| `--ced off` | qualified again on the next start and passed (minimum free VRAM 3.824 / 4.115 GiB); no projector loaded, no CED on the 12,960-token prompt |
+| Unchanged restart | reused the receipt: no second qualification, ready in 167 s |
+
+Short decode in the same checks (three 400-token greedy answers, one run each)
+took 47.2 ms/step (median) with CED on and 39.5 ms/step with CED off, at the
+same MTP acceptance. The deployed-service comparison above found no decode cost
+from the projector; this gap is not explained yet.
 
 ## Known limitations
 
@@ -95,6 +101,9 @@ These need the GPUs and are not done yet:
   exactly. The projector was fitted on English-heavy code, docs and prose of up
   to ~20K tokens, and only a 2,048-token exact tail was graded.
 - `int8` projector precision is accepted but was never run on the GPU.
+- Short decode was slower with CED on than off in the clean-host checks (see
+  above), measured once. If decode speed matters more than long-prompt
+  prefill, compare with `--ced off` on your host.
 - The API has no authentication. R9V publishes it on 127.0.0.1 only unless
   `R9V_HOST_BIND` names another address; do not expose this model without
   authentication and moderation in front of it.

@@ -733,7 +733,7 @@ uses these settings on top of the ones above. Setup saves them; change CED with
 | `R9V_CED_TAIL` | `2048` | Exact prompt tail in tokens, rounded up to a cache block. At least 512; only 2048 is graded. |
 | `R9V_CED_DEFAULT` | `on` | `on`: requests that do not say get CED above the minimum. `off`: only requests with `r9v_ced: true`. |
 | `R9V_PREFIX_CACHE_RETENTION_INTERVAL` | `1616` | Prefix-cache checkpoint interval, the scheduler's block boundary on this image. |
-| `R9V_MIN_FREE_VRAM_GIB_BY_RANK` | `1.5,1.5` | Lowered from 3,3 because the loaded projector takes 1.76 GiB per GPU. Provisional until the clean-host qualification measures the workload minimum. |
+| `R9V_MIN_FREE_VRAM_GIB_BY_RANK` | `1.5,1.5` | Lowered from 3,3 because the loaded projector takes 1.76 GiB per GPU. The clean-host first-start qualification measured a minimum of 1.771 / 2.087 GiB free with CED on. |
 | `R9V_MIN_HOST_AVAILABLE_BYTES` | `76699664384` | Available RAM before launch: every expert pinned on the host (59.5 GB) plus the 16 GiB PLE reserve. |
 | `R9V_EXPERT_MANIFEST_PATH` | the fixed `mtp4-warmstart-r1/manifest.json` | Pinned by SHA-256 in `mtp4-full-mutable.json`. The mutable expert cache refuses any other placement. |
 

@@ -89,7 +89,8 @@ fewer MTP tokens per step on the first answer after a CED prefill. Decode is
 exact. `--ced off` in setup or start turns CED off; one request can stay exact
 with `"vllm_xargs": {"r9v_ced": false}`. The profile uses a fixed expert
 placement: do not pass `--headroom`, `--calibration` or `--expert-catalog`;
-they are refused. Its public setup/start qualification is still pending; see
+they are refused. Its public setup, first start and restart passed on the
+reference host; see
 [docs/qualification/uncensored-v040.md](docs/qualification/uncensored-v040.md).
 
 Full command details: [docs/installation.md](docs/installation.md).
