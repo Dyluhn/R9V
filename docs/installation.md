@@ -148,6 +148,16 @@ compiles the model, so for this profile start waits up to 2,400 seconds by
 default instead of 900 (`--timeout SECONDS` changes it). It then qualifies the
 placement once; an unchanged restart reuses the receipt.
 
+To record decode speed, run this right after start; it saves the numbers
+right after start and once warm as JSON (a new file):
+
+```bash
+./r9v soak qwen38-mtp4-uncensored --state-dir "$STATE_DIR" -- --decode-speed decode-speed.json
+```
+
+The first ~1,200 decode tokens after a fresh start run slower while caches
+warm up, so compare the warm median, not the first round.
+
 **CED is on by default.** On prompts of 8,192 tokens or more, layers 0–15 run
 exactly and the split-16 projector predicts the later layers for all but the
 last ~2K prompt tokens. Decode stays exact. Measured on the reference host:

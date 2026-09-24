@@ -39,6 +39,9 @@ New checks, each with a fix that needs no root or host changes:
 
 - `start` waits 2,400 s by default for a full mutable expert cache
   (`qwen38-mtp4-uncensored`).
+- `./r9v soak PROFILE -- --decode-speed FILE` measures decode ms/step right
+  after start and once warm and saves both as JSON, so a clean-install test
+  keeps its warm decode numbers.
 - `tools/image_bundle.py --verify-only` downloads and verifies an image
   bundle without loading it.
 

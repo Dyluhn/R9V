@@ -407,6 +407,12 @@ def build_parser() -> argparse.ArgumentParser:
                       "                          expert cache (qwen38-mtp4-uncensored)\n"
                       "  --ced on|off            CED long-prompt prefill, for profiles that ship it\n"
                       "  --state-dir DIR         the state directory setup used")
+        elif action == "soak":
+            epilog = ("Soak options forwarded to soak_runtime.py:\n"
+                      "  --output DIR            new evidence directory for a soak\n"
+                      "  --duration SECONDS      soak length (default 7200)\n"
+                      "  --decode-speed FILE     instead: decode ms/step right after start and\n"
+                      "                          warm, saved as JSON to FILE (run right after start)")
         elif action == "support":
             epilog = ("Support options forwarded to support_bundle.py:\n"
                       "  --state-dir DIR         select the profile's setup state\n"
