@@ -97,11 +97,11 @@ perplexity) where the default lost 17% (x1.049), for 1.55x instead of 1.68x
 prefill, in one GPU grade of both. Only suggest it when the user cares more
 about long-prompt accuracy than prefill speed. Setup downloads its 1.8 GB
 projector only with `setup --ced quality`; `start --ced quality` before that is
-refused with that instruction. It is not recommended: on the reference host
-its first-start qualification failed because GPU 0 fell to 0.90 GiB free
-(target 1.5 GiB) with a desktop session on that card; it needs about 0.75 GiB
-more VRAM on GPU 0 than `on`. Only suggest it on a host where other programs
-use less than about 0.6 GiB of GPU 0, and keep `on` otherwise. The profile uses a fixed expert
+refused with that instruction. Since v0.4.3 it passes first-start
+qualification on the reference host (GPU 0 kept 2.04 GiB free with a desktop
+session on that card; target 1.5 GiB): its projector and the vision encoder's
+weights take turns in one VRAM region, so images keep working. It needs 60.8
+GiB of available RAM at start instead of 56.3 GiB. The profile uses a fixed expert
 placement: do not pass `--headroom`, `--calibration` or `--expert-catalog`;
 they are refused. Its v0.4.0 public setup, first start and restart passed on
 the reference host; see

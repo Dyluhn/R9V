@@ -22,11 +22,11 @@ GROUP = 128
 SOURCES = ["boundary_16", "block_input_3", "block_input_15"]
 
 
-def overlay(precision: str) -> dict:
+def overlay(precision: str, rows: int = 2560) -> dict:
     tree = ast.parse(OVERLAY.read_text(encoding="utf-8"))
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in FUNCTIONS]
     assert {n.name for n in nodes} == FUNCTIONS
-    namespace = {"torch": torch, "json": json, "_CED_GROUP": GROUP, "_CED_PRECISION": precision}
+    namespace = {"torch": torch, "json": json, "_CED_GROUP": GROUP, "_CED_PRECISION": precision, "_CED_ROWS": rows}
     exec(compile(ast.Module(nodes, []), str(OVERLAY), "exec"), namespace)
     return namespace
 
@@ -94,3 +94,22 @@ def test_int8_maps_apply_as_their_dequantized_bf16_matrix(tmp_path):
     got = functions["_ced_apply"](maps, "layer.20", features)
 
     assert torch.equal(got, torch.addmm(maps["bias.layer.20"], features, matrix.t()))
+
+
+def test_int8_maps_dequantize_at_most_ced_rows_at_a_time_as_blocks_of_the_whole_map(tmp_path):
+    """"final" (8 rows here, blocks of 4) is the whole-map product computed per block of output
+    rows; a map of at most one block ("layer.20", 4 rows) is bitwise the whole-map product."""
+    bf16 = bf16_projector(tmp_path / "msfa.safetensors", SOURCES)
+    functions = overlay("int8", rows=4)
+    maps = functions["_ced_load"](str(stored_int8(bf16, tmp_path / "int8.safetensors")), torch.device("cpu"))
+    features = torch.randn(5, GROUP * len(SOURCES)).to(torch.bfloat16)
+    q, scale = maps["final"], maps["scale.final"]
+    matrix = (q.view(q.shape[0], -1, GROUP).to(torch.bfloat16) * scale[:, :, None]).view(q.shape)
+    blocks = [torch.addmm(maps["bias.final"][r:r + 4], features, matrix[r:r + 4].t()) for r in (0, 4)]
+
+    got = functions["_ced_apply"](maps, "final", features)
+
+    assert torch.equal(got, torch.cat(blocks, 1))
+    assert torch.allclose(got.float(), torch.addmm(maps["bias.final"], features, matrix.t()).float(), atol=0.1)
+    assert torch.equal(functions["_ced_apply"](maps, "layer.20", features),
+                       overlay("int8")["_ced_apply"](maps, "layer.20", features))

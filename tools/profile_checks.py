@@ -59,6 +59,28 @@ def ced_projector_vram(repo_root: Path, profile: dict | None) -> int:
     return pinned["bytes"]
 
 
+PINNED_SLAB = 64 * 2**20  # the runtime keeps each host copy in pinned slabs of this size
+
+
+def ced_quality_host_bytes() -> int:
+    """Pinned host RAM CED quality holds: every TP rank keeps its own copy of the projector and
+    of its share of the vision encoder's weights (together the mmproj file), because both take
+    turns in one VRAM region; each copy is rounded up to whole slabs. Sized from the installed
+    files; 0 for other CED modes or before setup (the model-package check reports missing
+    files)."""
+    model_dir = os.environ.get("R9V_MODEL_DIR")
+    if _ced_switch() != "quality" or not model_dir:
+        return 0
+    try:
+        projector = (Path(model_dir) / os.environ[runtime_overlays.projector_setting("quality")]).stat().st_size
+        vision = (Path(model_dir) / os.environ["R9V_MMPROJ_REL"]).stat().st_size
+    except (KeyError, OSError):
+        return 0
+    ranks = int(os.environ.get("R9V_TENSOR_PARALLEL_SIZE", "1"))
+    slabs = lambda size: -(-size // PINNED_SLAB) * PINNED_SLAB  # noqa: E731
+    return ranks * (slabs(projector) + slabs(-(-vision // ranks)))
+
+
 def projector_split(path: Path) -> tuple[int | None, str | None]:
     """The split a projector declares by its keys, read as the runtime reads it
     (layer.S..layer.N contiguous plus final), and by its metadata, if recorded."""
@@ -122,10 +144,12 @@ def check_ced_projector(reporter, repo_root: Path, profile: dict | None) -> None
         return
     precision = environment["R9V_CED_PRECISION"]
     vram = ced_projector_vram(repo_root, profile)
+    shared = (" in a VRAM region it shares with the vision encoder's weights (swapped on demand)"
+              if switch == "quality" else "")
     reporter.passed(
         "ced-projector",
         f"CED {switch}: {relative} matches its pinned sha256 {digest[:12]}..., split {keyed}, "
-        f"precision {precision}; it takes {vram / GIB:.2f} GiB on each GPU once loaded",
+        f"precision {precision}; it takes {vram / GIB:.2f} GiB on each GPU once loaded{shared}",
         sha256=digest, split=keyed, precision=precision, vram_bytes_per_gpu=vram,
     )
 
