@@ -1,5 +1,58 @@
 # Changelog
 
+## v0.4.2 (2026-09-24)
+
+### `qwen38-mtp4-uncensored`: CED quality mode (opt-in)
+
+- `--ced quality` in setup or start runs a multi-source CED projector: the
+  layer-16 state plus the inputs of full-attention layers 3, 7, 11 and 15.
+  `on` stays the default; `off` and `on` launch exactly as in v0.4.1.
+- The tradeoff, from one GPU grade of both projectors (both loaded as int8,
+  eager grading server) on the 16 prompts that depend on their long context:
+
+  | `--ced` | Perplexity | Long-context gain lost | Prefill speedup (median) |
+  |---|---|---|---|
+  | `on` | ×1.049 | 17% | 1.68× |
+  | `quality` | ×1.029 | 10% | 1.55× |
+
+  The projector math costs 56 ms per 1K approximated tokens instead of 24 ms.
+- The quality projector ships stored as int8: 1.79 GiB per GPU, about what the
+  default bf16 projector takes. In bf16 it would need 3.5 GiB per GPU and did
+  not fit on GPU 1 in the grade. The int8 file loads bit-identically to what
+  the grade ran.
+- It is an optional file in the model package (1.8 GB). Setup downloads it
+  only with `--ced quality`; `start --ced quality` before that is refused and
+  says to run setup with it. The doctor checks it against its pinned SHA-256
+  and counts it in the VRAM budget.
+- **Not tested on the compiled server.** The numbers above come from the eager
+  grading server; `--ced quality` has not run in R9V's compiled production
+  server (CUDA graphs) or in the clean-install GPU test. VRAM on GPU 1 may be
+  tight. Please report any issue. `on` stays the default and is unchanged
+  from v0.4.1.
+- The model package moves to revision `8112610745a8ddc3a19cc659314af245820ee728`,
+  which adds the quality projector; the 24 files published before are
+  unchanged, so an existing install downloads nothing new unless it picks
+  `--ced quality`.
+
+### `./r9v doctor --runtime`
+
+- Right after a first start, `runtime-kv-pressure` no longer fails because of
+  qualification's own 130,941-token prompt, which is preempted about 7 times
+  before it completes. Start records that count with the qualification
+  receipt, and the doctor discounts it for the same container only. Any
+  rewind after qualification still fails.
+
+### Upgrading from v0.4.1
+
+- The runtime descriptor changed (it pins the new model file), so an existing
+  install qualifies again once on its next start, whatever its CED mode.
+
+### Testing
+
+- CPU tests, static checks and the launch parity tests (`on` and `off` launch
+  exactly as the GPU-tested v0.4.1 container) pass. The clean-install GPU test
+  was not rerun for v0.4.2.
+
 ## v0.4.1 (2026-09-24)
 
 ### `qwen38-mtp4-uncensored`: smaller host expert copy

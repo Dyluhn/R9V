@@ -1492,32 +1492,76 @@ def _fetch_metrics(port: str) -> str | None:
         return None
 
 
-def _check_scheduler_pressure(reporter: Reporter) -> None:
-    container = os.environ.get("R9V_CONTAINER_NAME", "r9v-qwen38-flash-next")
-    probe = """import pathlib
+# The runtime's scheduler record inside the container (total_preemptions counts
+# every rewind since the container started).
+SCHEDULER_PROBE = """import pathlib
 p = pathlib.Path('/tmp/r9v-scheduler.json')
 print(p.read_text() if p.is_file() and p.stat().st_size <= 65536 else '{}')
 """
-    result = _run(["docker", "exec", container, "python3", "-c", probe], timeout=20)
+
+
+def parse_preemptions(stdout: str) -> int:
+    """total_preemptions from SCHEDULER_PROBE output; ValueError when malformed."""
     try:
-        record = json.loads(result.stdout) if result.returncode == 0 else {}
-        count = int(record.get("total_preemptions", 0))
-        if count < 0:
-            raise ValueError("negative preemption counter")
-    except (ValueError, TypeError, AttributeError):
+        count = int(json.loads(stdout).get("total_preemptions", 0))
+    except (TypeError, AttributeError) as error:
+        raise ValueError(f"malformed scheduler record: {error}") from error
+    if count < 0:
+        raise ValueError("negative preemption counter")
+    return count
+
+
+def _qualification_preemptions(container: str) -> int:
+    """Rewinds that first-start qualification caused in this very container.
+
+    start records them in the saved setup (qualification.preemptions): the fixed
+    KV budget preempts qualification's ~131K-token prompt several times before it
+    completes. 0 when nothing is recorded or the record belongs to an earlier container."""
+    state_dir = os.environ.get("R9V_STATE_DIR")
+    if not state_dir:
+        return 0
+    try:
+        state = json.loads((Path(state_dir) / "setup.json").read_text(encoding="utf-8"))
+        record = state["qualification"]["preemptions"]
+        count, recorded_id = record["count"], record["container_id"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+    if type(count) is not int or count < 0:
+        return 0
+    result = _run(["docker", "inspect", "--format", "{{.Id}}", container], timeout=20)
+    return count if result.returncode == 0 and result.stdout.strip() == recorded_id else 0
+
+
+def _check_scheduler_pressure(reporter: Reporter) -> None:
+    container = os.environ.get("R9V_CONTAINER_NAME", "r9v-qwen38-flash-next")
+    result = _run(["docker", "exec", container, "python3", "-c", SCHEDULER_PROBE], timeout=20)
+    try:
+        count = parse_preemptions(result.stdout) if result.returncode == 0 else 0
+    except ValueError:
         reporter.warn(
             "runtime-kv-pressure", "Scheduler pressure evidence is malformed",
             "Collect a support bundle and restart the diagnostic runtime.",
         )
         return
-    if count:
+    qualification = _qualification_preemptions(container) if count else 0
+    if count and count <= qualification:
+        reporter.note(
+            "runtime-kv-pressure",
+            f"All {count} scheduler rewinds of this container came from first-start "
+            "qualification's full-context prompt, which completed; none since. This does "
+            "not certify KV capacity for other workloads.",
+            qualification_preemptions=qualification,
+        )
+    elif count:
+        since = (f" ({count - qualification} since first-start qualification, which caused "
+                 f"{qualification})" if qualification else "")
         reporter.fail(
             "runtime-kv-pressure",
-            f"Scheduler has rewound requests {count} times after exhausting KV blocks",
+            f"Scheduler has rewound requests {count} times after exhausting KV blocks{since}",
             "Increase R9V_KV_CACHE_MEMORY_BYTES or reduce context/concurrency, then "
             "replan experts to preserve physical VRAM headroom and rerun qualification. "
             "Free VRAM alone does not expand a fixed KV allocation.",
-            scheduler=record,
+            scheduler=json.loads(result.stdout),
         )
     else:
         reporter.note(

@@ -721,14 +721,15 @@ remaining worker-level checks.
 
 `qwen38-mtp4-uncensored` (`profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored/profile.env`)
 uses these settings on top of the ones above. Setup saves them; change CED with
-`--ced on|off` rather than by editing the saved configuration.
+`--ced on|off|quality` rather than by editing the saved configuration.
 
 | Setting | Profile value | Meaning |
 |---|---|---|
 | `R9V_RUNTIME_DESCRIPTOR` | `runtimes/qwen38-flash-next-gfx1201-mtp4-v3/runtime.json` | Runtime whose `overlays` block lists the files mounted read-only over the image, with their SHA-256. The launcher refuses to start if any file differs. |
-| `R9V_CED` | `on` | CED (approximate long-prompt prefill). `off` mounts neither the CED model file nor any `R9V_CED_*` setting. |
-| `R9V_CED_PROJECTOR_REL` | `ced/ced-projector-split16.safetensors` | Projector inside the model directory, read at `/models/…`. |
-| `R9V_CED_PRECISION` | `bf16` | `int8` roughly halves the projector's 1.76 GiB per GPU but was never run on the GPU. |
+| `R9V_CED` | `on` | CED (approximate long-prompt prefill): `on`, `off` or `quality`; anything else is refused. `off` mounts neither CED model file nor any `R9V_CED_*` setting. `quality` mounts `model_ced_quality.py` and loads the multi-source projector below: ×1.029 instead of ×1.049 perplexity on long-context prompts, 1.55× instead of 1.68× prefill, in one int8 GPU grade of both. |
+| `R9V_CED_PROJECTOR_REL` | `ced/ced-projector-split16.safetensors` | Projector for `on`, inside the model directory, read at `/models/…`. |
+| `R9V_CED_QUALITY_PROJECTOR_REL` | `ced/ced-projector-split16-msfa-int8.safetensors` | Projector for `quality`: split 16 plus the block inputs of layers 3/7/11/15, stored as int8 (1.79 GiB per GPU). Optional in the model package; setup downloads it only with `--ced quality`. |
+| `R9V_CED_PRECISION` | `bf16` | Applies to `on`. `int8` roughly halves the projector's 1.76 GiB per GPU but was never run on the GPU with it. `quality` always loads its file as stored int8 (its bf16 form does not fit next to the expert cache). |
 | `R9V_CED_MIN_PROMPT` | `8192` | With `R9V_CED_DEFAULT=on`, shorter prompts stay exact. At least 0. |
 | `R9V_CED_TAIL` | `2048` | Exact prompt tail in tokens, rounded up to a cache block. At least 512; only 2048 is graded. |
 | `R9V_CED_DEFAULT` | `on` | `on`: requests that do not say get CED above the minimum. `off`: only requests with `r9v_ced: true`. |
@@ -747,4 +748,5 @@ reuses a CED request's cache.
 Because the placement is fixed, `--headroom`, `--calibration` and
 `--expert-catalog` are refused, and the `plan` and `placement` commands are not
 available for this profile. First start qualifies the placement; the receipt
-is keyed on the manifest, runtime descriptor, image and CED setting.
+is keyed on the manifest, runtime descriptor, image and CED setting, so the
+first start in a new CED mode qualifies again.

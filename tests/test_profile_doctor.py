@@ -706,6 +706,52 @@ def test_missing_scheduler_record_does_not_certify_capacity(monkeypatch):
     assert "does not certify" in reporter.checks[0].message
 
 
+def scheduler_runtime(monkeypatch, tmp_path, total, recorded, container_id="abc123"):
+    """A running container with `total` rewinds whose saved setup recorded `recorded`
+    rewinds from first-start qualification in container abc123."""
+    (tmp_path / "setup.json").write_text(json.dumps({"qualification": {
+        "preemptions": {"container_id": "abc123", "count": recorded}}}))
+    monkeypatch.setenv("R9V_STATE_DIR", str(tmp_path))
+
+    def run(command, **kwargs):
+        stdout = container_id if command[:2] == ["docker", "inspect"] else json.dumps(
+            {"total_preemptions": total})
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    monkeypatch.setattr(doctor, "_run", run)
+
+
+def test_rewinds_from_first_start_qualification_do_not_fail_the_runtime_doctor(monkeypatch, tmp_path):
+    scheduler_runtime(monkeypatch, tmp_path, total=7, recorded=7)
+    reporter = Reporter()
+
+    doctor._check_scheduler_pressure(reporter)
+
+    assert reporter.checks[0].status == "NOTE"
+    assert "All 7 scheduler rewinds" in reporter.checks[0].message
+
+
+def test_rewinds_after_qualification_still_fail_and_say_how_many_are_new(monkeypatch, tmp_path):
+    scheduler_runtime(monkeypatch, tmp_path, total=9, recorded=7)
+    reporter = Reporter()
+
+    doctor._check_scheduler_pressure(reporter)
+
+    assert reporter.checks[0].status == "FAIL"
+    assert "9 times" in reporter.checks[0].message
+    assert "2 since first-start qualification, which caused 7" in reporter.checks[0].message
+
+
+def test_qualification_rewinds_of_an_earlier_container_are_not_discounted(monkeypatch, tmp_path):
+    scheduler_runtime(monkeypatch, tmp_path, total=7, recorded=7, container_id="restarted")
+    reporter = Reporter()
+
+    doctor._check_scheduler_pressure(reporter)
+
+    assert reporter.checks[0].status == "FAIL"
+    assert "since first-start" not in reporter.checks[0].message
+
+
 def test_qwen_configuration_reference_covers_every_portable_setting() -> None:
     root = Path(__file__).resolve().parents[1]
     readme = (root / "profiles/qwen38-flash-next/dual-r9700/README.md").read_text(

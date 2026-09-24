@@ -23,6 +23,10 @@ CED_ON = {
 }
 
 
+QUALITY_PROJECTOR = "ced/ced-projector-split16-msfa-int8.safetensors"
+CED_QUALITY = {**CED_ON, "R9V_CED": "quality", "R9V_CED_QUALITY_PROJECTOR_REL": QUALITY_PROJECTOR}
+
+
 def copied_runtime(tmp_path: Path) -> Path:
     target = tmp_path / "runtime"
     shutil.copytree(RUNTIME.parent / "overlays", target / "overlays")
@@ -45,8 +49,14 @@ def test_committed_mtp4_v3_overlays_match_their_pins():
     overlays = runtime_overlays.load(RUNTIME)
 
     assert runtime_overlays.verify(RUNTIME, overlays) == []
-    assert len(overlays["sha256"]) == 15
-    assert set(overlays["mounts"]) == {"always", "ced"}
+    assert len(overlays["sha256"]) == 16
+    assert set(overlays["mounts"]) == {"always", "ced", "ced-quality"}
+
+
+def test_both_ced_model_files_replace_the_same_image_file():
+    mounts = runtime_overlays.load(RUNTIME)["mounts"]
+
+    assert list(mounts["ced"].values()) == list(mounts["ced-quality"].values())
 
 
 def test_tampered_overlays_are_refused_with_every_problem(tmp_path):
@@ -144,9 +154,54 @@ def test_invalid_ced_settings_report_every_problem(tmp_path):
     assert "R9V_CED_DEFAULT must be one of ('on', 'off') (got 'yes')" in message
 
 
-def test_ced_switch_accepts_only_on_or_off():
-    with pytest.raises(runtime_overlays.OverlayError, match="R9V_CED must be on or off"):
-        runtime_overlays.docker_args(RUNTIME, {"R9V_CED": "1"})
+@pytest.mark.parametrize("switch", ["1", "yes", "Quality", "high"])
+def test_ced_switch_accepts_only_on_off_or_quality(switch):
+    with pytest.raises(runtime_overlays.OverlayError,
+                       match=f"R9V_CED must be on, off or quality \\(got '{switch}'\\)"):
+        runtime_overlays.docker_args(RUNTIME, {"R9V_CED": switch})
+
+
+def test_ced_quality_mounts_the_multi_source_model_file_and_loads_its_projector_as_int8(tmp_path):
+    model = tmp_path / "models"
+    (model / "ced").mkdir(parents=True)
+    (model / QUALITY_PROJECTOR).write_bytes(b"projector")
+    env = {**CED_QUALITY, "R9V_MODEL_DIR": str(model)}
+
+    args = runtime_overlays.docker_args(RUNTIME, env)
+    volumes = pairs(args, "--volume")
+    environment = pairs(args, "--env")
+
+    assert len(volumes) == 11
+    assert any(
+        volume.endswith(
+            "overlays/model_ced_quality.py:/opt/r9v/lib/python3.12/site-packages/"
+            "vllm/models/qwen4_exp/amd/model.py:ro"
+        )
+        for volume in volumes
+    )
+    assert not any("overlays/model.py:" in volume for volume in volumes)
+    assert f"R9V_CED_PROJECTOR=/models/{QUALITY_PROJECTOR}" in environment
+    assert "R9V_CED_PRECISION=int8" in environment
+
+
+def test_ced_quality_without_its_projector_names_the_setup_to_fetch_it(tmp_path):
+    env = {**CED_QUALITY, "R9V_MODEL_DIR": str(model_dir_with_projector(tmp_path))}
+
+    with pytest.raises(runtime_overlays.OverlayError, match="rerun setup with --ced quality"):
+        runtime_overlays.docker_args(RUNTIME, env)
+
+
+def test_ced_quality_is_refused_on_a_runtime_without_its_overlay_group(tmp_path):
+    runtime = copied_runtime(tmp_path)
+    descriptor = json.loads(runtime.read_text())
+    del descriptor["overlays"]["mounts"]["ced-quality"]
+    runtime.write_text(json.dumps(descriptor))
+    model = tmp_path / "models"
+    (model / "ced").mkdir(parents=True)
+    (model / QUALITY_PROJECTOR).write_bytes(b"projector")
+
+    with pytest.raises(runtime_overlays.OverlayError, match="no 'ced-quality' overlay group"):
+        runtime_overlays.docker_args(runtime, {**CED_QUALITY, "R9V_MODEL_DIR": str(model)})
 
 
 def test_ced_on_without_the_projector_file_is_refused(tmp_path):

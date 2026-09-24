@@ -2,14 +2,14 @@
   "schema": "r9v.model-package.v1",
   "id": "qwen38-flash-next-uncensored-iq4-xs-mtp-blockfp8-mmproj-f16",
   "model": "Qwen3.8-Flash-Next-Uncensored",
-  "quant": "UD-IQ4_XS target (Unsloth per-tensor recipe, quantized from orcarouter abliterated Q8_0) + official block-FP8 MTP + orcarouter F16 mmproj + split-16 CED prefill projector",
+  "quant": "UD-IQ4_XS target (Unsloth per-tensor recipe, quantized from orcarouter abliterated Q8_0) + official block-FP8 MTP + orcarouter F16 mmproj + split-16 CED prefill projector; optional multi-source CED projector (int8) for R9V --ced quality",
   "license": "Qwen Community License 1.0",
   "license_notice": "Qwen model; orcarouter abliterated derivative (its model card says Apache-2.0, its repository LICENSE file is Qwen Community License 1.0); this package follows the upstream Qwen license",
   "distribution": {
     "status": "published",
     "repository": "Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS",
-    "revision": "b06687cb2f83ea38039cadd249341a7bd5b76fa3",
-    "note": "All 24 published files were remotely size- and SHA256-verified at this immutable revision. A clean-host fetch/verify/build/run remains the final profile qualification gate."
+    "revision": "8112610745a8ddc3a19cc659314af245820ee728",
+    "note": "All 25 published files were remotely size- and SHA256-verified at this immutable revision. A clean-host fetch/verify/build/run remains the final profile qualification gate."
   },
   "artifacts": [
     {
@@ -81,6 +81,13 @@
       "bytes": 1887624760,
       "sha256": "2d14d57e353491d034f0b75caab69af5afb806c3d6ab46cda054825a6a9c57fc",
       "required": true
+    },
+    {
+      "role": "ced-projector",
+      "path": "ced/ced-projector-split16-msfa-int8.safetensors",
+      "bytes": 1917121464,
+      "sha256": "516299a812ed8f988b23dd0091135e33c919e549d0769cb2ab5f2da89ddbf2eb",
+      "required": false
     },
     {
       "role": "tokenizer",

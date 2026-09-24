@@ -14,11 +14,13 @@ try:
     from tools import disk_space
     from tools.expert_budget import headroom_bytes
     from tools.image_bundle import ImageBundleError, read_manifest
+    from tools.package_sources import selected_artifacts
     from tools.runtime_overlays import CED_HEADROOM_FIX
 except ModuleNotFoundError:
     import disk_space
     from expert_budget import headroom_bytes
     from image_bundle import ImageBundleError, read_manifest
+    from package_sources import selected_artifacts
     from runtime_overlays import CED_HEADROOM_FIX
 
 GIB = 1024**3
@@ -332,7 +334,7 @@ def check_vram_other_processes(reporter, selected, gpu_ids, sys_root: Path, proc
                 f"{message}, below the {need[rank] / GIB:.2f} GiB R9V needs free before launch",
                 "Close the apps holding VRAM on this GPU before start, including any R9V or other "
                 "model server that is still running."
-                + (f" CED is on: {CED_HEADROOM_FIX}." if os.environ.get("R9V_CED") == "on" else ""),
+                + (f" CED is on: {CED_HEADROOM_FIX}." if os.environ.get("R9V_CED", "off") != "off" else ""),
             )
         else:
             if need is None:
@@ -391,6 +393,9 @@ def check_disk_space(reporter, repo_root: Path, profile, run) -> None:
            "--data-dir and --ple-path for setup, R9V_CACHE_DIR for the compile cache.")
     try:
         package = json.loads((repo_root / profile["descriptors"]["model_package"]).read_text())
+        # Count what this install fetches: the required files plus the CED quality projector if chosen.
+        package = {**package, "artifacts": [dict(artifact, required=True)
+                                            for artifact in selected_artifacts(package, os.environ)]}
         distribution = profile.get("distribution", {})
         bundle = docker_root = None
         if distribution.get("image_bundle"):

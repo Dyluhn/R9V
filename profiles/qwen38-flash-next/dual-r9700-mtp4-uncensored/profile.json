@@ -3,7 +3,7 @@
   "id": "qwen38-flash-next/uncensored-iq4-xs/dual-r9700-mtp4-128k",
   "name": "Qwen3.8 Flash Next Uncensored IQ4_XS \u2014 dual R9700, MTP4, 128K, CED",
   "status": "experimental",
-  "summary": "Uncensored (abliterated) IQ4_XS on the consolidated 1.3.0 runtime: full mutable expert cache on a fixed placement, and CED long-prompt prefill on by default (--ced off disables it). Experimental; every machine qualifies on first start.",
+  "summary": "Uncensored (abliterated) IQ4_XS on the consolidated 1.3.0 runtime: full mutable expert cache on a fixed placement, and CED long-prompt prefill on by default (--ced off disables it; --ced quality opts into the multi-source projector). Experimental; every machine qualifies on first start.",
   "aliases": [
     "qwen38-mtp4-uncensored"
   ],

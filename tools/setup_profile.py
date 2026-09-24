@@ -18,14 +18,14 @@ from pathlib import Path
 
 try:
     from tools.expert_budget import headroom_bytes
-    from tools.package_sources import artifact_source
-    from tools.profile_doctor import discover_kfd_gpus
+    from tools.package_sources import artifact_source, selected_artifacts
+    from tools.profile_doctor import SCHEDULER_PROBE, discover_kfd_gpus, parse_preemptions
     from tools.profile_state import default_state_dir, validate_state_profile
     from tools.verify_package import _sha256
 except ModuleNotFoundError:
     from expert_budget import headroom_bytes
-    from package_sources import artifact_source
-    from profile_doctor import discover_kfd_gpus
+    from package_sources import artifact_source, selected_artifacts
+    from profile_doctor import SCHEDULER_PROBE, discover_kfd_gpus, parse_preemptions
     from profile_state import default_state_dir, validate_state_profile
     from verify_package import _sha256
 
@@ -220,8 +220,18 @@ def check_profile_options(args, profile):
                          "requires; its free-VRAM target is part of the profile")
     if getattr(args, 'ced', None):
         runtime = json.loads((ROOT / profile['descriptors']['runtime']).read_text())
-        if 'ced' not in runtime.get('overlays', {}).get('mounts', {}):
-            raise ValueError(f"--ced: runtime {profile['runtime']} of {profile['id']} has no CED")
+        group = 'ced-quality' if args.ced == 'quality' else 'ced'
+        if group not in runtime.get('overlays', {}).get('mounts', {}):
+            mode = 'CED quality' if args.ced == 'quality' else 'CED'
+            raise ValueError(f"--ced {args.ced}: runtime {profile['runtime']} of {profile['id']} has no {mode}")
+
+
+def check_ced_quality_installed(state):
+    """CED quality loads a projector that setup downloads only when quality is chosen."""
+    relative = state['config'].get('R9V_CED_QUALITY_PROJECTOR_REL')
+    if not relative or relative not in state.get('artifacts', {}):
+        raise ValueError("--ced quality needs its own projector (about 1.8 GiB), which setup has not "
+                         "downloaded yet. Run setup again with --ced quality; it fetches only that file.")
 
 
 def qualification_identity(env, fixed):
@@ -299,7 +309,14 @@ def setup(args, state, state_path):
     data = Path(args.data_dir).expanduser().resolve() if args.data_dir else model / 'r9v-data'
     model.mkdir(parents=True, exist_ok=True)
     data.mkdir(parents=True, exist_ok=True)
-    artifacts = [a for a in package['artifacts'] if a.get('required', True)]
+    artifacts = selected_artifacts(package, config)
+    for artifact in artifacts:  # refuse before any download when a missing file has no published source
+        if not (model / artifact['path']).is_file():
+            try:
+                artifact_source(package, artifact)
+            except ValueError as error:
+                note = artifact.get('distribution', {}).get('note', str(error))
+                raise ValueError(f"Cannot download {artifact['path']}: {note}") from error
     missing = sum(
         a['bytes'] for a in artifacts
         if ((model / a['path']).is_file() and (model / a['path']).stat().st_size == a['bytes'])
@@ -398,6 +415,8 @@ def start(args, state, state_path):
     _, profile = selected_profile()
     check_profile_options(args, profile)
     fixed = fixed_placement(profile)
+    if (getattr(args, 'ced', None) or state['config'].get('R9V_CED')) == 'quality':
+        check_ced_quality_installed(state)
     if getattr(args, 'ced', None):
         state['config']['R9V_CED'] = args.ced
         save(state_path, state)
@@ -496,11 +515,29 @@ def start(args, state, state_path):
                         raise ValueError('Placement workload did not qualify')
                     state['qualification'] = {**identity, 'result': str(result_path),
                                               'sha256': hashlib.sha256(evidence).hexdigest()}
+                    preemptions = qualification_preemptions(container)
+                    if preemptions:
+                        state['qualification']['preemptions'] = preemptions
                     save(state_path, state)
             print(f"Ready: http://127.0.0.1:{port}/v1")
             return
         time.sleep(min(5, max(0, deadline - time.monotonic())))
     raise ValueError(f"Readiness timed out after {args.timeout}s; container retained")
+
+
+def qualification_preemptions(container):
+    """The container's scheduler rewinds right after qualification, so the runtime doctor
+    can discount them: the fixed KV budget preempts the ~131K-token qualification prompt
+    several times before it completes. None when they cannot be read."""
+    try:
+        container_id = run(['docker', 'inspect', container, '--format', '{{.Id}}'],
+                           capture=True, timeout=10).stdout.strip()
+        count = parse_preemptions(run(['docker', 'exec', container, 'python3', '-c', SCHEDULER_PROBE],
+                                      capture=True, timeout=20).stdout)
+    except (ValueError, subprocess.SubprocessError) as error:
+        print(f'Could not record the preemptions of qualification: {error}', file=sys.stderr)
+        return None
+    return {'container_id': container_id, 'count': count}
 
 
 def watcher_systemd_command(unit, command, env):
@@ -533,7 +570,9 @@ def main():
     parser.add_argument('--headroom', help='per-card free GiB targets, e.g. 5,5; requires a release seed or local calibration')
     parser.add_argument('--calibration', type=Path, help='matching local memory envelope from a qualified workload')
     parser.add_argument('--expert-catalog', type=Path, help='held-out validated full ranking descended from the calibrated source map')
-    parser.add_argument('--ced', choices=['on', 'off'], help='CED long-prompt prefill for profiles that ship it; saved for later starts')
+    parser.add_argument('--ced', choices=['on', 'off', 'quality'],
+                        help='CED long-prompt prefill for profiles that ship it: on, off, or quality (the '
+                             'multi-source projector: less quality loss, less speedup); saved for later starts')
     parser.add_argument('--accept-model-license', action='store_true')
     parser.add_argument('--hash', action='store_true', help='rehash all artifacts, ignoring verification receipts')
     parser.add_argument('--timeout', type=int, default=default_timeout(selected),

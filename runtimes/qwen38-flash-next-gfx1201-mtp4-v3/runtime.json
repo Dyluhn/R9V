@@ -42,7 +42,8 @@
       ]
     ],
     "ced": true,
-    "full_mutable_expert_cache": true
+    "full_mutable_expert_cache": true,
+    "ced_quality": true
   },
   "source": {
     "vllm_revision": "4b20917386dcdfb619ee62ff24c45efeae176fdf",
@@ -52,7 +53,7 @@
   },
   "image_id": "sha256:2dac17a215fb5b0e3461e4c3e36a2981eec8ac3d6021e73183d247e819740c03",
   "overlays": {
-    "note": "Read-only bind mounts over the pinned image. The directory is mounted whole at directory_target (the overlays load their .so files from there); each file under mounts replaces the image file at its target. The ced group is mounted only with CED on. Every file is SHA-256 pinned and verified before launch.",
+    "note": "Read-only bind mounts over the pinned image. The directory is mounted whole at directory_target (the overlays load their .so files from there); each file under mounts replaces the image file at its target. The ced group is mounted only with CED on, the ced-quality group (the multi-source CED model file) only with CED quality. Every file is SHA-256 pinned and verified before launch.",
     "directory": "overlays",
     "directory_target": "/r9v-full-mutable",
     "sha256": {
@@ -63,6 +64,7 @@
       "iq4nl.py": "dad61baf464bc1b6cc0c237e9e65407658ae605ce6b0c3cf52defc0cae3c7efc",
       "linear.py": "68d523eabc33c6ce2d3b5b50540ccfd7c2b7446a3c1bd0532f9d788ab03c76d9",
       "model.py": "527e1744d47b0d9c3253ae316da825688c99191b668cea1dc918c8dc3f8032af",
+      "model_ced_quality.py": "26e234f929f7d4a5dad18f515970622324a873183351b4c4d9528f73f3ea9153",
       "q8_streamed.so": "2cf029ba7ae1f067b1eb99c4738eab676c28a2286ad5b31d2881b81af3ae3714",
       "q8_token64.so": "f87a06a42744f05833c84f91072427a3f04155c23fe7819150917e89c6c6a092",
       "q8_wmma.so": "0b1243a30fd2770c6e5d66800e9b6674f7227f2e88accb27bbb1eb802251b5e9",
@@ -86,6 +88,9 @@
       },
       "ced": {
         "model.py": "/opt/r9v/lib/python3.12/site-packages/vllm/models/qwen4_exp/amd/model.py"
+      },
+      "ced-quality": {
+        "model_ced_quality.py": "/opt/r9v/lib/python3.12/site-packages/vllm/models/qwen4_exp/amd/model.py"
       }
     },
     "env": {

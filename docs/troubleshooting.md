@@ -30,7 +30,7 @@ profile state.
 | `vram-other-processes` | Names the processes holding VRAM on the R9V GPUs. A warning while enough stays free; a failure when what is left is below what R9V needs. Close those apps (including another model server) before start. |
 | `api-exposure` | The API has no authentication. A warning means `R9V_HOST_BIND` publishes it beyond this machine; set it to `127.0.0.1` and rerun setup unless authentication sits in front of the port. |
 | `runtime-overlays` | A file the runtime mounts over its image does not match its pinned SHA-256. Restore the checkout (`git status`, then `git checkout -- runtimes/`); start refuses until every file matches. |
-| `ced-projector` | The CED projector is missing, differs from the hash the model package pins, or is for another split. Rerun setup to fetch it, or start with `--ced off`. |
+| `ced-projector` | The CED projector is missing, differs from the hash the model package pins, or is for another split. Rerun setup with the same `--ced` mode to fetch it (`--ced quality` has its own projector), or start with `--ced off`. |
 | `expert-limit-consistency` | A full mutable expert cache runs only its pinned placement: the expert ceilings, cache slots and cache ranks must be the profile's values. Restore them (setup saves them from `profile.env`). |
 | PLE size or residency failure | Verify the payload is exactly 28,800,138,240 bytes, on the intended SSD, and re-run setup with `--ple-path` if reusing it. |
 

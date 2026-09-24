@@ -248,7 +248,7 @@ def deployed(env_changes=None, drop_binds=()):
     }
 
 
-def launched(tmp_path: Path, env: dict[str, str]):
+def launched(tmp_path: Path, env: dict[str, str], files: list[str] = UNCENSORED_FILES):
     """Run the public uncensored profile and return its container in canonical form."""
     placeholders = DEPLOYED["placeholders"]
     result, args = run_launcher(
@@ -261,7 +261,7 @@ def launched(tmp_path: Path, env: dict[str, str]):
             "R9V_HOST_PORT": DEPLOYED["host"]["PortBindings"]["8000/tcp"][0]["HostPort"],
             **env,
         },
-        UNCENSORED_FILES,
+        files,
         layout={},
     )
     assert result.returncode == 0, result.stderr
@@ -336,9 +336,28 @@ def test_release_pins_equal_the_deployed_overlays_placement_and_projector():
     manifest = ROOT / placement["manifest"]["path"]
     projector = next(a for a in package["artifacts"] if a["role"] == "ced-projector")
 
-    assert runtime["overlays"]["sha256"] == DEPLOYED["overlay_sha256"]
+    quality_only = {"model_ced_quality.py"}  # CED quality's model file, mounted only with --ced quality
+    assert {name: digest for name, digest in runtime["overlays"]["sha256"].items()
+            if name not in quality_only} == DEPLOYED["overlay_sha256"]
     assert runtime["image_id"] == DEPLOYED["image"]
     assert placement["manifest"]["sha256"] == DEPLOYED["placement_sha256"]
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DEPLOYED["placement_sha256"]
     assert projector["path"] == "ced/ced-projector-split16.safetensors"
     assert projector["sha256"] == DEPLOYED["ced_projector_sha256"]
+
+
+QUALITY_PROJECTOR = "ced/ced-projector-split16-msfa-int8.safetensors"
+
+
+def test_ced_quality_launch_differs_from_ced_on_only_in_its_model_file_and_int8_projector(tmp_path):
+    ced_on = launched(tmp_path / "on", {})
+    changes = {"R9V_CED_PROJECTOR": f"/models/{QUALITY_PROJECTOR}", "R9V_CED_PRECISION": "int8"}
+
+    quality = launched(tmp_path / "quality", {"R9V_CED": "quality"}, [*UNCENSORED_FILES, QUALITY_PROJECTOR])
+
+    assert quality == {
+        **ced_on,
+        "env": {**ced_on["env"], **changes},
+        "binds": sorted(bind.replace("<overlays>/model.py:", "<overlays>/model_ced_quality.py:")
+                        for bind in ced_on["binds"]),
+    }

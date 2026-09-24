@@ -58,19 +58,20 @@ def safetensors(keys: list[str], metadata: dict | None = None) -> bytes:
 SPLIT16 = [f"layer.{index}" for index in range(16, 48)] + ["final"]
 
 
-def projector_setup(tmp_path: Path, monkeypatch, payload: bytes, pinned: bytes | None = None):
+def projector_setup(tmp_path: Path, monkeypatch, payload: bytes, pinned: bytes | None = None,
+                    relative: str = PROJECTOR):
     """A repo with the uncensored profile's package pinning `pinned` (default: payload),
-    and a model directory holding `payload` as the projector."""
+    and a model directory holding `payload` as the projector at `relative`."""
     pinned = payload if pinned is None else pinned
     repo = tmp_path / "repo"
     package = repo / UNCENSORED["descriptors"]["model_package"]
     package.parent.mkdir(parents=True)
     package.write_text(json.dumps({"artifacts": [{
-        "role": "ced-projector", "path": PROJECTOR, "bytes": len(pinned),
+        "role": "ced-projector", "path": relative, "bytes": len(pinned),
         "sha256": hashlib.sha256(pinned).hexdigest()}]}))
     model = tmp_path / "models"
     (model / "ced").mkdir(parents=True)
-    (model / PROJECTOR).write_bytes(payload)
+    (model / relative).write_bytes(payload)
     for key, value in {**CED_ON, "R9V_MODEL_DIR": str(model)}.items():
         monkeypatch.setenv(key, value)
     return repo
@@ -148,6 +149,74 @@ def test_int8_projector_takes_half_the_file_in_vram(tmp_path, monkeypatch):
     monkeypatch.setenv("R9V_CED_PRECISION", "int8")
 
     assert profile_checks.ced_projector_vram(repo, UNCENSORED) == len(payload) // 2
+
+
+QUALITY_PROJECTOR = "ced/ced-projector-split16-msfa-int8.safetensors"
+MSFA_SOURCES = '["boundary_16", "block_input_3", "block_input_7", "block_input_11", "block_input_15"]'
+
+
+def quality_setup(tmp_path: Path, monkeypatch, payload: bytes, pinned: bytes | None = None):
+    repo = projector_setup(tmp_path, monkeypatch, payload, pinned, relative=QUALITY_PROJECTOR)
+    monkeypatch.setenv("R9V_CED", "quality")
+    monkeypatch.setenv("R9V_CED_QUALITY_PROJECTOR_REL", QUALITY_PROJECTOR)
+    return repo
+
+
+def test_ced_quality_checks_its_own_pinned_projector_and_counts_the_stored_int8_file(tmp_path, monkeypatch):
+    payload = safetensors(SPLIT16, {"split": "16", "sources": MSFA_SOURCES})
+    repo = quality_setup(tmp_path, monkeypatch, payload)
+    reporter = Reporter()
+
+    profile_checks.check_ced_projector(reporter, repo, UNCENSORED)
+
+    check = only(reporter, "ced-projector")
+    assert check.status == "PASS", check.message
+    assert check.message.startswith(f"CED quality: {QUALITY_PROJECTOR} matches")
+    assert check.details["precision"] == "int8"
+    assert check.details["vram_bytes_per_gpu"] == len(payload)
+
+
+def test_ced_quality_projector_with_another_hash_fails_and_names_the_quality_setup(tmp_path, monkeypatch):
+    payload = safetensors(SPLIT16)
+    repo = quality_setup(tmp_path, monkeypatch, payload, pinned=payload[:-1] + b"\1")
+    reporter = Reporter()
+
+    profile_checks.check_ced_projector(reporter, repo, UNCENSORED)
+
+    check = only(reporter, "ced-projector")
+    assert check.status == "FAIL"
+    assert "has sha256" in check.message
+    assert "--ced quality" in check.remediation
+
+
+def test_ced_quality_without_its_projector_fails_before_hashing(tmp_path, monkeypatch):
+    repo = quality_setup(tmp_path, monkeypatch, safetensors(SPLIT16))
+    (Path(os.environ["R9V_MODEL_DIR"]) / QUALITY_PROJECTOR).unlink()
+    reporter = Reporter()
+
+    profile_checks.check_ced_projector(reporter, repo, UNCENSORED)
+
+    assert "CED projector missing" in only(reporter, "ced-projector").message
+
+
+def test_ced_quality_vram_is_the_stored_file_even_with_int8_precision_set(tmp_path, monkeypatch):
+    payload = safetensors(SPLIT16)
+    repo = quality_setup(tmp_path, monkeypatch, payload)
+    monkeypatch.setenv("R9V_CED_PRECISION", "int8")
+
+    assert profile_checks.ced_projector_vram(repo, UNCENSORED) == len(payload)
+
+
+def test_ced_quality_mounts_its_own_model_file(monkeypatch):
+    monkeypatch.setenv("R9V_RUNTIME_DESCRIPTOR", str(ROOT / UNCENSORED["descriptors"]["runtime"]))
+    monkeypatch.setenv("R9V_CED", "quality")
+    reporter = Reporter()
+
+    profile_checks.check_runtime_overlays(reporter)
+
+    mounted = only(reporter, "runtime-overlays").details["mounted"]
+    assert "model_ced_quality.py" in mounted
+    assert "model.py" not in mounted
 
 
 def copied_runtime(tmp_path: Path) -> Path:
