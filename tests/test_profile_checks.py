@@ -514,22 +514,46 @@ def test_ced_quality_says_its_projector_shares_vram_with_the_vision_encoder(tmp_
     assert "shares with the vision encoder's weights" in only(reporter, "ced-projector").message
 
 
-def test_ced_quality_host_copies_are_the_projector_and_the_mmproj_share_per_rank_in_whole_slabs(tmp_path, monkeypatch):
-    payload = safetensors(SPLIT16)
-    quality_setup(tmp_path, monkeypatch, payload)
+def mmproj_setup(monkeypatch, size: int) -> None:
     mmproj = Path(os.environ["R9V_MODEL_DIR"]) / "vision/mmproj.gguf"
     mmproj.parent.mkdir()
-    mmproj.write_bytes(b"\0" * 1000)
+    mmproj.write_bytes(b"\0" * size)
     monkeypatch.setenv("R9V_MMPROJ_REL", "vision/mmproj.gguf")
     monkeypatch.setenv("R9V_TENSOR_PARALLEL_SIZE", "2")
     monkeypatch.setattr(profile_checks, "PINNED_SLAB", 256)
 
+
+def test_ced_quality_host_copies_are_the_projector_and_the_mmproj_share_per_rank_in_whole_slabs(tmp_path, monkeypatch):
+    payload = safetensors(SPLIT16)
+    quality_setup(tmp_path, monkeypatch, payload)
+    mmproj_setup(monkeypatch, 1000)
+
     projector_slabs = -(-len(payload) // 256) * 256
-    assert profile_checks.ced_quality_host_bytes() == 2 * (projector_slabs + 512)  # 500 mmproj bytes per rank: 2 slabs
+    assert profile_checks.ced_host_bytes() == 2 * (projector_slabs + 512)  # 500 mmproj bytes per rank: 2 slabs
 
 
-def test_ced_on_holds_no_host_copies(tmp_path, monkeypatch):
+def test_ced_on_host_copies_are_its_bf16_projector_and_the_mmproj_share_per_rank(tmp_path, monkeypatch):
+    payload = safetensors(SPLIT16)
+    projector_setup(tmp_path, monkeypatch, payload)
+    mmproj_setup(monkeypatch, 1000)
+
+    projector_slabs = -(-len(payload) // 256) * 256
+    assert profile_checks.ced_host_bytes() == 2 * (projector_slabs + 512)
+
+
+def test_ced_on_at_int8_holds_half_the_projector_file_on_the_host(tmp_path, monkeypatch):
+    payload = safetensors(SPLIT16)
+    projector_setup(tmp_path, monkeypatch, payload)
+    mmproj_setup(monkeypatch, 1000)
+    monkeypatch.setenv("R9V_CED_PRECISION", "int8")
+
+    projector_slabs = -(-(len(payload) // 2) // 256) * 256
+    assert profile_checks.ced_host_bytes() == 2 * (projector_slabs + 512)
+
+
+def test_ced_off_holds_no_host_copies(tmp_path, monkeypatch):
     projector_setup(tmp_path, monkeypatch, safetensors(SPLIT16))
-    monkeypatch.setenv("R9V_MMPROJ_REL", "vision/mmproj.gguf")
+    mmproj_setup(monkeypatch, 1000)
+    monkeypatch.setenv("R9V_CED", "off")
 
-    assert profile_checks.ced_quality_host_bytes() == 0
+    assert profile_checks.ced_host_bytes() == 0
