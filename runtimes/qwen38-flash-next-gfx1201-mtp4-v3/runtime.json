@@ -63,7 +63,7 @@
       "fused_moe.py": "99dd5c4c70b344fd3d260445e41134abac59b45552db255c1f9f7836053c342e",
       "iq4nl.py": "dad61baf464bc1b6cc0c237e9e65407658ae605ce6b0c3cf52defc0cae3c7efc",
       "linear.py": "68d523eabc33c6ce2d3b5b50540ccfd7c2b7446a3c1bd0532f9d788ab03c76d9",
-      "model.py": "527e1744d47b0d9c3253ae316da825688c99191b668cea1dc918c8dc3f8032af",
+      "model.py": "3f53fa824fec66cf476580769caa17f8e6ac0153b2aba8e0dcce23dbfe6d6308",
       "model_ced_quality.py": "37bc6c5dd0ebecdd04248ddf3c081953ad219302574f70c570d2c3580e9e5292",
       "q8_streamed.so": "2cf029ba7ae1f067b1eb99c4738eab676c28a2286ad5b31d2881b81af3ae3714",
       "q8_token64.so": "f87a06a42744f05833c84f91072427a3f04155c23fe7819150917e89c6c6a092",
