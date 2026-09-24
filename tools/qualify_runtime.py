@@ -215,7 +215,8 @@ class Session:
         except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid verified model package identity: {error}") from error
         ignored = {
-            "R9V_CONFIG_FILE", "R9V_CONTAINER_NAME", "R9V_HOST_PORT", "R9V_PROFILE",
+            "R9V_CONFIG_FILE", "R9V_CONTAINER_NAME", "R9V_HOST_BIND", "R9V_HOST_PORT",
+            "R9V_PROFILE",
             "R9V_PROFILE_ROOT", "R9V_MODEL_DIR", "R9V_ROUTE_PROFILE_DIR",
             "R9V_RUNTIME_DESCRIPTOR", "R9V_EXPERT_MANIFEST_PATH",
             "R9V_EXPERT_CATALOG_PATH", "R9V_CALIBRATION_PATH", "R9V_MEMORY_SEED_PATH",

@@ -44,6 +44,10 @@ curl -fsS http://127.0.0.1:8004/health
 curl -fsS http://127.0.0.1:8004/v1/models
 ```
 
+The API has no authentication and is published on 127.0.0.1 only. Expose it
+only if the user asks: run setup with `R9V_HOST_BIND=0.0.0.0` (or one
+interface's address), and tell them to put authentication or a firewall in front.
+
 Use `qwen38-q4-xl` for Q4. Start runs runtime checks and bounded qualification;
 health alone is not qualification. A reference memory seed remains an estimate
 and each new placement needs local workload validation. The portable release
@@ -65,7 +69,9 @@ fail-closed checks and pinned recursive submodules.
 `qwen38-mtp4-uncensored` (experimental) serves an abliterated model: its
 refusal behavior was removed and it will comply with harmful requests. Confirm
 the user wants that model before installing it, and tell them to add their own
-moderation before exposing it to anyone. It needs its own model directory
+moderation before exposing it to anyone. Leave it on 127.0.0.1: do not set
+`R9V_HOST_BIND` for this profile unless authentication and moderation stand in
+front of the port. It needs its own model directory
 (about 92.4 GiB) and state directory. Setup downloads and verifies the package
 itself; the first start compiles the model, so give it a long timeout:
 

@@ -30,7 +30,8 @@ yet, so this note separates what is proven from what is pending.
   with this profile against a fake Docker and compares the container with the
   deployed service's create payload (normalized fixture in
   `tests/golden/launch/`). With the deployed CED default (off), the image,
-  vLLM command, environment, mounts and host settings are identical. The
+  vLLM command, environment, mounts, host settings and published address
+  (127.0.0.1) are identical. The
   release default differs only in `R9V_CED_DEFAULT=on`. With CED off, the
   container is the deployed one without the CED model file and the
   `R9V_CED_*` settings.
@@ -89,7 +90,8 @@ These need the GPUs and are not done yet:
   exactly. The projector was fitted on English-heavy code, docs and prose of up
   to ~20K tokens, and only a 2,048-token exact tail was graded.
 - `int8` projector precision is accepted but was never run on the GPU.
-- As in the other profiles, the launcher publishes the API port on all
-  interfaces.
+- The API has no authentication. R9V publishes it on 127.0.0.1 only unless
+  `R9V_HOST_BIND` names another address; do not expose this model without
+  authentication and moderation in front of it.
 - The model is abliterated: its refusal behavior was removed. Add your own
   moderation before exposing it to anyone.

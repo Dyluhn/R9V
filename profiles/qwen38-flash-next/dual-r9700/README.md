@@ -391,6 +391,31 @@ The slowest unique PCIe rank normally benefits most from the dynamic cache.
 If the cache is assigned elsewhere, doctor warns. That warning may be accepted
 only after a controlled benchmark with the same manifest and source build.
 
+## API address
+
+| Setting | Published value | Meaning |
+|---|---|---|
+| `R9V_HOST_PORT` | `8004` | Host port of the OpenAI-compatible API: `http://127.0.0.1:8004/v1`. |
+| `R9V_HOST_BIND` | `127.0.0.1` | Host address the API is published on: any IPv4 or IPv6 address. `0.0.0.0` means all IPv4 interfaces. |
+
+The API has no authentication, so by default only programs on this machine can
+reach it. To expose it, set `R9V_HOST_BIND` when you run setup; setup saves it
+with the port, and running setup again changes either. With `R9V_CONFIG_FILE`,
+set it in that file instead.
+
+```bash
+R9V_HOST_BIND=0.0.0.0 ./r9v setup qwen38-mtp4 --model-dir "$MODEL_DIR" \
+  --accept-model-license
+```
+
+The launcher refuses a value that is not an IP address, and a port that
+contains an address, before anything starts, and it warns whenever the API is
+published beyond this machine. Start's health check, doctor and qualification
+connect to `127.0.0.1`, so a specific address is published in addition to
+`127.0.0.1`. Put your own authentication or firewall in front of an exposed
+API. Exposing `qwen38-mtp4-uncensored` gives anyone who can reach the port a
+model with no refusals; add your own authentication and moderation first.
+
 ## Context and VRAM settings
 
 These are configurable but coupled. The published values are one qualified

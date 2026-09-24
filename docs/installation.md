@@ -91,6 +91,12 @@ curl -fsS http://127.0.0.1:8004/health
 curl -fsS http://127.0.0.1:8004/v1/models
 ```
 
+The API has no authentication, so it is published on 127.0.0.1 only. To reach
+it from other machines, run setup with `R9V_HOST_BIND=0.0.0.0` (or one
+interface's IPv4/IPv6 address); setup saves it with `R9V_HOST_PORT`. An invalid
+address stops the launch before anything starts. See
+[API address](../profiles/qwen38-flash-next/dual-r9700/README.md#api-address).
+
 Use `qwen38-q4-xl` for Q4. Start waits for health, runs the runtime doctor, and
 performs the bounded workload qualification for the selected placement. A
 reference seed is an estimate and still requires local validation. A different
@@ -112,7 +118,9 @@ container before retrying.
 
 This profile serves an abliterated model: its refusal behavior was removed and
 it will comply with harmful requests that the original model refuses. Add your
-own moderation before exposing it to anyone. It is experimental; its public
+own moderation before exposing it to anyone. R9V serves it on 127.0.0.1 only;
+do not set `R9V_HOST_BIND` for this profile unless authentication and
+moderation stand in front of the port. It is experimental; its public
 setup/start qualification is pending
 ([status](qualification/uncensored-v040.md)).
 

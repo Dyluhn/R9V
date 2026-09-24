@@ -117,6 +117,47 @@ def test_launcher_refuses_non_integer_retention_interval(tmp_path):
     assert args is None
 
 
+def test_launcher_publishes_the_api_on_localhost_by_default(tmp_path):
+    result, args = run_launcher(tmp_path, {})
+
+    assert result.returncode == 0, result.stderr
+    assert values(args, "--publish") == ["127.0.0.1:8004:8000"]
+    assert "WARN the API is published" not in result.stderr
+
+
+def test_launcher_publishes_on_all_interfaces_only_when_asked(tmp_path):
+    result, args = run_launcher(tmp_path, {"R9V_HOST_BIND": "0.0.0.0"})
+
+    assert result.returncode == 0, result.stderr
+    assert values(args, "--publish") == ["0.0.0.0:8004:8000"]
+    assert "WARN the API is published on 0.0.0.0:8004" in result.stderr
+
+
+def test_launcher_keeps_localhost_published_beside_a_specific_address(tmp_path):
+    # Health checks, doctor and qualification connect to 127.0.0.1.
+    result, args = run_launcher(tmp_path, {"R9V_HOST_BIND": "fd00::5", "R9V_HOST_PORT": "8014"})
+
+    assert result.returncode == 0, result.stderr
+    assert values(args, "--publish") == ["[fd00::5]:8014:8000", "127.0.0.1:8014:8000"]
+
+
+def test_launcher_refuses_a_bind_that_is_not_an_ip_address(tmp_path):
+    result, args = run_launcher(tmp_path, {"R9V_HOST_BIND": "lan"})
+
+    assert result.returncode == 2
+    assert "R9V_HOST_BIND must be an IPv4 or IPv6 address" in result.stderr
+    assert args is None
+
+
+def test_launcher_refuses_an_address_in_the_port_setting(tmp_path):
+    result, args = run_launcher(tmp_path, {"R9V_HOST_PORT": "0.0.0.0:8004"})
+
+    assert result.returncode == 2
+    assert "R9V_HOST_PORT must be a port number" in result.stderr
+    assert "R9V_HOST_BIND" in result.stderr
+    assert args is None
+
+
 RUNTIME_V3 = ROOT / "runtimes/qwen38-flash-next-gfx1201-mtp4-v3/runtime.json"
 CED_ON = {
     "R9V_CED": "on",
@@ -216,6 +257,7 @@ def launched(tmp_path: Path, env: dict[str, str]):
             "R9V_CACHE_NAMESPACE": placeholders["namespace"],
             "R9V_CONTAINER_NAME": placeholders["container"],
             "R9V_EXPECTED_GPU_BDFS": placeholders["bdfs"],
+            "R9V_HOST_PORT": DEPLOYED["host"]["PortBindings"]["8000/tcp"][0]["HostPort"],
             **env,
         },
         UNCENSORED_FILES,
@@ -242,6 +284,12 @@ def launched(tmp_path: Path, env: dict[str, str]):
         binds.append(f"{source}:{target}:{mode[0] if mode else 'rw'}")
     image_env = set(DEPLOYED["image_env"])
     log = dict(value.split("=", 1) for value in values(options, "--log-opt"))
+    ports = {}
+    for published in values(options, "--publish"):
+        host_ip, host_port, container_port = published.rsplit(":", 2)
+        ports.setdefault(f"{container_port}/tcp", []).append(
+            {"HostIp": host_ip, "HostPort": host_port}
+        )
     return {
         "image": image,
         "command": command_options(command),
@@ -252,6 +300,7 @@ def launched(tmp_path: Path, env: dict[str, str]):
             "SecurityOpt": sorted(values(options, "--security-opt")),
             "Devices": sorted(values(options, "--device")),
             "LogConfig": {"Type": values(options, "--log-driver")[0], "Config": log},
+            "PortBindings": ports,
         },
     }
 

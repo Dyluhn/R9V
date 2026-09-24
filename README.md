@@ -18,7 +18,7 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 | `qwen38-q4-xl` | [Q4_K_XL weights](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-Q4_K_XL) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
 | `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime: MTP4, dual R9700, 128K context, CED on | Deployed on the reference host; public setup/start pending |
 
-**About `qwen38-mtp4-uncensored`.** Its model had its refusal behavior removed and will comply with harmful requests the original model refuses. Use it for research, and add your own moderation before exposing it to anyone.
+**About `qwen38-mtp4-uncensored`.** Its model had its refusal behavior removed and will comply with harmful requests the original model refuses. Use it for research, and add your own moderation before exposing it to anyone. R9V serves it on 127.0.0.1 only; setting `R9V_HOST_BIND` to expose it gives anyone who can reach the port an unauthenticated model with no refusals.
 
 It has CED (approximate long-prompt prefill) on by default. On prompts of 8,192 tokens or more, layers 0–15 run exactly and a split-16 projector stands in for the later layers on all but the last ~2K prompt tokens. Decode stays exact. The tradeoff, measured on the reference host:
 
@@ -131,7 +131,7 @@ First start runs the local workload qualification, including context and headroo
 
 The new placement must qualify. Card order follows the saved GPU selection; inspect it with doctor. The planner reports per-card shortfalls when a request cannot fit, while retaining the configured context.
 
-The default API endpoint is `http://127.0.0.1:8004/v1`. Use the address recorded by your selected setup if you override the port. See the [release guide](docs/qwen-release-candidate.md), [installation guide](docs/installation.md), and [troubleshooting guide](docs/troubleshooting.md). Rebuilding an image does not reproduce a qualified image identity automatically.
+The default API endpoint is `http://127.0.0.1:8004/v1`. The API has no authentication, so R9V publishes it on 127.0.0.1 only, in every profile. To reach it from other machines, run setup with `R9V_HOST_BIND=0.0.0.0` (or one interface's IPv4/IPv6 address); setup saves it with the port. See [API address](profiles/qwen38-flash-next/dual-r9700/README.md#api-address). Use the address recorded by your selected setup if you override the port. See the [release guide](docs/qwen-release-candidate.md), [installation guide](docs/installation.md), and [troubleshooting guide](docs/troubleshooting.md). Rebuilding an image does not reproduce a qualified image identity automatically.
 
 ## Measured results
 

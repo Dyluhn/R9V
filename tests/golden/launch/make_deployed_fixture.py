@@ -87,6 +87,7 @@ def main():
             "SecurityOpt": sorted(host["SecurityOpt"]),
             "Devices": sorted(device["PathOnHost"] for device in host["Devices"]),
             "LogConfig": host["LogConfig"],
+            "PortBindings": host["PortBindings"],
         },
         "image_env": image_env,
         "overlay_sha256": {name[len("runtime/"):]: digest for name, digest in sorted(manifest.items())
