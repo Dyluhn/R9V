@@ -21,7 +21,7 @@ from torch import nn  # noqa: E402
 RUNTIME = Path(__file__).resolve().parents[1] / "runtimes/qwen38-flash-next-gfx1201-mtp4-v3"
 OVERLAY = RUNTIME / "overlays/model_ced_quality.py"
 SCHEDULER = RUNTIME / "overlays/scheduler.py"
-NAMES = {"_SharedVram", "_pinned", "_share_vision"}
+NAMES = {"_SharedVram", "_share_vision"}
 CPU = torch.device("cpu")
 
 
@@ -96,8 +96,7 @@ def test_vision_weights_move_into_the_region_and_drop_the_loaders_extra_referenc
     params = list(tower.parameters())
     tower.weight.data_container = [tower.weight.data]  # a single-shard GGUF weight, as the loader leaves it
     expected = [p.detach().clone() for p in params]
-    host = {"vision": [functions["_pinned"](p.data, CPU) for p in params], "ced:16": sets()["ced:16"]}
-    shared = functions["_SharedVram"](host, CPU)
+    shared = functions["_SharedVram"]({"vision": [p.data for p in params], "ced:16": sets()["ced:16"]}, CPU)
 
     functions["_share_vision"](shared, params)
     shared.acquire("vision")
@@ -107,6 +106,28 @@ def test_vision_weights_move_into_the_region_and_drop_the_loaders_extra_referenc
     assert all(torch.equal(p, e) for p, e in zip(params, expected))
     x = torch.randn(2, 5).to(torch.bfloat16)
     assert torch.equal(tower(x), nn.functional.linear(x, expected[0], expected[1]))
+
+
+def test_host_copies_split_across_slabs_read_back_exactly():
+    shared_vram = overlay()["_SharedVram"]
+    shared_vram.SLAB = 512  # the 1024-byte int8 map spans two slabs
+    host = sets()
+    shared = shared_vram(host, CPU)
+
+    assert [slab.numel() for slab in shared.host["ced:16"]] == [512, 512, 512]
+    shared.acquire("vision")
+    projector = shared.acquire("ced:16")
+    assert all(torch.equal(v, h) for v, h in zip(projector, host["ced:16"]))
+
+
+def test_host_copies_are_taken_when_the_region_is_made_not_when_a_set_is_acquired():
+    host = sets()
+    shared = overlay()["_SharedVram"](host, CPU)
+    original = host["vision"][0].clone()
+
+    host["vision"][0].zero_()  # the vision weights' old storage is freed once they move into the region
+
+    assert torch.equal(shared.acquire("vision")[0], original)
 
 
 def test_without_a_vision_tower_the_region_holds_only_the_projector():

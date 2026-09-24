@@ -547,18 +547,23 @@ _SHARED: dict = {}  # "vram": this worker GPU's _SharedVram; "names": each proje
 
 
 class _SharedVram:
-    """One region on `device` holding one set of tensors at a time: sets maps a name to host
-    tensors (pinned on a GPU), and views[name] are that set's fixed places in the region."""
+    """One region on `device` holding one set of tensors at a time. sets maps a name to tensors
+    (on any device) that give the set's layout and contents; views[name] are that set's fixed
+    places in the region. Each set's host copy is its region image, in pinned slabs of SLAB bytes
+    (on a GPU): the pinned allocator rounds every block up to a power of two, so one block per
+    tensor or per set would waste up to half of it."""
 
     ALIGN = 256  # bytes; every view starts aligned for any dtype
+    SLAB = 64 * 2**20
 
     def __init__(self, sets: dict[str, list[torch.Tensor]], device: torch.device) -> None:
         offsets = {name: self._offsets(tensors) for name, tensors in sets.items()}
         self.size = max((offsets[name][-1] for name in sets), default=0)
         self.region = torch.empty(self.size, dtype=torch.uint8, device=device)
-        self.host = sets
         self.views = {name: [self.region[start:start + t.numel() * t.element_size()].view(t.dtype).view(t.shape)
                              for start, t in zip(offsets[name], tensors)] for name, tensors in sets.items()}
+        self.bytes = {name: sum(t.numel() * t.element_size() for t in tensors) for name, tensors in sets.items()}
+        self.host = {name: self._image(tensors, offsets[name], device.type == "cuda") for name, tensors in sets.items()}
         self.resident: str | None = None
         self.swaps = 0
 
@@ -570,8 +575,20 @@ class _SharedVram:
             offsets.append(offsets[-1] + -(-t.numel() * t.element_size() // cls.ALIGN) * cls.ALIGN)
         return offsets
 
-    def set_bytes(self, name: str) -> int:
-        return sum(t.numel() * t.element_size() for t in self.host[name])
+    @classmethod
+    def _image(cls, tensors: list[torch.Tensor], offsets: list[int], pin: bool) -> list[torch.Tensor]:
+        """The set's bytes at their region offsets, in slabs; a tensor may span slabs."""
+        slabs = [torch.empty(min(cls.SLAB, offsets[-1] - start), dtype=torch.uint8, pin_memory=pin)
+                 for start in range(0, offsets[-1], cls.SLAB)]
+        for t, start in zip(tensors, offsets):
+            data = t.detach().contiguous().view(-1).view(torch.uint8)
+            done = 0
+            while done < data.numel():
+                slab, within = divmod(start + done, cls.SLAB)
+                count = min(data.numel() - done, cls.SLAB - within)
+                slabs[slab][within:within + count].copy_(data[done:done + count])
+                done += count
+        return slabs
 
     def acquire(self, name: str) -> list[torch.Tensor]:
         """Make `name` resident, copying it in from host if another set is, and return its views.
@@ -582,22 +599,16 @@ class _SharedVram:
             if gpu:
                 torch.cuda.synchronize(self.region.device)
             started = time.perf_counter()
-            for view, host in zip(self.views[name], self.host[name]):
-                view.copy_(host, non_blocking=True)
+            for index, slab in enumerate(self.host[name]):
+                self.region[index * self.SLAB:index * self.SLAB + slab.numel()].copy_(slab, non_blocking=True)
             if gpu:
                 torch.cuda.synchronize(self.region.device)
             previous, self.resident = self.resident, name
             self.swaps += 1
             logger.info("CED/vision shared VRAM swap %d on %s: %s -> %s, %.3f GiB in %.1f ms (region %.3f GiB)",
-                        self.swaps, self.region.device, previous, name, self.set_bytes(name) / 2**30,
+                        self.swaps, self.region.device, previous, name, self.bytes[name] / 2**30,
                         (time.perf_counter() - started) * 1000, self.size / 2**30)
         return self.views[name]
-
-
-def _pinned(t: torch.Tensor, device: torch.device) -> torch.Tensor:
-    """A host copy of t, pinned when the region is on a GPU (fast, asynchronous copies)."""
-    host = t.detach().to("cpu", copy=True).contiguous()
-    return host.pin_memory() if device.type == "cuda" else host
 
 
 def _share_vision(shared: _SharedVram, params: list[nn.Parameter]) -> None:
@@ -613,9 +624,9 @@ def _share_vision(shared: _SharedVram, params: list[nn.Parameter]) -> None:
 
 
 def _shared_vram_setup(device: torch.device) -> _SharedVram:
-    """The region for this GPU: every CED projector's pinned host copy (_ced_load on the CPU) and,
-    with a vision tower, its weights on this GPU, which move into the region and stay resident
-    first (vLLM profiles the encoder at startup)."""
+    """The region for this GPU: every CED projector (_ced_load on the CPU) and, with a vision
+    tower, its weights on this GPU, which move into the region and stay resident first (vLLM
+    profiles the encoder at startup)."""
     started = time.perf_counter()
     free_before = torch.cuda.mem_get_info(device)[0] if device.type == "cuda" else 0
     with torch.inference_mode(False):
@@ -624,9 +635,9 @@ def _shared_vram_setup(device: torch.device) -> _SharedVram:
         for pid in _CED_FILES:
             projector = _ced_load(_CED_FILES[pid], torch.device("cpu"))
             _SHARED.setdefault("names", {})[pid] = list(projector)
-            sets[f"ced:{pid}"] = [_pinned(t, device) for t in projector.values()]
-        sets["vision"] = [_pinned(p.data, device) for p in params]
-        shared = _SharedVram(sets, device)
+            sets[f"ced:{pid}"] = list(projector.values())
+        sets["vision"] = [p.data for p in params]
+        shared = _SharedVram(sets, device)  # copies every set to host before the vision weights move
         _share_vision(shared, params)
         shared.acquire("vision")
     if device.type == "cuda":
@@ -635,9 +646,9 @@ def _shared_vram_setup(device: torch.device) -> _SharedVram:
     for pid in _CED_FILES:
         logger.info("CED projector id=%d split=%d sources=%s %s: %.3f GiB in pinned host RAM, shares VRAM with the "
                     "vision encoder: %s", pid, _CED_SPLITS[pid], ",".join(_CED_SOURCES[pid]), _CED_PRECISION,
-                    shared.set_bytes(f"ced:{pid}") / 2**30, _CED_FILES[pid])
+                    shared.bytes[f"ced:{pid}"] / 2**30, _CED_FILES[pid])
     logger.info("CED/vision shared VRAM on %s: region %.3f GiB (vision encoder %.3f GiB in %d tensors), set up in "
-                "%.2fs; device free %.2f -> %.2f GiB", device, shared.size / 2**30, shared.set_bytes("vision") / 2**30,
+                "%.2fs; device free %.2f -> %.2f GiB", device, shared.size / 2**30, shared.bytes["vision"] / 2**30,
                 len(params), time.perf_counter() - started, free_before / 2**30, free_after / 2**30)
     return shared
 

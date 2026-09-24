@@ -514,7 +514,7 @@ def test_ced_quality_says_its_projector_shares_vram_with_the_vision_encoder(tmp_
     assert "shares with the vision encoder's weights" in only(reporter, "ced-projector").message
 
 
-def test_ced_quality_host_copies_are_the_projector_per_rank_plus_the_mmproj(tmp_path, monkeypatch):
+def test_ced_quality_host_copies_are_the_projector_and_the_mmproj_share_per_rank_in_whole_slabs(tmp_path, monkeypatch):
     payload = safetensors(SPLIT16)
     quality_setup(tmp_path, monkeypatch, payload)
     mmproj = Path(os.environ["R9V_MODEL_DIR"]) / "vision/mmproj.gguf"
@@ -522,8 +522,10 @@ def test_ced_quality_host_copies_are_the_projector_per_rank_plus_the_mmproj(tmp_
     mmproj.write_bytes(b"\0" * 1000)
     monkeypatch.setenv("R9V_MMPROJ_REL", "vision/mmproj.gguf")
     monkeypatch.setenv("R9V_TENSOR_PARALLEL_SIZE", "2")
+    monkeypatch.setattr(profile_checks, "PINNED_SLAB", 256)
 
-    assert profile_checks.ced_quality_host_bytes() == 2 * len(payload) + 1000
+    projector_slabs = -(-len(payload) // 256) * 256
+    assert profile_checks.ced_quality_host_bytes() == 2 * (projector_slabs + 512)  # 500 mmproj bytes per rank: 2 slabs
 
 
 def test_ced_on_holds_no_host_copies(tmp_path, monkeypatch):

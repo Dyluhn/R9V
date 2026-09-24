@@ -59,11 +59,15 @@ def ced_projector_vram(repo_root: Path, profile: dict | None) -> int:
     return pinned["bytes"]
 
 
+PINNED_SLAB = 64 * 2**20  # the runtime keeps each host copy in pinned slabs of this size
+
+
 def ced_quality_host_bytes() -> int:
     """Pinned host RAM CED quality holds: every TP rank keeps its own copy of the projector and
     of its share of the vision encoder's weights (together the mmproj file), because both take
-    turns in one VRAM region. Sized from the installed files; 0 for other CED modes or before
-    setup (the model-package check reports missing files)."""
+    turns in one VRAM region; each copy is rounded up to whole slabs. Sized from the installed
+    files; 0 for other CED modes or before setup (the model-package check reports missing
+    files)."""
     model_dir = os.environ.get("R9V_MODEL_DIR")
     if _ced_switch() != "quality" or not model_dir:
         return 0
@@ -72,7 +76,9 @@ def ced_quality_host_bytes() -> int:
         vision = (Path(model_dir) / os.environ["R9V_MMPROJ_REL"]).stat().st_size
     except (KeyError, OSError):
         return 0
-    return projector * int(os.environ.get("R9V_TENSOR_PARALLEL_SIZE", "1")) + vision
+    ranks = int(os.environ.get("R9V_TENSOR_PARALLEL_SIZE", "1"))
+    slabs = lambda size: -(-size // PINNED_SLAB) * PINNED_SLAB  # noqa: E731
+    return ranks * (slabs(projector) + slabs(-(-vision // ranks)))
 
 
 def projector_split(path: Path) -> tuple[int | None, str | None]:
