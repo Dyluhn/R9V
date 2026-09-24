@@ -178,7 +178,9 @@ requests for prompt logprobs always run exactly.
   where the default lost 17% (×1.049), for 1.55× instead of 1.68× prefill.
   Run `setup ... --ced quality` once: it downloads that projector (1.8 GB),
   which a default setup skips. It takes 1.79 GiB of VRAM per GPU, stored as
-  int8. It has not yet run in the clean-install GPU test.
+  int8. It was graded on the eager server and has not been tested on the
+  compiled server; VRAM on GPU 1 may be tight. Please report issues. `on`
+  stays the default.
 
 The projector takes 1.76 GiB of VRAM per GPU, so the profile keeps a 1.5 GiB
 free-VRAM target per card instead of 3 GiB. The expert placement is fixed

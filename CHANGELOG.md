@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.4.2 (unreleased)
+## v0.4.2 (2026-09-24)
 
 ### `qwen38-mtp4-uncensored`: CED quality mode (opt-in)
 
@@ -24,7 +24,15 @@
   only with `--ced quality`; `start --ced quality` before that is refused and
   says to run setup with it. The doctor checks it against its pinned SHA-256
   and counts it in the VRAM budget.
-- Not yet run in the clean-install GPU test (compiled server, CUDA graphs).
+- **Not tested on the compiled server.** The numbers above come from the eager
+  grading server; `--ced quality` has not run in R9V's compiled production
+  server (CUDA graphs) or in the clean-install GPU test. VRAM on GPU 1 may be
+  tight. Please report any issue. `on` stays the default and is unchanged
+  from v0.4.1.
+- The model package moves to revision `8112610745a8ddc3a19cc659314af245820ee728`,
+  which adds the quality projector; the 24 files published before are
+  unchanged, so an existing install downloads nothing new unless it picks
+  `--ced quality`.
 
 ### `./r9v doctor --runtime`
 
@@ -38,6 +46,12 @@
 
 - The runtime descriptor changed (it pins the new model file), so an existing
   install qualifies again once on its next start, whatever its CED mode.
+
+### Testing
+
+- CPU tests, static checks and the launch parity tests (`on` and `off` launch
+  exactly as the GPU-tested v0.4.1 container) pass. The clean-install GPU test
+  was not rerun for v0.4.2.
 
 ## v0.4.1 (2026-09-24)
 

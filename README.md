@@ -20,7 +20,7 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 |---|---|---|---|
 | `qwen38-mtp4` | [IQ4_XS model bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
 | `qwen38-q4-xl` | [Q4_K_XL weights](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-Q4_K_XL) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
-| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime with host expert dedupe: MTP4, dual R9700, 128K context, CED on; needs 56.3 GiB free RAM at start | v0.4.1 clean install (fetch, setup, first start CED on/off, restart) passed on the reference host |
+| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime with host expert dedupe: MTP4, dual R9700, 128K context, CED on; needs 56.3 GiB free RAM at start | v0.4.1 clean install (fetch, setup, first start CED on/off, restart) passed on the reference host; v0.4.2 `--ced quality` not yet run on the compiled server |
 
 **About `qwen38-mtp4-uncensored`.** Its model had its refusal behavior removed and will comply with harmful requests the original model refuses. Use it for research, and add your own moderation before exposing it to anyone. R9V serves it on 127.0.0.1 only; setting `R9V_HOST_BIND` to expose it gives anyone who can reach the port an unauthenticated model with no refusals.
 
@@ -40,7 +40,7 @@ Turn CED off for the server with `--ced off` in setup or start; keep a single re
 | `on` (default) | ×1.049 | 17% | 1.68× | 1.76 GiB (bf16) |
 | `quality` | ×1.029 | 10% | 1.55× | 1.79 GiB (stored int8) |
 
-The projector math costs 56 ms per 1K approximated tokens instead of 24 ms. Setup downloads the quality projector (1.8 GB) only when you pick it: run `setup --ced quality` once, then `start` keeps the choice. It has not yet run in the full clean-install GPU test; `on` stays the default. The profile uses a fixed expert placement, so it does not accept `--headroom`.
+The projector math costs 56 ms per 1K approximated tokens instead of 24 ms. Setup downloads the quality projector (1.8 GB) only when you pick it: run `setup --ced quality` once, then `start` keeps the choice. It was graded on the eager server and **has not been tested on the compiled server**; VRAM on GPU 1 may be tight, so please report issues. `on` stays the default and is unchanged from v0.4.1. The profile uses a fixed expert placement, so it does not accept `--headroom`.
 
 Use the explicit MTP4 aliases for the current workflow.
 
@@ -56,7 +56,7 @@ Unobserved experts are explicit ties in the maps. Routing frequency depends on w
 ## Model downloads
 
 - **IQ4_XS:** [R9V model page](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS) · [files at the revision used by setup](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS/tree/bf836f0c20b6c92fcad4226ad3115eb8a19f7582). This bundle includes all three target GGUF shards, the MTP checkpoint, vision projector, tokenizer and configuration files.
-- **Uncensored IQ4_XS:** [R9V model page](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) · [files at the revision used by setup](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS/tree/b06687cb2f83ea38039cadd249341a7bd5b76fa3). The same layout as the IQ4_XS bundle, with orcarouter's abliterated target and F16 vision projector, plus the CED projector.
+- **Uncensored IQ4_XS:** [R9V model page](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) · [files at the revision used by setup](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS/tree/8112610745a8ddc3a19cc659314af245820ee728). The same layout as the IQ4_XS bundle, with orcarouter's abliterated target and F16 vision projector, plus the CED projector.
 - **Q4_K_XL:** [all four target GGUF shards at the revision used by setup](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-Q4_K_XL). The Q4 profile also uses the shared [MTP checkpoint and configuration](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS/tree/bf836f0c20b6c92fcad4226ad3115eb8a19f7582/mtp), [Q8_0 vision projector](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS/tree/bf836f0c20b6c92fcad4226ad3115eb8a19f7582/vision), and [tokenizer and model metadata](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS/tree/bf836f0c20b6c92fcad4226ad3115eb8a19f7582/metadata) from the IQ4 bundle.
 
 The `./r9v setup` commands below download and verify the required files automatically. For manual downloads, keep every shard and the package directory layout; use the [IQ4 package manifest](packages/models/qwen38-flash-next/ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json) or [Q4 package manifest](packages/models/qwen38-flash-next/ud-q4-k-xl--mtp-blockfp8--mmproj-q8/package.json) for exact paths, revisions and hashes. The PLE table is extracted locally from the target GGUF; it is not a separate model download.
