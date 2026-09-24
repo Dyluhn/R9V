@@ -313,7 +313,8 @@ def test_uncensored_docs_state_the_ced_tradeoff_and_switches():
     for path in ("README.md", "docs/installation.md", "LLM_SETUP_GUIDE.md"):
         text = (ROOT / path).read_text(encoding="utf-8")
         assert "qwen38-mtp4-uncensored" in text, path
-        assert "1.70" in text and "1.051" in text and "10%" in text, path
+        assert "1.5" in text and "1.8" in text and "1.70" not in text, path
+        assert "1.051" in text and "10%" in text, path
         assert "--ced off" in text and '"r9v_ced": false' in text, path
 
 

@@ -22,7 +22,7 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 
 It has CED (approximate long-prompt prefill) on by default. On prompts of 8,192 tokens or more, layers 0–15 run exactly and a split-16 projector stands in for the later layers on all but the last ~2K prompt tokens. Decode stays exact. The tradeoff, measured on the reference host:
 
-- About **1.70× faster prefill** on prompts of 12K tokens or more.
+- About **1.5× faster prefill** at ~13K tokens, rising to about **1.8×** at 32K tokens and above.
 - About **×1.051 perplexity** on prompts that depend on their long context.
 - About **10% fewer MTP tokens per step** on the first answer after a CED prefill; later turns are normal.
 - The projector takes **1.76 GiB of VRAM per GPU**, so the profile's free-VRAM target is 1.5 GiB per card instead of 3 GiB.

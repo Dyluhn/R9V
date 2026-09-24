@@ -60,6 +60,11 @@ consolidated 1.3.0 package's performance notes and the
 | Projector VRAM | 1.76 GiB per GPU (bf16) |
 | Free VRAM with the projector loaded, idle | about 1.7–1.8 GiB (rank 0) and 2.1–2.2 GiB (rank 1) |
 
+The speedup depends on prompt length, not just on crossing the threshold. In
+the release config on a clean install it was 1.47× at 12,960 tokens, where the
+exact tail rounds up to 3,264 tokens, and 1.80× at 31,987 tokens: about 1.5× at
+~13K tokens, rising to about 1.8× at 32K and above.
+
 An exact request after a CED request of the same prompt matched a fresh exact
 run bit for bit, and there were no recompiles after the first CED request.
 With CED off the service loads the image's own model file, so its compiled

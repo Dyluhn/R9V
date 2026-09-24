@@ -146,7 +146,8 @@ receipt.
 **CED is on by default.** On prompts of 8,192 tokens or more, layers 0–15 run
 exactly and the split-16 projector predicts the later layers for all but the
 last ~2K prompt tokens. Decode stays exact. Measured on the reference host:
-about 1.70× faster prefill on prompts of 12K+ tokens, about ×1.051 perplexity
+about 1.5× faster prefill at ~13K tokens, rising to about 1.8× at 32K tokens
+and above, about ×1.051 perplexity
 on prompts that depend on their long context, and about 10% fewer MTP tokens
 per step on the first answer after a CED prefill. Prompts with images and
 requests for prompt logprobs always run exactly.

@@ -82,7 +82,8 @@ itself; the first start compiles the model, so give it a long timeout:
 ```
 
 It runs the consolidated 1.3.0 runtime with CED (approximate long-prompt
-prefill) on by default: about 1.70x faster prefill on prompts of 12K+ tokens,
+prefill) on by default: about 1.5x faster prefill at ~13K tokens, rising to
+about 1.8x at 32K tokens and above,
 about x1.051 perplexity on prompts that depend on long context, and about 10%
 fewer MTP tokens per step on the first answer after a CED prefill. Decode is
 exact. `--ced off` in setup or start turns CED off; one request can stay exact
