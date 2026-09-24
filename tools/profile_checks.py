@@ -153,6 +153,14 @@ def check_runtime_overlays(reporter) -> None:
     )
 
 
+def _runtime_pins(runtime_path: Path, runtime: dict) -> list[int]:
+    """Experts per layer each rank pins, from the pin list the runtime mounts."""
+    overlays = runtime["overlays"]
+    pins = json.loads((runtime_path.parent / overlays["directory"] / "full_mutable_pins.json").read_text())
+    counts = pins["pinned_slots"]
+    return [int(counts[str(rank)]) for rank in range(len(counts))]
+
+
 def check_expert_limits(reporter, repo_root: Path, profile: dict | None) -> None:
     """A full mutable expert cache: R9V_MAX_EFFECTIVE_EXPERTS_PER_RANK must equal the fixed
     placement's hot experts plus cache slots, which must hold what the runtime keeps resident."""
@@ -171,6 +179,8 @@ def check_expert_limits(reporter, repo_root: Path, profile: dict | None) -> None
         slots = int(placement["cache_slots"])
         ranks = sorted(int(value) for value in placement["cache_ranks"])
         runtime = descriptor(repo_root, profile, "runtime")
+        pinned = [int(value) for value in cache.get("pinned_slots", [0] * len(capacities))]
+        pins = _runtime_pins(repo_root / profile["descriptors"]["runtime"], runtime) if any(pinned) else None
         configured = [int(value) for value in
                       os.environ.get("R9V_MAX_EFFECTIVE_EXPERTS_PER_RANK", "").split(",") if value.strip()]
     except (OSError, KeyError, TypeError, ValueError) as error:
@@ -188,6 +198,8 @@ def check_expert_limits(reporter, repo_root: Path, profile: dict | None) -> None
     if configured != allocated:
         problems.append(f"R9V_MAX_EFFECTIVE_EXPERTS_PER_RANK={','.join(map(str, configured))} differs "
                         f"from the placement's hot experts plus cache slots, {allocated}")
+    if pins is not None and pins != pinned:
+        problems.append(f"the runtime's pin list pins {pins} experts per layer; the placement expects {pinned}")
     cache_env = (os.environ.get("R9V_TIERED_EXPERT_CACHE_SLOTS"), os.environ.get("R9V_TIERED_EXPERT_CACHE_RANKS"))
     if cache_env != (str(slots), ",".join(map(str, ranks))):
         problems.append(f"cache slots {cache_env[0]} on ranks {cache_env[1]} differ from the placement's "
@@ -198,6 +210,7 @@ def check_expert_limits(reporter, repo_root: Path, profile: dict | None) -> None
         reporter.passed(
             "expert-limit-consistency",
             f"expert ceilings {allocated} = hot experts {hot} + {slots} cache slots on rank(s) "
-            f"{ranks}; the runtime's mutable cache keeps {capacities} of them resident per layer",
-            ceilings=allocated, capacities=capacities,
+            f"{ranks}; the runtime's mutable cache keeps {capacities} of them resident per layer, "
+            f"{pinned} of them pinned for good",
+            ceilings=allocated, capacities=capacities, pinned=pinned,
         )

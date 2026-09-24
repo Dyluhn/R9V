@@ -183,6 +183,19 @@ def test_shipped_expert_limits_are_consistent(monkeypatch):
     check = only(reporter, "expert-limit-consistency")
     assert check.status == "PASS", check.message
     assert check.details["ceilings"] == [222, 428]
+    assert check.details["pinned"] == [0, 400]
+
+
+def test_runtime_pin_list_of_another_size_than_the_placement_expects_fails(monkeypatch):
+    for key, value in EXPERT_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(profile_checks, "_runtime_pins", lambda path, runtime: [0, 300])
+    reporter = Reporter()
+
+    profile_checks.check_expert_limits(reporter, ROOT, UNCENSORED)
+
+    assert "pins [0, 300] experts per layer; the placement expects [0, 400]" in only(
+        reporter, "expert-limit-consistency").message
 
 
 def test_changed_expert_ceiling_fails_with_the_expected_values(monkeypatch):
