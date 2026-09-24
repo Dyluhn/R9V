@@ -362,3 +362,80 @@ def test_reusable_source_is_counted_without_allocating_duplicate_storage(tmp_pat
     source.write_bytes(b'weights')
     assert setup.reusable_source(item, new, old) == source.resolve()
     assert not (new / item['path']).exists()
+
+
+UNCENSORED = Path(__file__).resolve().parents[1] / 'profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored'
+UNCENSORED_ID = 'qwen38-flash-next/uncensored-iq4-xs/dual-r9700-mtp4-128k'
+
+
+def select_uncensored(monkeypatch):
+    monkeypatch.setenv('R9V_PROFILE_ROOT', str(UNCENSORED))
+    monkeypatch.setenv('R9V_PROFILE_ID', UNCENSORED_ID)
+    for key in ('R9V_CED', 'R9V_PLACEMENT_PLAN', 'R9V_CALIBRATION_PATH', 'R9V_CONFIG_FILE'):
+        monkeypatch.delenv(key, raising=False)
+
+
+@pytest.mark.parametrize('option', ['headroom', 'calibration', 'expert_catalog'])
+@pytest.mark.parametrize('action', ['setup', 'start'])
+def test_fixed_placement_refuses_replanning_options_before_side_effects(
+        tmp_path, monkeypatch, option, action):
+    select_uncensored(monkeypatch)
+    monkeypatch.setattr(setup, 'run', lambda *a, **k: pytest.fail('side effect before refusal'))
+    args = SimpleNamespace(**{option: '1.5,1.5' if option == 'headroom' else tmp_path / 'x.json'},
+                           image=None, build=False, timeout=10, state_dir=tmp_path)
+    state = {'ready': True, 'config': {}}
+
+    with pytest.raises(ValueError, match='fixed placement'):
+        getattr(setup, action)(args, state, tmp_path / 'setup.json')
+
+
+def test_ced_option_is_refused_for_a_runtime_without_ced(tmp_path, monkeypatch):
+    monkeypatch.setenv('R9V_PROFILE_ROOT', str(UNCENSORED.parent / 'dual-r9700-mtp4'))
+    monkeypatch.setenv('R9V_PROFILE_ID', 'qwen38-flash-next/ud-iq4-xs/dual-r9700-mtp4-128k')
+    monkeypatch.setattr(setup, 'run', lambda *a, **k: pytest.fail('side effect before refusal'))
+
+    with pytest.raises(ValueError, match='has no CED'):
+        setup.start(SimpleNamespace(ced='on', timeout=10, state_dir=tmp_path),
+                    {'ready': True, 'config': {}}, tmp_path / 'setup.json')
+
+
+def test_fixed_placement_qualifies_first_start_and_requalifies_when_ced_changes(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from tools import prepare_placement
+    select_uncensored(monkeypatch)
+    monkeypatch.setenv('R9V_CAPTURE_AUTO', '0')
+    monkeypatch.setattr(prepare_placement, 'apply', lambda *a: pytest.fail('fixed placement re-planned'))
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text('{"fixture": true}')
+    runtime = tmp_path / 'runtime.json'
+    runtime.write_text('{}')
+    state = {'ready': True, 'config': {'R9V_EXPERT_MANIFEST_PATH': str(manifest), 'R9V_CED': 'on',
+                                       'R9V_RUNTIME_DESCRIPTOR': str(runtime), 'R9V_IMAGE': 'sha256:fixture'}}
+    launches = []
+    def run(command, **kwargs):
+        if str(command[0]).endswith('launch.sh'):
+            launches.append(kwargs['env']['R9V_CED'])
+        if '--qualify' in command:
+            output = Path(command[command.index('--output') + 1])
+            output.mkdir()
+            (output / 'result.json').write_text('{"passed":true}')
+        return SimpleNamespace(stdout='running')
+    monkeypatch.setattr(setup, 'run', run)
+    monkeypatch.setattr(setup.urllib.request, 'urlopen', lambda *a, **k: nullcontext(SimpleNamespace(status=200)))
+    qualified = []
+    def start(**options):
+        before = state.get('qualification')
+        setup.start(SimpleNamespace(timeout=10, state_dir=tmp_path, **options), state, tmp_path / 'setup.json')
+        qualified.append(state['qualification'] is not before)
+
+    start()
+    start()
+    start(ced='off')
+    start()
+
+    assert qualified == [True, False, True, False]
+    assert launches == ['on', 'on', 'off', 'off']
+    saved = json.loads((tmp_path / 'setup.json').read_text())
+    assert saved['config']['R9V_CED'] == 'off'
+    assert saved['qualification']['ced'] == 'off'
+    assert saved['qualification']['placement_sha256'] == hashlib.sha256(manifest.read_bytes()).hexdigest()

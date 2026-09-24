@@ -2,6 +2,8 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 *.so
+# Pinned runtime overlay kernels; runtime.json pins their SHA-256.
+!runtimes/qwen38-flash-next-gfx1201-mtp4-v3/overlays/*.so
 *.o
 *.hsaco
 build/

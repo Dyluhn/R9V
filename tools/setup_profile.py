@@ -196,8 +196,51 @@ def container_user_args():
     return result
 
 
+def fixed_placement(profile):
+    """True when the profile pins one expert placement that must never be re-planned."""
+    relative = profile.get('descriptors', {}).get('placement')
+    return bool(relative) and json.loads((ROOT / relative).read_text()).get('fixed') is True
+
+
+def check_profile_options(args, profile):
+    """Refuse options this profile cannot honor, before any side effect."""
+    replanning = [option for option, name in (('--headroom', 'headroom'), ('--calibration', 'calibration'),
+                                              ('--expert-catalog', 'expert_catalog'))
+                  if getattr(args, name, None)]
+    if replanning and fixed_placement(profile):
+        raise ValueError(f"{', '.join(replanning)} would re-plan the expert placement, but "
+                         f"{profile['id']} uses a fixed placement that its mutable expert cache "
+                         "requires; its free-VRAM target is part of the profile")
+    if getattr(args, 'ced', None):
+        runtime = json.loads((ROOT / profile['descriptors']['runtime']).read_text())
+        if 'ced' not in runtime.get('overlays', {}).get('mounts', {}):
+            raise ValueError(f"--ced: runtime {profile['runtime']} of {profile['id']} has no CED")
+
+
+def qualification_identity(env, fixed):
+    """What a first-start qualification receipt vouches for, or None if none is needed."""
+    if fixed:
+        identity = {
+            'placement_sha256': hashlib.sha256(Path(env['R9V_EXPERT_MANIFEST_PATH']).read_bytes()).hexdigest(),
+            'runtime_sha256': hashlib.sha256(Path(env['R9V_RUNTIME_DESCRIPTOR']).read_bytes()).hexdigest(),
+            'image': env['R9V_IMAGE'],
+        }
+    elif env.get('R9V_PLACEMENT_PLAN'):
+        try:
+            from tools.plan_experts import digest
+        except ModuleNotFoundError:
+            from plan_experts import digest
+        identity = {'placement_sha256': digest(json.loads(Path(env['R9V_PLACEMENT_PLAN']).read_text()))}
+    else:
+        return None
+    if env.get('R9V_CED'):
+        identity['ced'] = env['R9V_CED']
+    return identity
+
+
 def setup(args, state, state_path):
     _, profile = selected_profile()
+    check_profile_options(args, profile)
     descriptor = ROOT / profile['descriptors']['model_package']
     package = json.loads(descriptor.read_text())
     runtime_path = ROOT / profile['descriptors']['runtime']
@@ -224,6 +267,8 @@ def setup(args, state, state_path):
     run(['docker', 'info', '--format', '{{.DockerRootDir}}'], capture=True, timeout=30)
     config = profile_settings()
     config['R9V_RUNTIME_DESCRIPTOR'] = str(runtime_path.resolve())
+    if getattr(args, 'ced', None):
+        config['R9V_CED'] = args.ced
     if profile.get('id'):
         config['R9V_PROFILE_ID'] = profile['id']
         state['profile_id'] = profile['id']
@@ -343,22 +388,28 @@ def setup(args, state, state_path):
 def start(args, state, state_path):
     if not state.get('ready'):
         raise ValueError("Run setup successfully before start")
+    _, profile = selected_profile()
+    check_profile_options(args, profile)
+    fixed = fixed_placement(profile)
+    if getattr(args, 'ced', None):
+        state['config']['R9V_CED'] = args.ced
+        save(state_path, state)
     env = {**os.environ, **state['config']}
     # Saved paths/image/GPU identity must not be silently replaced by a shell config.
     env.pop('R9V_CONFIG_FILE', None)
-    calibration = getattr(args, 'calibration', None) or env.get('R9V_CALIBRATION_PATH')
+    # A fixed placement never re-plans, even from a calibration left in the shell.
+    calibration = None if fixed else (getattr(args, 'calibration', None) or env.get('R9V_CALIBRATION_PATH'))
     if getattr(args, 'expert_catalog', None):
         env['R9V_EXPERT_CATALOG_PATH'] = str(args.expert_catalog.resolve())
     if getattr(args, 'headroom', None):
         headroom_bytes(args.headroom, 2)
         env['R9V_MIN_FREE_VRAM_GIB_BY_RANK'] = args.headroom
         env['R9V_HEADROOM_SELECTION'] = '1'
-    if not calibration:
+    if not calibration and not fixed:
         try:
             from tools.prepare_placement import apply
         except ModuleNotFoundError:
             from prepare_placement import apply
-        _, profile = selected_profile()
         runtime = json.loads((ROOT / profile['descriptors']['runtime']).read_text())
         prepared = apply(env, runtime, args.state_dir) if getattr(args, 'state_dir', None) else False
         if not prepared and (env.get('R9V_HEADROOM_SELECTION') == '1' or env.get('R9V_EXPERT_CATALOG_PATH')):
@@ -417,15 +468,11 @@ def start(args, state, state_path):
             healthy = False
         if healthy:
             run([ROOT / 'scripts/profile-doctor.sh', '--runtime'], env=env)
-            if env.get('R9V_PLACEMENT_PLAN'):
-                try:
-                    from tools.plan_experts import digest
-                except ModuleNotFoundError:
-                    from plan_experts import digest
-                placement_sha = digest(json.loads(Path(env['R9V_PLACEMENT_PLAN']).read_text()))
+            identity = qualification_identity(env, fixed)
+            if identity:
                 receipt = state.get('qualification', {})
                 valid = False
-                if isinstance(receipt, dict) and receipt.get('placement_sha256') == placement_sha:
+                if isinstance(receipt, dict) and all(receipt.get(k) == v for k, v in identity.items()):
                     try:
                         evidence = Path(receipt['result']).read_bytes()
                         valid = (hashlib.sha256(evidence).hexdigest() == receipt['sha256']
@@ -440,8 +487,8 @@ def start(args, state, state_path):
                     evidence = result_path.read_bytes()
                     if json.loads(evidence).get('passed') is not True:
                         raise ValueError('Placement workload did not qualify')
-                    state['qualification'] = {'placement_sha256': placement_sha,
-                        'result': str(result_path), 'sha256': hashlib.sha256(evidence).hexdigest()}
+                    state['qualification'] = {**identity, 'result': str(result_path),
+                                              'sha256': hashlib.sha256(evidence).hexdigest()}
                     save(state_path, state)
             print(f"Ready: http://127.0.0.1:{port}/v1")
             return
@@ -479,6 +526,7 @@ def main():
     parser.add_argument('--headroom', help='per-card free GiB targets, e.g. 5,5; requires a release seed or local calibration')
     parser.add_argument('--calibration', type=Path, help='matching local memory envelope from a qualified workload')
     parser.add_argument('--expert-catalog', type=Path, help='held-out validated full ranking descended from the calibrated source map')
+    parser.add_argument('--ced', choices=['on', 'off'], help='CED long-prompt prefill for profiles that ship it; saved for later starts')
     parser.add_argument('--accept-model-license', action='store_true')
     parser.add_argument('--hash', action='store_true', help='rehash all artifacts, ignoring verification receipts')
     parser.add_argument('--timeout', type=int, default=900)

@@ -36,6 +36,32 @@ visible_devices=${R9V_VISIBLE_DEVICES:-0,1}
 IFS=',' read -r -a selected_devices <<< "$visible_devices"
 printf -v hip_visible_devices '%s,' "${!selected_devices[@]}"
 hip_visible_devices=${hip_visible_devices%,}
+
+# The API has no authentication, so it is published on 127.0.0.1 unless
+# R9V_HOST_BIND names another address (0.0.0.0: all interfaces). Health checks,
+# doctor and qualification use 127.0.0.1, so a bind that does not cover it is
+# published on 127.0.0.1 as well.
+: "${R9V_HOST_BIND:=127.0.0.1}"
+publish_lines=$(python3 - "$R9V_HOST_BIND" "${R9V_HOST_PORT:-}" <<'PYPUBLISH'
+import ipaddress, re, sys
+bind, port = sys.argv[1:]
+try:
+    address = ipaddress.ip_address(bind)
+except ValueError:
+    sys.exit(f'R9V_HOST_BIND must be an IPv4 or IPv6 address such as 127.0.0.1 or 0.0.0.0, not {bind!r}')
+if not re.fullmatch('[0-9]{1,5}', port) or not 1 <= int(port) <= 65535:
+    sys.exit(f'R9V_HOST_PORT must be a port number from 1 to 65535, not {port!r}; '
+             'set the address with R9V_HOST_BIND')
+host = f'[{address}]' if address.version == 6 else str(address)
+for published in [host] if str(address) in ('127.0.0.1', '0.0.0.0') else [host, '127.0.0.1']:
+    print('--publish', f'{published}:{port}:8000', sep='\n')
+if not address.is_loopback:
+    print(f'WARN the API is published on {host}:{port}, beyond this machine, without authentication',
+          file=sys.stderr)
+PYPUBLISH
+) || exit 2
+mapfile -t publish_args <<< "$publish_lines"
+
 : "${R9V_PREFLIGHT:=1}"
 : "${R9V_TIERED_PREFILL_GROUP_SIZE:=0}"
 : "${R9V_PLE_PINNED_RESERVE_BYTES:=17179869184}"
@@ -184,6 +210,13 @@ case "${R9V_ENABLE_PREFIX_CACHING:-1}" in
     1) prefix_cache_args=(--enable-prefix-caching) ;;
     *) printf 'R9V_ENABLE_PREFIX_CACHING must be 0 or 1\n' >&2; exit 2 ;;
 esac
+if [[ -n ${R9V_PREFIX_CACHE_RETENTION_INTERVAL:-} && ${R9V_ENABLE_PREFIX_CACHING:-1} == 1 ]]; then
+    [[ $R9V_PREFIX_CACHE_RETENTION_INTERVAL =~ ^[0-9]+$ ]] || {
+        printf 'R9V_PREFIX_CACHE_RETENTION_INTERVAL must be a non-negative integer\n' >&2
+        exit 2
+    }
+    prefix_cache_args+=(--prefix-cache-retention-interval "$R9V_PREFIX_CACHE_RETENTION_INTERVAL")
+fi
 route_args=()
 eager_args=()
 if [[ -n ${R9V_ROUTE_PROFILE_DIR:-} ]]; then
@@ -254,6 +287,14 @@ if [[ -n ${R9V_EXPERT_MANIFEST_PATH:-} ]]; then
     manifest_mount_args=(--volume "$manifest_path:$manifest_container_path:ro")
 fi
 
+# Pinned image overlays (and CED when R9V_CED=on) from the runtime descriptor.
+# Refused before anything starts unless every overlay file matches its SHA-256.
+runtime_overlay_args=()
+if [[ -n ${R9V_RUNTIME_DESCRIPTOR:-} ]]; then
+    overlay_lines=$(python3 "$repo_root/tools/runtime_overlays.py" docker-args "$R9V_RUNTIME_DESCRIPTOR") || exit 2
+    [[ -z $overlay_lines ]] || mapfile -t runtime_overlay_args <<< "$overlay_lines"
+fi
+
 target_files=("$model_dir/$target_rel" "$model_dir/$target_shard2_rel" "$model_dir/$target_shard3_rel")
 [[ -z $target_shard4_rel ]] || target_files+=("$model_dir/$target_shard4_rel")
 for required in \
@@ -321,11 +362,12 @@ docker run --detach \
     --ipc host \
     --security-opt seccomp=unconfined \
     --security-opt label=disable \
-    --publish "$R9V_HOST_PORT:8000" \
+    "${publish_args[@]}" \
     --volume "$model_dir:/models:ro" \
     --volume "$ple_path:/ple/per_layer_token_embd.iq4_nl.bin:ro" \
     --volume "$cache_dir:/cache" \
     "${manifest_mount_args[@]}" \
+    "${runtime_overlay_args[@]}" \
     "${dev_overlay_args[@]}" \
     "${profiler_mount_args[@]}" \
     "${route_args[@]}" \

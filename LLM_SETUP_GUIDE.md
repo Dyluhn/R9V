@@ -1,7 +1,8 @@
 # Setup guide for AI assistants
 
-This guide covers `qwen38-mtp4` (UD-IQ4_XS, MTP4, 128K, experimental) and `qwen38-q4-xl`
-(UD-Q4_K_XL, MTP4, 128K) on two 32 GiB `gfx1201` Radeon AI PRO R9700 GPUs.
+This guide covers `qwen38-mtp4` (UD-IQ4_XS, MTP4, 128K, experimental), `qwen38-q4-xl`
+(UD-Q4_K_XL, MTP4, 128K) and `qwen38-mtp4-uncensored` (see the end of this guide) on
+two 32 GiB `gfx1201` Radeon AI PRO R9700 GPUs.
 Keep their model packages, catalogs, manifests, runtime descriptors, and
 calibration records separate.
 
@@ -43,6 +44,10 @@ curl -fsS http://127.0.0.1:8004/health
 curl -fsS http://127.0.0.1:8004/v1/models
 ```
 
+The API has no authentication and is published on 127.0.0.1 only. Expose it
+only if the user asks: run setup with `R9V_HOST_BIND=0.0.0.0` (or one
+interface's address), and tell them to put authentication or a firewall in front.
+
 Use `qwen38-q4-xl` for Q4. Start runs runtime checks and bounded qualification;
 health alone is not qualification. A reference memory seed remains an estimate
 and each new placement needs local workload validation. The portable release
@@ -58,5 +63,34 @@ public setup/start/restart and the planned BetterBench speed/latency evaluation
 remain pending. Use
 `./r9v support PROFILE --state-dir DIR` for private diagnostics. Preserve the
 fail-closed checks and pinned recursive submodules.
+
+## Uncensored profile
+
+`qwen38-mtp4-uncensored` (experimental) serves an abliterated model: its
+refusal behavior was removed and it will comply with harmful requests. Confirm
+the user wants that model before installing it, and tell them to add their own
+moderation before exposing it to anyone. Leave it on 127.0.0.1: do not set
+`R9V_HOST_BIND` for this profile unless authentication and moderation stand in
+front of the port. It needs its own model directory
+(about 92.4 GiB) and state directory. Setup downloads and verifies the package
+itself; the first start compiles the model, so give it a long timeout:
+
+```bash
+./r9v setup qwen38-mtp4-uncensored --model-dir "$MODEL_DIR" \
+  --state-dir "$STATE_DIR" --accept-model-license
+./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR" --timeout 2400
+```
+
+It runs the consolidated 1.3.0 runtime with CED (approximate long-prompt
+prefill) on by default: about 1.5x faster prefill at ~13K tokens, rising to
+about 1.8x at 32K tokens and above,
+about x1.051 perplexity on prompts that depend on long context, and about 10%
+fewer MTP tokens per step on the first answer after a CED prefill. Decode is
+exact. `--ced off` in setup or start turns CED off; one request can stay exact
+with `"vllm_xargs": {"r9v_ced": false}`. The profile uses a fixed expert
+placement: do not pass `--headroom`, `--calibration` or `--expert-catalog`;
+they are refused. Its public setup, first start and restart passed on the
+reference host; see
+[docs/qualification/uncensored-v040.md](docs/qualification/uncensored-v040.md).
 
 Full command details: [docs/installation.md](docs/installation.md).

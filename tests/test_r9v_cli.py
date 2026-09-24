@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLI = ROOT / "r9v"
@@ -36,7 +39,7 @@ def test_help_does_not_overstate_profile_qualification() -> None:
 def test_setup_help_exposes_headroom_and_reuse_options() -> None:
     result = run_cli("setup", "qwen38", "--help")
     assert result.returncode == 0
-    for option in ("--headroom", "--reuse-from", "--calibration", "--expert-catalog", "--state-dir"):
+    for option in ("--headroom", "--ced", "--reuse-from", "--calibration", "--expert-catalog", "--state-dir"):
         assert option in result.stdout
 
 
@@ -63,6 +66,7 @@ def test_catalog_can_be_grouped_by_topology() -> None:
     assert by_topology["dual-gpu"] == {
         "qwen38-flash-next/ud-iq4-xs/dual-r9700-128k",
         "qwen38-flash-next/ud-iq4-xs/dual-r9700-mtp4-128k",
+        "qwen38-flash-next/uncensored-iq4-xs/dual-r9700-mtp4-128k",
         "qwen38-flash-next/ud-q4-k-xl/dual-r9700-128k",
     }
 
@@ -137,3 +141,50 @@ def test_q4_fetch_and_verify_select_its_own_package():
         assert result.returncode == 0, result.stderr
         assert "ud-q4-k-xl--mtp-blockfp8--mmproj-q8/package.json" in result.stdout
         assert "ud-iq4-xs--mtp-blockfp8--mmproj-q8/package.json" not in result.stdout
+
+
+UNCENSORED = ROOT / "profiles/qwen38-flash-next/dual-r9700-mtp4-uncensored/profile.json"
+
+
+def test_uncensored_alias_resolves_to_the_ced_runtime_and_fixed_placement():
+    result = run_cli("show", "qwen38-mtp4-uncensored", "--json")
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["runtime"] == "qwen38-flash-next-gfx1201-mtp4-v3"
+    assert payload["placement"] == "qwen38-uncensored-iq4-xs-dual-r9700-mtp4-full-mutable"
+    assert payload["features"]["ced"]["default"] == "on"
+
+
+def test_uncensored_fetch_and_verify_select_its_own_package_and_it_never_replans():
+    for command in ("fetch", "verify"):
+        result = run_cli(command, "qwen38-mtp4-uncensored", "--dry-run")
+        assert result.returncode == 0, result.stderr
+        assert "uncensored-iq4-xs--mtp-blockfp8--mmproj-f16/package.json" in result.stdout
+    for command in ("plan", "placement"):
+        result = run_cli(command, "qwen38-mtp4-uncensored", "--dry-run")
+        assert result.returncode != 0
+        assert f"does not provide {command!r}" in result.stderr
+
+
+def test_validate_refuses_a_runtime_with_a_modified_overlay(tmp_path):
+    from tools import r9v
+    source = ROOT / "runtimes/qwen38-flash-next-gfx1201-mtp4-v3"
+    shutil.copytree(source / "overlays", tmp_path / "overlays")
+    shutil.copy(source / "runtime.json", tmp_path / "runtime.json")
+    (tmp_path / "overlays/model.py").write_text("# edited\n")
+    runtime = json.loads((tmp_path / "runtime.json").read_text())
+
+    with pytest.raises(r9v.ProfileError, match="SHA-256 mismatch.*model.py"):
+        r9v._verify_runtime_overlays(tmp_path / "runtime.json", runtime)
+
+
+def test_validate_refuses_a_placement_whose_pinned_manifest_differs():
+    from tools import r9v
+    placement = json.loads(
+        (ROOT / "packages/placements/qwen38-flash-next/uncensored-iq4-xs/dual-r9700/"
+         "mtp4-full-mutable.json").read_text()
+    )
+    placement["manifest"]["sha256"] = "0" * 64
+
+    with pytest.raises(r9v.ProfileError, match="expected 0000"):
+        r9v._verify_pinned_manifest(placement)

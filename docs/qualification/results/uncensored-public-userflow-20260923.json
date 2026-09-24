@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "profile": "qwen38-mtp4-uncensored",
+  "status": "public-first-start-and-restart-passed",
+  "date": "2026-09-23",
+  "source_commit": "34285b201785b12b3b25160096e4617426821eac",
+  "model_package_revision": "b06687cb2f83ea38039cadd249341a7bd5b76fa3",
+  "image_id": "sha256:2dac17a215fb5b0e3461e4c3e36a2981eec8ac3d6021e73183d247e819740c03",
+  "runtime_descriptor_sha256": "de2746726b40af84a297b70bfebb06718e26089ffc34f4ecf62091bfd1f96131",
+  "placement_sha256": "d38c5ff343954f75c1c0e10e82814e20fd59799c9c5885228ee16e317cba5d7f",
+  "context_limit": 131072,
+  "prompt_tokens": 130941,
+  "requested_free_gib_by_rank": [
+    1.5,
+    1.5
+  ],
+  "hot_experts_by_rank": [
+    62,
+    428
+  ],
+  "cache_slots_by_rank": [
+    160,
+    0
+  ],
+  "mtp_depth": 4,
+  "fetch": {
+    "artifacts_verified": 20,
+    "hf_token": false,
+    "passed": true
+  },
+  "setup": {
+    "passed": true,
+    "seconds": 133
+  },
+  "starts": [
+    {
+      "ced": "on",
+      "kind": "first start, cold compile cache",
+      "seconds_to_ready": 337,
+      "qualified": true,
+      "workload": {
+        "passed": true,
+        "context_limit": 131072,
+        "checks": [
+          "text",
+          "tool",
+          "vision",
+          "vision-wide",
+          "vision-tall",
+          "context",
+          "idle_resume"
+        ],
+        "semantic_observations": [],
+        "runtime_failures": [],
+        "minimum_physical_free_bytes": [
+          1901895680,
+          2241363968
+        ],
+        "headroom_passed": true
+      },
+      "receipt_result_sha256": "5b8cb33a103673c115921220db6152844c319b7725bb4f9c206de82b709552e7"
+    },
+    {
+      "ced": "off",
+      "kind": "start after switching CED off",
+      "seconds_to_ready": 374,
+      "qualified": true,
+      "workload": {
+        "passed": true,
+        "context_limit": 131072,
+        "checks": [
+          "text",
+          "tool",
+          "vision",
+          "vision-wide",
+          "vision-tall",
+          "context",
+          "idle_resume"
+        ],
+        "semantic_observations": [],
+        "runtime_failures": [],
+        "minimum_physical_free_bytes": [
+          4105846784,
+          4418240512
+        ],
+        "headroom_passed": true
+      },
+      "receipt_result_sha256": "26a21f2b1be43da0215711106fe7a0f4305319d60a464468cc37dc601f4fd5e8"
+    },
+    {
+      "ced": "off",
+      "kind": "unchanged restart",
+      "seconds_to_ready": 167,
+      "receipt_reused": true
+    }
+  ],
+  "ced_checks": {
+    "projector_loaded_on_both_gpus": true,
+    "prefill": [
+      {
+        "prompt_tokens": 12960,
+        "exact_tail_tokens": 3264,
+        "ced_seconds": [
+          5.26,
+          4.99
+        ],
+        "exact_seconds": [
+          7.56,
+          7.52
+        ],
+        "speedup": 1.472
+      },
+      {
+        "prompt_tokens": 31987,
+        "exact_tail_tokens": 2899,
+        "ced_seconds": [
+          10.11,
+          9.66
+        ],
+        "exact_seconds": [
+          17.88,
+          17.79
+        ],
+        "speedup": 1.804
+      }
+    ],
+    "exact_after_ced_bitwise_equal_to_fresh_exact": true,
+    "ced_off_engaged": false
+  },
+  "determinism": {
+    "ced_on": true,
+    "ced_off": true
+  },
+  "decode_after_start_ms_per_step": {
+    "method": "first 3 greedy 400-token answers after start and qualification, one run each, streamed; wall time between first and last content chunk divided by MTP draft steps",
+    "ced_on": [
+      47.18,
+      48.88,
+      44.78
+    ],
+    "ced_off": [
+      40.52,
+      37.97,
+      39.53
+    ],
+    "note": "The first ~1,200 decode tokens after a fresh start run slower while caches warm up (about 45–49 ms/step with CED on, 38–41 with CED off). Warm decode with CED on measured 34.3 ms/step, matching the deployed service, where loading the projector showed no steady-state decode cost. Warm CED-off decode was not re-measured in the clean install.",
+    "warm_ced_on_rerun": {
+      "ms_per_step": [
+        34.43,
+        34.05,
+        34.76,
+        34.31,
+        34.27,
+        34.29
+      ],
+      "median": 34.3,
+      "method": "same 3 prompts x 2 rounds in the same CED-on container, identical accepted tokens per step",
+      "saved_to_file": false
+    }
+  },
+  "scope": "Reference host (2x Radeon AI PRO R9700, 128 GiB RAM) with its deployed service stopped. Fresh recursive clone, new model, data, cache and state directories, public package downloaded without a Hugging Face token. First start qualified the fixed placement with CED on; switching to --ced off qualified again; an unchanged restart reused its receipt. The launcher at this commit published the API on all interfaces; later v0.4.0 commits publish on 127.0.0.1."
+}

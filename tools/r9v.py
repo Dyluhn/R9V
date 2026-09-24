@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -14,8 +15,10 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 try:
+    from tools import runtime_overlays
     from tools.profile_state import default_state_dir, validate_state_profile
 except ModuleNotFoundError:
+    import runtime_overlays
     from profile_state import default_state_dir, validate_state_profile
 
 PROFILE_SCHEMA = "r9v.profile.v1"
@@ -226,6 +229,10 @@ def verify_profile_graph(profile: Profile) -> list[str]:
             raise ProfileError(f"{profile.path}: placement model package mismatch")
         if selected.get("hardware") != profile.data["hardware"]:
             raise ProfileError(f"{profile.path}: placement hardware mismatch")
+        _verify_pinned_manifest(selected)
+    _verify_runtime_overlays(
+        _path_from_repo(profile.data["descriptors"]["runtime"]), descriptors["runtime"]
+    )
     _validate_commands(profile)
     for name in ("fetch", "verify"):
         command = profile.data.get("commands", {}).get(name, [])
@@ -233,6 +240,36 @@ def verify_profile_graph(profile: Profile) -> list[str]:
             if len(command) < 2 or _path_from_repo(command[1]) != _path_from_repo(profile.data["descriptors"]["model_package"]):
                 raise ProfileError(f"{profile.path}: {name} command selects a different model package")
     return checked
+
+
+def _verify_pinned_manifest(placement: dict[str, Any]) -> None:
+    """A placement that pins its manifest hash must ship exactly that manifest."""
+    manifest = placement.get("manifest", {})
+    expected = manifest.get("sha256") if isinstance(manifest, dict) else None
+    if expected is None:
+        return
+    path = _path_from_repo(str(manifest.get("path", "")))
+    try:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise ProfileError(f"cannot read pinned placement manifest {path}: {error}") from error
+    if actual != expected:
+        raise ProfileError(
+            f"placement manifest {path} has SHA-256 {actual}, expected {expected}"
+        )
+
+
+def _verify_runtime_overlays(path: Path, runtime: dict[str, Any]) -> None:
+    """Every overlay a runtime mounts over its image must match its pinned SHA-256."""
+    overlays = runtime.get("overlays")
+    if overlays is None:
+        return
+    try:
+        problems = runtime_overlays.verify(path, overlays)
+    except (OSError, KeyError, TypeError) as error:
+        problems = [f"cannot read overlays: {error}"]
+    if problems:
+        raise ProfileError(f"{path}: " + "; ".join(problems))
 
 
 def command_environment(profile: Profile, model_dir: str | None) -> dict[str, str]:
@@ -357,7 +394,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog = None
         if action == "setup":
             epilog = ("Profile options forwarded to setup_profile.py:\n"
-                      "  --headroom GiB,GiB       requested free VRAM per card\n"
+                      "  --headroom GiB,GiB       requested free VRAM per card (not on fixed placements)\n"
+                      "  --ced on|off            CED long-prompt prefill, for profiles that ship it\n"
                       "  --reuse-from DIR        reuse verified same-filesystem assets\n"
                       "  --calibration FILE      local memory calibration for placement\n"
                       "  --expert-catalog FILE   measured cold-to-hot expert map\n"
