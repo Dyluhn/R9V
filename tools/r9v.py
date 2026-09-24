@@ -545,8 +545,11 @@ def main(argv: list[str] | None = None) -> int:
 
         profile = resolve_profile(args.profile, profiles)
         verify_profile_graph(profile)
-        if remainder and remainder[0] == "--":
-            remainder = remainder[1:]
+        # Options such as --state-dir may come before the `--` separator
+        # (`soak P --state-dir DIR -- --decode-speed FILE`); drop the separator
+        # wherever it is, or the forwarded tool rejects everything after it.
+        if "--" in remainder:
+            remainder.remove("--")
         return run_profile_command(
             profile,
             args.command,
