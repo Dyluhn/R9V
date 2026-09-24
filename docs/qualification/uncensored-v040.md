@@ -77,6 +77,8 @@ On 2026-09-23, on the reference host with the deployed service stopped, a
 fresh recursive clone at commit `34285b2` ran the public flow with new model,
 data, cache and state directories. The commits after it change only the
 published address (now 127.0.0.1 by default) and documentation.
+Summary with hashes:
+[`results/uncensored-public-userflow-20260923.json`](results/uncensored-public-userflow-20260923.json).
 
 | Check | Result |
 |---|---|
