@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.4.4 (2026-09-24)
+
+### `qwen38-mtp4-uncensored`: `--ced on` shares VRAM with the vision encoder
+
+- The default `--ced on` now keeps the vision encoder's weights (0.42 GiB per
+  GPU) and its bf16 projector (1.76 GiB per GPU) in one VRAM region per GPU,
+  the way `--ced quality` does since v0.4.3. No step uses both: image and
+  video prompts never use CED. Both stay in pinned host RAM and the region is
+  refilled when the other one is needed: the projector before an approximate
+  prefill chunk (35–39 ms on GPU 0, 262 ms on GPU 1), the vision encoder
+  before an image is encoded (8–9 ms / 63 ms). A swap happens only when a CED
+  prompt follows an image or the other way round.
+- Where `on`'s VRAM went: its approximate chunk peaks in the eager head
+  (layers 0–15, 0.84 GiB above the step's start, against 0.62 GiB for a
+  compiled exact chunk), not in the projector math. The bf16 maps are applied
+  in place with no temporaries, so unlike `quality` there were no
+  dequantization buffers to shrink. The saving is the vision encoder's
+  0.42 GiB.
+- Clean-install GPU test on the reference host (fresh clone, setup and first
+  start with `--ced on`, desktop apps holding about 1.2 GiB of GPU 0). Minimum
+  free VRAM during first-start qualification, which includes the
+  130,941-token prompt at the 131,072 context limit:
+
+  | GPU 0 / GPU 1 | v0.4.4 | v0.4.3 |
+  |---|---|---|
+  | `on` (default) | **2.07 / 2.52 GiB** | 1.65 / 2.12 GiB |
+  | `quality` | 2.04 / 2.49 GiB | 2.04 / 2.49 GiB |
+  | `off` | 3.67 / 4.15 GiB | 3.68 / 4.15 GiB |
+
+  The target is 1.5 GiB. In a separate session v0.4.3's `on` file gave
+  1.65 / 2.12 and v0.4.4's 2.06–2.16 / 2.52–2.61.
+- Unchanged: prefill speedup 1.59× at 12,836 tokens and 1.77× at 32,356
+  (v0.4.3: 1.58× / 1.76×); warm decode median 39.1–39.2 ms/step against
+  40.9 for v0.4.3's `on` file in the same session; exact requests after a CED
+  request bitwise identical to fresh exact runs, `r9v_ced: false` and
+  repeated greedy runs identical, nothing compiled after the first CED
+  request. 24 alternating long-CED and image requests (a new image each time)
+  kept VRAM flat (GPU 0 free 2,116 MiB throughout) and read every image; a
+  long CED request with 3 image requests sent during it completed.
+- Outputs: CED's numerics are unchanged. In a development build on the GPU
+  every projector map read back from the region equalled the file after
+  each swap, and every map's product was bitwise the product from a
+  separately allocated copy (v0.4.3's layout), in the same server. The vision
+  encoder's output was bitwise identical to v0.4.3's for 9 images, before and
+  after swaps.
+- RAM: start needs 60.8 GiB available with `--ced on` instead of 56.3 GiB,
+  the same as `quality`: every TP rank keeps pinned copies of the projector
+  and of its share of the vision encoder (4.50 GiB in 64 MiB slabs;
+  measured +4.5 GiB of shared memory). The doctor adds them to the start
+  check for `on` as well and names the mode. `--ced off` still needs
+  56.3 GiB and its launch configuration is byte-identical to v0.4.3's.
+- Upgrading: the runtime descriptor changed, so an existing install qualifies
+  again once on its next start, in any CED mode. An unchanged restart after
+  that reuses the receipt (219 s in the test).
+
 ## v0.4.3 (2026-09-24)
 
 ### `qwen38-mtp4-uncensored`: `--ced quality` now fits next to the vision encoder

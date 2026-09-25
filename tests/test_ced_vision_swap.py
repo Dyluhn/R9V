@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CED quality's shared VRAM region on the CPU: the vision encoder's weights and the CED projector
-take turns in one region, each at fixed addresses, refilled from their host copies on demand.
+"""CED's shared VRAM region on the CPU, in both CED model files (on: model.py, quality:
+model_ced_quality.py): the vision encoder's weights and the CED projector take turns in one
+region, each at fixed addresses, refilled from their host copies on demand.
 
 The overlay imports vLLM, so the pieces under test are taken from its source (ast) and run alone,
 as tests/test_ced_quality_overlay.py does.
@@ -19,18 +20,28 @@ torch = pytest.importorskip("torch")
 from torch import nn  # noqa: E402
 
 RUNTIME = Path(__file__).resolve().parents[1] / "runtimes/qwen38-flash-next-gfx1201-mtp4-v3"
-OVERLAY = RUNTIME / "overlays/model_ced_quality.py"
+OVERLAYS = [RUNTIME / "overlays/model.py", RUNTIME / "overlays/model_ced_quality.py"]
 SCHEDULER = RUNTIME / "overlays/scheduler.py"
 NAMES = {"_SharedVram", "_share_vision"}
 CPU = torch.device("cpu")
 
 
-def overlay() -> dict:
-    tree = ast.parse(OVERLAY.read_text(encoding="utf-8"))
+@pytest.fixture(params=OVERLAYS, ids=lambda path: path.name)
+def overlay_path(request) -> Path:
+    return request.param
+
+
+@pytest.fixture
+def overlay(overlay_path):
+    return lambda: load(overlay_path)
+
+
+def load(path: Path) -> dict:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     nodes = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in NAMES]
     assert {n.name for n in nodes} == NAMES
     namespace = {"torch": torch, "nn": nn, "time": time, "logger": logging.getLogger("test")}
-    exec(compile(ast.Module(nodes, []), str(OVERLAY), "exec"), namespace)
+    exec(compile(ast.Module(nodes, []), str(path), "exec"), namespace)
     return namespace
 
 
@@ -44,13 +55,13 @@ def sets() -> dict:
     }
 
 
-def test_the_region_is_as_large_as_the_largest_set_not_their_sum():
+def test_the_region_is_as_large_as_the_largest_set_not_their_sum(overlay):
     shared = overlay()["_SharedVram"](sets(), CPU)
 
     assert shared.size == 1024 + 256 + 256  # the projector's int8 map, scale and bias, each 256-byte aligned
 
 
-def test_each_set_reads_back_exactly_after_the_other_set_used_the_region():
+def test_each_set_reads_back_exactly_after_the_other_set_used_the_region(overlay):
     host = sets()
     shared = overlay()["_SharedVram"](host, CPU)
 
@@ -62,7 +73,7 @@ def test_each_set_reads_back_exactly_after_the_other_set_used_the_region():
     assert all(torch.equal(v, h) for v, h in zip(projector, host["ced:16"]))
 
 
-def test_a_set_keeps_its_addresses_across_swaps():
+def test_a_set_keeps_its_addresses_across_swaps(overlay):
     shared = overlay()["_SharedVram"](sets(), CPU)
     first = [v.data_ptr() for v in shared.acquire("vision")]
 
@@ -72,7 +83,7 @@ def test_a_set_keeps_its_addresses_across_swaps():
     assert again == first
 
 
-def test_asking_for_the_resident_set_does_not_copy():
+def test_asking_for_the_resident_set_does_not_copy(overlay):
     shared = overlay()["_SharedVram"](sets(), CPU)
     shared.acquire("vision")
     shared.acquire("vision")
@@ -82,7 +93,7 @@ def test_asking_for_the_resident_set_does_not_copy():
     assert shared.swaps == 2
 
 
-def test_the_two_sets_overlap_in_the_region():
+def test_the_two_sets_overlap_in_the_region(overlay):
     shared = overlay()["_SharedVram"](sets(), CPU)
     base = shared.region.data_ptr()
 
@@ -90,7 +101,7 @@ def test_the_two_sets_overlap_in_the_region():
     assert shared.views["ced:16"][0].data_ptr() == base
 
 
-def test_vision_weights_move_into_the_region_and_drop_the_loaders_extra_reference():
+def test_vision_weights_move_into_the_region_and_drop_the_loaders_extra_reference(overlay):
     functions = overlay()
     tower = nn.Linear(5, 3, bias=True).to(torch.bfloat16)
     params = list(tower.parameters())
@@ -108,7 +119,7 @@ def test_vision_weights_move_into_the_region_and_drop_the_loaders_extra_referenc
     assert torch.equal(tower(x), nn.functional.linear(x, expected[0], expected[1]))
 
 
-def test_host_copies_split_across_slabs_read_back_exactly():
+def test_host_copies_split_across_slabs_read_back_exactly(overlay):
     shared_vram = overlay()["_SharedVram"]
     shared_vram.SLAB = 512  # the 1024-byte int8 map spans two slabs
     host = sets()
@@ -120,7 +131,7 @@ def test_host_copies_split_across_slabs_read_back_exactly():
     assert all(torch.equal(v, h) for v, h in zip(projector, host["ced:16"]))
 
 
-def test_host_copies_are_taken_when_the_region_is_made_not_when_a_set_is_acquired():
+def test_host_copies_are_taken_when_the_region_is_made_not_when_a_set_is_acquired(overlay):
     host = sets()
     shared = overlay()["_SharedVram"](host, CPU)
     original = host["vision"][0].clone()
@@ -130,7 +141,7 @@ def test_host_copies_are_taken_when_the_region_is_made_not_when_a_set_is_acquire
     assert torch.equal(shared.acquire("vision")[0], original)
 
 
-def test_without_a_vision_tower_the_region_holds_only_the_projector():
+def test_without_a_vision_tower_the_region_holds_only_the_projector(overlay):
     shared = overlay()["_SharedVram"]({"ced:16": sets()["ced:16"], "vision": []}, CPU)
 
     assert shared.acquire("vision") == []
@@ -148,9 +159,10 @@ def test_an_approximate_step_holds_a_single_request_so_it_never_runs_the_vision_
     assert "if self.ced_policy is None or request.resumable or request.mm_features:" in source
 
 
-def test_the_swap_hooks_sit_on_the_encoder_entry_and_the_approximate_chunk():
-    source = OVERLAY.read_text(encoding="utf-8")
+def test_the_swap_hooks_sit_on_the_encoder_entry_and_the_approximate_chunk(overlay_path):
+    source = overlay_path.read_text(encoding="utf-8")
 
     assert re.search(r"def embed_multimodal\(self.*\n.*if _CED_FILES:.*\n\s+_shared_vram\(\)\.acquire\(\"vision\"\)",
                      source)
-    assert "proj = _ced_projector(pid)" in source
+    assert re.search(r"proj = _ced_projector\((pid|split)\)", source)
+    assert "_VISION[:] = [self.visual]" in source

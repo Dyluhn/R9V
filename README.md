@@ -8,6 +8,8 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 
 **Current status:** both IQ4_XS and Q4_K_XL MTP4 profiles passed ordinary public setup, first-start workload qualification and unchanged-receipt restart on the dual-R9700 reference host. Both profiles remain experimental. Each first start passed all seven checks at 131,072 context, including a 130,941-token prompt, with at least 3 GiB free VRAM per GPU. Setup selects the profile's runtime image bundle, verifies every part and loads the exact image ID. The Q4 profile uses the [v0.2.0-rc2 bundle](https://github.com/Dyluhn/R9V/releases/tag/v0.2.0-rc2-images); the IQ4 profile's WMMA-prefill image (`release/image-bundle-wmma-prefill-20260915.json`) is published under the [`v0.3.0-rc1-images`](https://github.com/Dyluhn/R9V/releases/tag/v0.3.0-rc1-images) release tag. See [release status and evidence](docs/qwen-release-candidate.md).
 
+**New in v0.4.4:** `qwen38-mtp4-uncensored` with the default `--ced on` now shares one VRAM region per GPU between the vision encoder's weights and the CED projector, as `--ced quality` does since v0.4.3. GPU 0 keeps 2.07 GiB free at its minimum in first-start qualification instead of 1.65 (GPU 1: 2.52 instead of 2.12), with the same prefill speedup, decode, outputs and image support. Start now needs 60.8 GiB of available RAM with CED on (56.3 GiB with `--ced off`). See the [changelog](CHANGELOG.md).
+
 **New in v0.4.3:** `qwen38-mtp4-uncensored --ced quality` now passes first-start qualification on the reference host, with image support kept: the vision encoder's weights and the quality projector take turns in one VRAM region per GPU, and the projector's work buffers are smaller. GPU 0 kept 2.04 GiB free (v0.4.2: 0.90, target 1.5), more than `on` (1.65). See the [changelog](CHANGELOG.md).
 
 **New in v0.4.2:** `qwen38-mtp4-uncensored` has an opt-in CED quality mode, `--ced quality`, that gives up less long-context quality for less prefill speedup (it did not fit on the reference host until v0.4.3). Right after a first start, `./r9v doctor --runtime` no longer fails its KV-pressure check because of qualification's own long prompt.
@@ -22,7 +24,7 @@ Each profile binds a model package, runtime, hardware layout and expert placemen
 |---|---|---|---|
 | `qwen38-mtp4` | [IQ4_XS model bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-R9V-IQ4_XS) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
 | `qwen38-q4-xl` | [Q4_K_XL weights](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/tree/2c41bd2a0b3f51c503c11f1c7ed2e6bb34036beb/UD-Q4_K_XL) | MTP4, dual R9700, 128K context | Reference setup/start/restart passed |
-| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime with host expert dedupe: MTP4, dual R9700, 128K context, CED on; needs 56.3 GiB free RAM at start (60.8 GiB with `--ced quality`) | v0.4.1 clean install (fetch, setup, first start CED on/off, restart) passed on the reference host; v0.4.3 clean install with `--ced quality` passed there too (below) |
+| `qwen38-mtp4-uncensored` | [Uncensored IQ4_XS bundle](https://huggingface.co/Dyluhn/Qwen3.8-Flash-Next-Uncensored-R9V-IQ4_XS) (abliterated, **no refusals**) | Consolidated 1.3.0 runtime with host expert dedupe: MTP4, dual R9700, 128K context, CED on; needs 60.8 GiB free RAM at start (56.3 GiB with `--ced off`) | v0.4.1 clean install (fetch, setup, first start CED on/off, restart) passed on the reference host; v0.4.3 (`--ced quality`) and v0.4.4 (`--ced on`) clean installs passed there too (below) |
 
 **About `qwen38-mtp4-uncensored`.** Its model had its refusal behavior removed and will comply with harmful requests the original model refuses. Use it for research, and add your own moderation before exposing it to anyone. R9V serves it on 127.0.0.1 only; setting `R9V_HOST_BIND` to expose it gives anyone who can reach the port an unauthenticated model with no refusals.
 
@@ -31,7 +33,7 @@ It has CED (approximate long-prompt prefill) on by default. On prompts of 8,192 
 - About **1.5× faster prefill** at ~13K tokens, rising to about **1.8×** at 32K tokens and above.
 - About **×1.051 perplexity** on prompts that depend on their long context.
 - About **10% fewer MTP tokens per step** on the first answer after a CED prefill; later turns are normal.
-- The projector takes **1.76 GiB of VRAM per GPU**, so the profile's free-VRAM target is 1.5 GiB per card instead of 3 GiB.
+- The projector takes **1.76 GiB of VRAM per GPU**, so the profile's free-VRAM target is 1.5 GiB per card instead of 3 GiB. Since v0.4.4 it shares that VRAM with the vision encoder's 0.42 GiB (below).
 
 Turn CED off for the server with `--ced off` in setup or start; keep a single request exact with `"vllm_xargs": {"r9v_ced": false}`.
 
@@ -39,12 +41,12 @@ Turn CED off for the server with `--ced off` in setup or start; keep a single re
 
 | `--ced` | Perplexity | Long-context gain lost | Prefill speedup (median) | Projector VRAM per GPU |
 |---|---|---|---|---|
-| `on` (default) | ×1.049 | 17% | 1.68× | 1.76 GiB (bf16) |
+| `on` (default) | ×1.049 | 17% | 1.68× | 1.76 GiB (bf16), shared with the vision encoder's 0.42 GiB |
 | `quality` | ×1.029 | 10% | 1.55× | 1.79 GiB (stored int8), shared with the vision encoder's 0.42 GiB |
 
-The projector math costs 56 ms per 1K approximated tokens instead of 24 ms. Setup downloads the quality projector (1.8 GB) only when you pick it: run `setup --ced quality` once, then `start` keeps the choice. `on` stays the default and is unchanged from v0.4.1.
+The projector math costs 56 ms per 1K approximated tokens instead of 24 ms. Setup downloads the quality projector (1.8 GB) only when you pick it: run `setup --ced quality` once, then `start` keeps the choice. `on` stays the default.
 
-**Tested on the compiled server (v0.4.3).** The quality projector shares one VRAM region per GPU with the vision encoder's weights: image prompts never use CED, so the region holds whichever the next step needs and is refilled from pinned host RAM (36 ms / 9 ms on GPU 0, 266 ms / 63 ms on GPU 1; only when a CED prompt follows an image or the other way round). In the clean-install GPU test, first start with `--ced quality` passed all seven checks with 2.04 / 2.49 GiB free (target 1.5; `on`: 1.65 / 2.12) while desktop apps held 1.23 GiB of GPU 0. Prefill was 1.47× at 12.8K tokens and 1.62× at 32K (`on`: 1.58× and 1.76×), decode unchanged, exact requests bitwise identical after a CED request, no recompiles; 24 alternating CED and image requests kept VRAM flat and read every image. Quality needs 4.50 GiB more free RAM at start (60.8 GiB) for the pinned copies. v0.4.2 did not fit: GPU 0 fell to 0.90 GiB free. See the [changelog](CHANGELOG.md). The profile uses a fixed expert placement, so it does not accept `--headroom`.
+**Tested on the compiled server (v0.4.3, v0.4.4).** The projector shares one VRAM region per GPU with the vision encoder's weights (`quality` since v0.4.3, `on` since v0.4.4): image prompts never use CED, so the region holds whichever the next step needs and is refilled from pinned host RAM (36 ms / 9 ms on GPU 0, 266 ms / 63 ms on GPU 1; only when a CED prompt follows an image or the other way round). In the clean-install GPU test, first start with `--ced quality` passed all seven checks with 2.04 / 2.49 GiB free (target 1.5; `on`: 1.65 / 2.12) while desktop apps held 1.23 GiB of GPU 0. Prefill was 1.47× at 12.8K tokens and 1.62× at 32K (`on`: 1.58× and 1.76×), decode unchanged, exact requests bitwise identical after a CED request, no recompiles; 24 alternating CED and image requests kept VRAM flat and read every image. Quality needs 4.50 GiB more free RAM at start (60.8 GiB) for the pinned copies. v0.4.2 did not fit: GPU 0 fell to 0.90 GiB free. In v0.4.4's clean-install test `on` kept 2.07 / 2.52 GiB free (v0.4.3: 1.65 / 2.12) with prefill 1.59× at 12.8K tokens and 1.77× at 32K, the vision encoder's output bitwise unchanged, and it now needs the same 60.8 GiB of free RAM at start. See the [changelog](CHANGELOG.md). The profile uses a fixed expert placement, so it does not accept `--headroom`.
 
 Use the explicit MTP4 aliases for the current workflow.
 
@@ -71,7 +73,7 @@ The reference system uses:
 
 - Two **32 GiB Radeon AI PRO R9700** cards (`gfx1201`).
 - Linux with working AMD GPU drivers, `amd-smi`, `/dev/kfd` and `/dev/dri` access.
-- **128 GiB host RAM**. Smaller hosts are untested; cold expert allocations use host memory. `qwen38-mtp4-uncensored` checks for **56.3 GiB available** before start (was 71.4 GiB in v0.4.0): its host expert copy is 40.3 GiB plus a 16 GiB PLE reserve.
+- **128 GiB host RAM**. Smaller hosts are untested; cold expert allocations use host memory. `qwen38-mtp4-uncensored` checks for **60.8 GiB available** before start with CED on or quality, 56.3 GiB with `--ced off` (was 71.4 GiB in v0.4.0): its host expert copy is 40.3 GiB plus a 16 GiB PLE reserve, plus 4.50 GiB of pinned copies of the CED projector and the vision encoder.
 - An asymmetric PCIe layout: rank 0 on Gen5 x16 and rank 1 across Gen4 x4. GPU ordering matters to placement and performance.
 - Git, Python 3.10+, Docker and the Hugging Face CLI described in the [installation guide](docs/installation.md).
 

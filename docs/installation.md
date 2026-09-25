@@ -127,9 +127,10 @@ setup, first start and restart passed on the reference host
 It uses its own model package (about 92.4 GiB, including the CED projector),
 the consolidated 1.3.0 runtime with host expert dedupe (the IQ4 profile's image
 plus SHA-256-pinned overlays) and a fixed expert placement. Start needs
-56.3 GiB of RAM available: the host copy of the experts takes 40.3 GiB (rank 1
+60.8 GiB of RAM available: the host copy of the experts takes 40.3 GiB (rank 1
 keeps its 400 most-used experts per layer in VRAM, so the host holds only the
-rest), plus a 16 GiB reserve for the PLE table. Nothing on the host has to be
+rest), plus a 16 GiB reserve for the PLE table, plus 4.50 GiB of pinned copies
+of the CED projector and the vision encoder (56.3 GiB with `--ced off`). Nothing on the host has to be
 changed for it; it runs on stock rootless Docker. Use new model and state
 directories:
 
@@ -181,11 +182,14 @@ requests for prompt logprobs always run exactly.
   int8, in a VRAM region it shares with the vision encoder's weights (image
   prompts never use CED; the region is refilled from RAM when the other is
   needed). Since v0.4.3 it passes first-start qualification on the reference
-  host with 2.04 GiB free on GPU 0 (target 1.5 GiB). Start needs 60.8 GiB of
-  available RAM with it instead of 56.3 GiB. `on` stays the default.
+  host with 2.04 GiB free on GPU 0 (target 1.5 GiB). `on` stays the default.
 
 The projector takes 1.76 GiB of VRAM per GPU, so the profile keeps a 1.5 GiB
-free-VRAM target per card instead of 3 GiB. The expert placement is fixed
+free-VRAM target per card instead of 3 GiB. Since v0.4.4 it shares that VRAM
+with the vision encoder's weights in `on` too (0.42 GiB per GPU; both stay in
+pinned RAM and take turns), so GPU 0 keeps about 0.4 GiB more free: 2.07 GiB
+at its minimum in first-start qualification on the reference host instead of
+1.65. The expert placement is fixed
 because the runtime's mutable expert cache only works with it: `--headroom`,
 `--calibration` and `--expert-catalog` are refused.
 

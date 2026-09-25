@@ -82,8 +82,9 @@ seconds for this profile by default (`--timeout` overrides it):
 ./r9v start qwen38-mtp4-uncensored --state-dir "$STATE_DIR"
 ```
 
-Start needs 56.3 GiB of RAM available (the host copy of the experts is
-40.3 GiB, plus a 16 GiB PLE reserve); if the doctor's `host-memory` check
+Start needs 60.8 GiB of RAM available (the host copy of the experts is
+40.3 GiB, plus a 16 GiB PLE reserve, plus 4.50 GiB of pinned copies of the
+CED projector and the vision encoder; 56.3 GiB with `--ced off`); if the doctor's `host-memory` check
 fails, ask the user to close memory-heavy programs rather than lowering the
 floor. It runs the consolidated 1.3.0 runtime with host expert dedupe and CED
 (approximate long-prompt prefill) on by default: about 1.5x faster prefill at ~13K tokens, rising to
@@ -100,8 +101,8 @@ projector only with `setup --ced quality`; `start --ced quality` before that is
 refused with that instruction. Since v0.4.3 it passes first-start
 qualification on the reference host (GPU 0 kept 2.04 GiB free with a desktop
 session on that card; target 1.5 GiB): its projector and the vision encoder's
-weights take turns in one VRAM region, so images keep working. It needs 60.8
-GiB of available RAM at start instead of 56.3 GiB. The profile uses a fixed expert
+weights take turns in one VRAM region, so images keep working; since v0.4.4
+the default `on` does the same (GPU 0 kept 2.07 GiB free instead of 1.65). The profile uses a fixed expert
 placement: do not pass `--headroom`, `--calibration` or `--expert-catalog`;
 they are refused. Its v0.4.0 public setup, first start and restart passed on
 the reference host; see
