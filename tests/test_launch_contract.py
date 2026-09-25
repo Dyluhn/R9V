@@ -336,9 +336,12 @@ def test_release_pins_equal_the_deployed_overlays_placement_and_projector():
     manifest = ROOT / placement["manifest"]["path"]
     projector = next(a for a in package["artifacts"] if a["role"] == "ced-projector")
 
-    quality_only = {"model_ced_quality.py"}  # CED quality's model file, mounted only with --ced quality
+    # The CED model files: quality's is mounted only with --ced quality, and --ced on's gained the
+    # shared VRAM region with the vision encoder in v0.4.4 (GPU-tested against this deployment's).
+    ced_model_files = {"model_ced_quality.py", "model.py"}
     assert {name: digest for name, digest in runtime["overlays"]["sha256"].items()
-            if name not in quality_only} == DEPLOYED["overlay_sha256"]
+            if name not in ced_model_files} == {name: digest for name, digest in DEPLOYED["overlay_sha256"].items()
+                                                if name not in ced_model_files}
     assert runtime["image_id"] == DEPLOYED["image"]
     assert placement["manifest"]["sha256"] == DEPLOYED["placement_sha256"]
     assert hashlib.sha256(manifest.read_bytes()).hexdigest() == DEPLOYED["placement_sha256"]
