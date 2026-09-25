@@ -70,22 +70,27 @@ quantized it at load. For the shipped int8 file, every tensor the new
 99 checked on the CPU in the pinned image). `tests/test_ced_quality_overlay.py`
 checks the same on a small projector.
 
-Its other differences from `model.py`:
+Both CED model files keep the vision encoder's weights and the projector in
+one shared VRAM region per GPU (`quality` since v0.4.3, `on` since v0.4.4):
 
-- **Shared VRAM region (v0.4.3).** The vision encoder's weights (0.42 GiB per
-  GPU, TP-sharded) and the projector (1.79 GiB) take turns in one VRAM region
-  per GPU, sized for the larger. No step needs both: image and video prompts
-  never get a CED plan, and a step is approximate only when it holds a single
-  request. Both sets stay in pinned host RAM; `embed_multimodal` and the
-  approximate chunk make theirs resident on demand (copied in only, the
-  weights never change). Every tensor is a fixed view into the region, so its
-  address is the same each time; the encoder and the approximate chunk run
-  eagerly. All TP ranks see the same encoder calls and chunks and swap in the
-  same step; a swap synchronizes the device before and after and is logged
-  (`CED/vision shared VRAM swap N on cuda:R: A -> B, … in … ms`). The region is
-  set up at vLLM's encoder profiling during startup, after the weights are
-  final, and the projector loads then instead of in `load_weights`.
-  `tests/test_ced_vision_swap.py` checks the region on the CPU.
+- **Shared VRAM region.** The vision encoder's weights (0.42 GiB per GPU,
+  TP-sharded) and the projector (1.76 GiB bf16 for `on`, 1.79 GiB int8 for
+  `quality`) take turns in one VRAM region per GPU, sized for the larger. No
+  step needs both: image and video prompts never get a CED plan, and a step is
+  approximate only when it holds a single request. Both sets stay in pinned
+  host RAM; `embed_multimodal` and the approximate chunk make theirs resident
+  on demand (copied in only, the weights never change). Every tensor is a
+  fixed view into the region, so its address is the same each time; the
+  encoder and the approximate chunk run eagerly. All TP ranks see the same
+  encoder calls and chunks and swap in the same step; a swap synchronizes the
+  device before and after and is logged (`CED/vision shared VRAM swap N on
+  cuda:R: A -> B, … in … ms`). The region is set up at vLLM's encoder
+  profiling during startup, after the weights are final, and the projector
+  loads then instead of in `load_weights`. The region code is the same in both files;
+  `tests/test_ced_vision_swap.py` checks the region in both on the CPU.
+
+`model_ced_quality.py`'s other differences from `model.py`:
+
 - **Dequantization in blocks (v0.4.3).** int8 maps are dequantized at most
   2,560 rows at a time, in place: one late layer's map is one block, so the
   KV and GDN state CED writes is bitwise what the graded file wrote; "final"
@@ -100,6 +105,17 @@ qualification went from 0.84–0.90 / 1.71–1.77 GiB (v0.4.2, fails the 1.5 GiB
 target) to 2.04 / 2.49 GiB. The region alone gave 1.25 / 1.67 GiB; the rest
 came from the smaller dequantization buffers, which also stop leaving 400 MiB
 cached blocks behind.
+
+With `--ced on` (v0.4.4, same host and conditions) the region took the
+minimum free VRAM in first-start qualification from 1.65 / 2.12 GiB to
+2.07 / 2.52 GiB. `on` has no dequantization buffers: its bf16 maps are
+applied in place. Its approximate chunk peaks in the eager head (layers
+0–15, 0.84 GiB above the step's start, against 0.62 GiB for a compiled exact
+chunk), not in the projector math. In a development build on the GPU, every
+map read back from the region equalled the file after each swap, every map's
+product was bitwise the product from a separately allocated copy (v0.4.3's
+layout), and the encoder's outputs hashed identically to v0.4.3 for 9 images
+across 12 swaps.
 
 ## Differences from the 1.3.0 package
 
